@@ -86,6 +86,14 @@ pub struct Collector {
     external_gpu_compute: BTreeMap<String, BTreeMap<u32, u64>>,
     /// External processes listed for memory peaks, by PID and start time.
     tracked_external: BTreeSet<(u32, u64)>,
+    /// Diagnostic only: the process scan runs once every this many samples, its last result
+    /// carried between, from `CEDEGRID_DIAGNOSTIC_PROCESS_SCAN_EVERY`; 1 scans every sample.
+    scan_every: u64,
+    scan_round: u64,
+    last_scan: Option<(
+        Vec<PrincipalUsage>,
+        Vec<crate::model::ExternalProcessMemory>,
+    )>,
 }
 
 /// One visible process as principal aggregation sees it.
@@ -292,6 +300,16 @@ pub(crate) fn in_broker_unit(cgroup: &str, uid: u32) -> bool {
             path.split('/')
                 .any(|part| units.iter().any(|unit| part == unit))
         })
+}
+
+/// How often a gate's diagnostic runs the process scan: a whole number from 2 to 64 in
+/// `CEDEGRID_DIAGNOSTIC_PROCESS_SCAN_EVERY`, else every sample. Not an operator setting: it
+/// carries stale principals between scans and exists only to measure the scan's cost (006).
+fn diagnostic_scan_every(value: Option<&str>) -> u64 {
+    value
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|every| (2..=64).contains(every))
+        .unwrap_or(1)
 }
 
 /// Below this, an account's System mode unit is not counted as running work on the CPU.
@@ -529,6 +547,13 @@ impl Collector {
             external_gpu_memory: BTreeMap::new(),
             external_gpu_compute: BTreeMap::new(),
             tracked_external: BTreeSet::new(),
+            scan_every: diagnostic_scan_every(
+                std::env::var("CEDEGRID_DIAGNOSTIC_PROCESS_SCAN_EVERY")
+                    .ok()
+                    .as_deref(),
+            ),
+            scan_round: 0,
+            last_scan: None,
         })
     }
 
@@ -775,7 +800,17 @@ impl Collector {
         charge(&mut cost, "host");
         let (gpu_inventory, gpus) = self.sample_gpus(&mut capabilities, observed_at_unix_ms);
         charge(&mut cost, "gpus");
-        let (principals, external_processes) = match self.sample_principals() {
+        // A gate's diagnostic may skip scans and carry the last one; nothing else sets it.
+        let round = self.scan_round;
+        self.scan_round = round.wrapping_add(1);
+        let scanned = match &self.last_scan {
+            Some(last) if !round.is_multiple_of(self.scan_every) => Some(last.clone()),
+            _ => self.sample_principals(),
+        };
+        if self.scan_every > 1 {
+            self.last_scan.clone_from(&scanned);
+        }
+        let (principals, external_processes) = match scanned {
             Some((principals, external)) => (Some(principals), Some(external)),
             None => (None, None),
         };
@@ -4912,6 +4947,18 @@ mod tests {
         );
         child.kill().unwrap();
         child.wait().unwrap();
+    }
+
+    /// The diagnostic scan cadence is off unless a whole number from 2 to 64 is set.
+    #[test]
+    fn the_diagnostic_scan_cadence_is_off_unless_set() {
+        assert_eq!(diagnostic_scan_every(None), 1);
+        assert_eq!(diagnostic_scan_every(Some("")), 1);
+        assert_eq!(diagnostic_scan_every(Some("1")), 1);
+        assert_eq!(diagnostic_scan_every(Some("0")), 1);
+        assert_eq!(diagnostic_scan_every(Some("65")), 1);
+        assert_eq!(diagnostic_scan_every(Some("x")), 1);
+        assert_eq!(diagnostic_scan_every(Some("8")), 8);
     }
 
     /// 006 FR-028: each account's System mode unit work is read from the cgroup tree, in the

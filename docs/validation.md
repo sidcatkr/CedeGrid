@@ -374,6 +374,81 @@ deployment's GPU scale-up cooldown, which the harness now leaves at CedeGrid's d
 | CedeGrid against CedeGrid, own work first: two own GPU tasks, then the second account's one task 20 s later through its own CedeGrid or by hand | SC-003 | `05d5c04` | 2026-11-18 | own work 142,739–146,355 multiplies beside the second account's CedeGrid against 141,421–142,298 beside its task by hand; its one task fit its fair share and started, 61,697–62,246 against 63,669–63,781 | pass, by a small margin: one later task is within the hold |
 | Steps on running own work over all runs above | SC-002 | `f13b429`, `05d5c04` | 2026-11-18 | no cap, pause or drain fell on own work in any run | pass |
 
+### Reruns after the start and handoff work
+
+The rows above left own work short of plain by the seconds it took to start and to react. Placement
+waited for the agent's next heartbeat, every 2 s; the heartbeat now comes early when room opens
+(`3c4e6ce`), and an agent with room keeps a request open at the coordinator, which answers it when a
+task is queued (`await_work/1`, `84e1c8e`). The reruns also found where the new speed broke
+things, each fixed before the rows below:
+
+- placed tasks that had not started yet were cancelled, and later refused authorization, after
+  the first task started (001's `e5781d6`, `d2084b4`);
+- the beside-plain flag rose 9–17 s late (001's `80a8c26`);
+- an exited task held its worker place until its release was reported, and the agent counted
+  launches still preparing twice (`e1c5236`, `941b45d`);
+- a launch's spool walk failed on a file removed under it, which lost one task in 48 (`7574247`).
+
+The harness now also measures CedeGrid's own CPU on the scope, the agent and its supervisors,
+which SC-001 allows for (`2bc648f`). The rows below are from `87dad30`, three runs each, on
+2026-11-19.
+
+| Run | Requirement | Result | Verdict |
+|---|---|---|---|
+| Own work first on CPU, the second account arriving 20 s later | SC-001 | first task running at 0.6–0.9 s; all eight 1.4–1.9 s after the second account arrived; own work 1,390,033–1,400,207 units against 1,429,513–1,451,162 by hand (−2.0%, −3.9%, −4.1%). Own CPU with CedeGrid's own 35–37 m: 3,989–4,029 m against 4,023–4,082 m (+0.1%, −2.0%, −2.0%) | fail by 2% in two runs: the start, 1% of the window, and 1% less work per CPU-second than by hand |
+| F2c on CPU | SC-001 | all eight at 4.8–5.1 s; own work 876,389–891,940 units against 886,014–931,917 by hand (−1.5%, +0.1%, −6.0%); with CedeGrid's own 26 m, +0.2%, +2.0%, −3.2%. The second account's rate moves between steady levels of about 4,100, 4,500 and 4,800 per second in both arms, by where the kernel places eight own threads beside its two pinned ones, so single runs spread by ±4% | pass in two runs; the third within the host's spread |
+| F2c on GPU compute | SC-001 | own work 90,105–90,600 multiplies against 93,023–93,081 by hand (−2.6% to −3.2%); the second account at 788 per second either way | fail by 3%: the second own task is placed 3.2–3.5 s after the first, one new GPU task per device per placement pass |
+| Own work first on GPU compute | SC-001 | own work 145,036–145,538 multiplies against 149,183–149,339 by hand (−2.6% to −2.9%) | fail by 3%, for the same reason |
+| Fill: eight own tasks of 500 m on an idle scope | SC-002 | all eight at 0.6 s and 0.3 s; in one run five at once, the sixth at 11 s and the last two at 30 s, as own usage above the requests still counted against admission | fail in one run of three |
+| Steps on running own work over all runs above | SC-002 | no cap, pause or drain fell on own work in any run | pass |
+
+### Reruns at `6edf7b2`, `568f9e0`, `9032af2`, `2c32860` and `66a5f31`
+
+Five more series ran on 2026-11-19, three runs each per arm, interleaved. `6edf7b2` added 001's
+plain-admission flag for the agent's bounds and GPU placement by memory where admission is plain,
+and skipped NVML on nodes without a GPU in scope, which brought CedeGrid's own CPU on the CPU
+shapes from 26–37 m to 10–15 m. `568f9e0` admitted one own task beyond the scope where admission
+is plain (001's `e9fa4c8` and the agent's bound). `9032af2` reverted that, woke the agent on a
+launch reaching its barrier and on a task's end, started the whole batch at once beside a
+whole-CPU plain user (001's `fe5e8e2`), and authorized a placed GPU task whose device was held
+only by its own count (`3e167c5`).
+
+Up to `9032af2` the plain arm started each task from the harness, which runs outside the scope,
+and moved it in with `sched_setaffinity`, so the kernel spread the tasks over the scope's CPUs,
+the second account's included. From `2c32860` it starts them from one launcher already on the
+scope, as a shell or `taskset` there would, where each task forks in place as CedeGrid's do. The
+rows name the commit, so the old and new plain arms stay apart.
+
+The Performance arm moved little between series on CPU; the plain arm moved more: F2c by hand
+gave 861,000–983,000 units across the day, against 869,000–903,000 under CedeGrid. A sampler of
+each thread's CPU every 0.5 s (two F2c pairs at `568f9e0`) showed the split follows how many own
+threads the kernel puts on the second account's two CPUs: 2.02 and 2.06 by hand gave 2,360 m and
+2,375 m, 2.81 and 2.44 under CedeGrid gave 2,414 m and 2,383 m, and in that pair CedeGrid was
+ahead (+3.0%, +1.2%). Cgroup, nice, affinity, scheduling class and autogroup were the same in both
+arms.
+
+| Run | Requirement | Commit | Result | Verdict |
+|---|---|---|---|---|
+| Batch: sixteen own tasks of 1000 m on an idle scope | SC-004 | `6edf7b2` | mean 39.0–39.6 s against 58.2–58.7 s by hand (−33%); total 62.8–65.0 s against 58.8–58.9 s (+7% to +10%) | mean: pass; total: fail |
+| The same with one own task beyond the scope | SC-004 | `568f9e0` | mean 39.1–39.5 s (−33%); total 66.6–67.9 s (+13% to +15%): identical tasks at five at once end in waves, and the sixteenth ran alone for 15 s | fail; reverted |
+| The same with the agent's wakes | SC-004 | `9032af2` | mean 38.2–38.7 s against 58.4–58.7 s (−34%); total 61.3, 61.4 and 62.1 s against 58.7–58.8 s (+4.4%, +4.5%, +5.8%); handoffs 0.4–0.6 s, from 0.8 s | mean: pass; total: pass in two runs of three |
+| Fill: eight own tasks of 500 m on an idle scope | SC-002 | `6edf7b2`, `568f9e0` | all eight at 0.6–1.0 s in five runs; in one run at `568f9e0`, one task for 3 s, then all eight | pass in five of six |
+| F2c on CPU | SC-001 | `6edf7b2` | own 869,209–897,820 units against 915,930–982,861 by hand (−4.3%, −5.1%, −8.7%) | fail |
+| F2c on CPU | SC-001 | `9032af2` | all eight at once; own 890,120–902,594 against 894,654–931,714 (+0.6%, −4.5%, −3.0%); the second account 4,532–4,606 per second against 4,514–4,872 | fail in two runs |
+| Own work first on CPU | SC-001 | `6edf7b2` | own 1,357,094–1,400,539 against 1,448,889–1,500,203 (−3.9% to −6.9%) | fail |
+| Own work first on CPU | SC-001 | `9032af2` | own 1,401,574–1,405,907 against 1,443,404–1,504,037 (−2.8%, −4.0%, −6.5%); four tasks on the idle scope where by hand runs eight, all eight once the second account arrives | fail |
+| F2c on GPU compute | SC-001 | `6edf7b2` | own 90,846–91,663 multiplies against 92,973–93,191 (−1.6% to −2.3%); the second account at 788 per second either way | fail by 2% |
+| Own work first on GPU compute | SC-001 | `6edf7b2` | own 142,066–143,282 against 149,121–149,425 (−3.9% to −4.9%) | fail |
+| More GPU tasks than VRAM | SC-005 | `568f9e0` | CedeGrid ran all six, three at a time; by hand three of six failed to allocate in every run | pass |
+| CedeGrid against CedeGrid, the second account first, own work in Performance | SC-003 | `568f9e0` | own work started nothing in 60 s: the placed task's own count held GPU compute, and its first authorization was refused until the lease ran out | fail; fixed in `3e167c5` |
+| The same | SC-003 | `9032af2` | own work held to one task, 68,893–69,263 multiplies; the first-comer 145,897–146,319 against 121,561–122,863 beside the same work by hand | pass |
+| The same with admit immediately | SC-003 | `9032af2` | own work started nothing: while the placed task held the device, the admit immediately budget left the device out, and the authorization against it was refused | fail; fixed in 001's `5382bf9`, rerun pending |
+| CedeGrid against CedeGrid, own work first | SC-003 | `9032af2` | own 143,263–144,095 beside the second account's CedeGrid against 143,512–144,088 beside its task by hand; its task 62,931–63,036 against 63,764–63,845 | pass |
+| F2c on CPU, plain arm forked on the scope | SC-001 | `2c32860` | own 894,837–921,870 against 914,583–936,747 (−4.5%, −1.0%, −1.8%); own CPU 2,473–2,532 m against 2,478–2,542 m, about equal; 1.2% to 1.8% less work per CPU-second | fail |
+| Own work first on CPU, plain arm forked on the scope | SC-001 | `2c32860` | own 1,401,267–1,416,316 against 1,447,394–1,471,538 (−4.7%, −2.1%, −3.6%) | fail |
+| Diagnostic: F2c with the agent moved off the scope once its eight tasks ran, beside the same arms | SC-001 | `66a5f31` | by hand 910,059–933,078 units at 368.6–369.1 per CPU-millisecond; under CedeGrid with the agent on the scope 858,713–901,945 (−0.9% to −8.0%) at 362.0–364.7; with the agent off it 913,730–917,708 (+0.4%, −1.6%, +0.8%) at 368.1–368.6. The agent's own CPU was 9–12 m either way | diagnostic: the agent's presence on the tasks' CPUs costs 1% to 2% of their work per CPU-second |
+| Steps on running own work over all runs above | SC-002 | all five | no cap, pause or drain fell on own work | pass |
+
 ## Rules for validation runs
 
 - Report these statuses separately:
@@ -400,6 +475,11 @@ deployment's GPU scale-up cooldown, which the harness now leaves at CedeGrid's d
   - node rejoin ≤ 90 s
 - Report detection, drain, termination and release separately. Insufficient samples are
   inconclusive. Higher CPU utilization alone is not a speedup.
+- Diagnostic arms are labeled as such and are never a gate's result. `tools/aggressive_gates.py`
+  offers `--agent-outside`, `--monitor-ms` and `--diagnostic-scan-every`; the last sets
+  `CEDEGRID_DIAGNOSTIC_PROCESS_SCAN_EVERY` for the agent, which then scans processes once every
+  that many intervals and carries stale principals between scans. It is not an operator setting
+  and has no effect unless set.
 - Every run manifest records:
   - the exact source and environment
   - seeds and worker counts
