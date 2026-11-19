@@ -8,8 +8,8 @@ Its core purpose is that own work runs at the highest possible performance, effi
 nothing left idle on the server. The modes set how much own work gives back to others:
 Performance, the default, carries this purpose, and Yield First is one option among them.
 What CedeGrid costs anyone, own work or another workload, is measured against the same own work
-run without CedeGrid. Performance never does worse for own work than that baseline, and is built
-to do better.
+run without CedeGrid. Performance, the default, MUST do better for own work than that baseline,
+and never worse.
 
 ## Core Principles
 
@@ -140,7 +140,9 @@ never let CedeGrid act on a process it does not own.
   Performance and Aggressive MUST NOT cost own work anything compared with the baseline beyond
   CedeGrid's measured own overhead, at admission or while running, except the hold beside a
   CedeGrid principal that arrived first; that hold keeps the documented admission margin
-  (Performance 2%, Aggressive 0%). The work-conserving rule below holds in every mode.
+  (Performance 2%, Aggressive 0%). Beyond that floor, Performance, the default, MUST do
+  measurably better for own work than the baseline; each feature's gates measure the gain
+  against the same work started by hand. The work-conserving rule below holds in every mode.
 - **Admit immediately, an admission option.** A per-run option for Performance and Aggressive
   work. It lifts the admission hold beside a CedeGrid principal that arrived first and runs only
   Yield First or Neutral work on the resource; beside one that runs Performance or Aggressive
@@ -190,8 +192,8 @@ never let CedeGrid act on a process it does not own.
   since that cost falls only on own work.
 
 Rationale: running CedeGrid must never make another workload worse off than the same own work
-run without CedeGrid would, and Performance, the default, must never make own work worse off
-than plain Linux. Performance therefore starts work as plain Linux would, gives back nothing the
+run without CedeGrid would, and Performance, the default, must leave own work better off than
+plain Linux, and never worse. Performance therefore starts work as plain Linux would, gives back nothing the
 kernel and the driver would not, and protects own work as much as anyone's: dying first because
 of someone else's growth is a design error. Between CedeGrid users the one who arrived first
 keeps its fair share, so two of them never fight over admission. CedeGrid never fills the
@@ -370,4 +372,4 @@ These existing constraints apply to every feature.
 - Every pull request review checks the change against Principles I–VIII and the constraints
   above. A deviation is documented with its justification, or rejected.
 
-**Version**: 9.0.0 | **Ratified**: 2026-10-24 | **Last Amended**: 2026-11-18
+**Version**: 9.1.0 | **Ratified**: 2026-10-24 | **Last Amended**: 2026-11-19

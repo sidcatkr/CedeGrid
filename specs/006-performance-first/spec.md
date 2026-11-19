@@ -7,8 +7,8 @@ independent of the branch.
 
 **Status**: Draft
 
-**Input**: Maintainer decisions of 2026-11-18. Performance, the default mode, must never do worse
-for own work than the same work started on plain Linux, and must measurably do better. Between
+**Input**: Maintainer decisions of 2026-11-18 and 2026-11-19. Performance, the default mode, must
+measurably do better for own work than the same work started on plain Linux, and never worse. Between
 CedeGrid users, the one that arrived first keeps its fair share. An opt-in "admit immediately"
 lifts that hold only beside a first-comer that chose to yield, and a separate opt-in at the
 highest warning level raises own work's CPU share above other users' where the host provides a
@@ -27,7 +27,7 @@ Arrival order, Admission, Admit immediately and Unprotected rules, and Principle
 
 - Q: Must Performance ever do worse than plain Linux for own work? → A: No. Yield First and
   Neutral may do worse and yield more; Performance, by its name, must never fall behind plain
-  Linux and should beat it.
+  Linux and must beat it.
 - Q: When own work was there first and another user arrives? → A: Performance never steps
   aside, and keeps starting new work as plain Linux would.
 - Q: When own work arrives after another user? → A: beside a user who does not run CedeGrid,
@@ -45,6 +45,12 @@ Arrival order, Admission, Admit immediately and Unprotected rules, and Principle
 - Q: Is 004's unprotected Aggressive kept? → A: its consent path is kept for the priority
   option, renamed unprotected; its admission effect is now Performance's default beside plain
   users and admit immediately's beside CedeGrid users.
+
+### Session 2026-11-19
+
+- Q: Is matching plain Linux enough for Performance in the default mode? → A: No. The goal is a
+  measurable gain over plain Linux in the default mode, not only no loss; a result within the
+  run-to-run spread does not yet meet it.
 
 ## Terms
 
