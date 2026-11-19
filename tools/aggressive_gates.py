@@ -375,6 +375,24 @@ def peer_role(a):
         print(json.dumps({k: report.get(k) for k in ('role', 'arm', 'mode', 'status', 'units', 'error')}))
 
 
+# The plain arm's launcher: it moves itself onto the scope, then starts every task, so each one
+# forks there as from a user's shell on the scope and the kernel places it as it places
+# CedeGrid's tasks. Moving each task in from outside instead spread them over the scope's CPUs.
+PLAIN_LAUNCHER = r'''
+import json, os, subprocess, sys
+os.sched_setaffinity(0, json.loads(sys.argv[1]))
+children = [subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL) for argv in json.loads(sys.argv[2])]
+for child in children:
+    child.wait()
+'''
+
+
+def plain_launcher(python, cpus, argvs):
+    """The argv of one launcher that starts `argvs` from the scope `cpus`."""
+    return [python, '-c', PLAIN_LAUNCHER, json.dumps(list(cpus)), json.dumps(argvs)]
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--role', choices=['own', 'peer'], default='own')
@@ -499,12 +517,12 @@ def main():
                 cluster.client.submit(task_id, cluster.run_id, [task])
                 cluster.jobs.append(task_id)
         elif a.arm == 'plain':
-            # The baseline: the same work started by hand where CedeGrid would run it.
-            for path in paths:
-                child = subprocess.Popen(argv(path), cwd=str(repo), stdin=subprocess.DEVNULL,
-                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                os.sched_setaffinity(child.pid, cpus)
-                plain.append(child)
+            # The baseline: the same work started by hand where CedeGrid would run it, from a
+            # process already on the scope. Its own session, so cleanup reaches every task.
+            plain.append(subprocess.Popen(
+                plain_launcher(a.python, cpus, [argv(path) for path in paths]), cwd=str(repo),
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True))
         samples = []
         # CedeGrid's own CPU on the scope, the overhead SC-001 allows for.
         coordinator = {cluster.services['coordinator'].child.pid} if cluster else set()
@@ -522,7 +540,7 @@ def main():
                 service = [{**service[0], **{k: max(v, service[0].get(k, 0)) for k, v in
                                              service_ticks(cluster.binary, coordinator).items()}}]
             elif plain:
-                samples.append([round(time.time() - submitted, 2), len(plain), running])
+                samples.append([round(time.time() - submitted, 2), len(paths), running])
             if a.shape in FIXED_SHAPES and all(ended(p) for p in paths):
                 break
             time.sleep(.25)
@@ -569,8 +587,12 @@ def main():
         if cluster is not None:
             report['cluster_cleanup'] = cluster.stop()
         for child in plain:
+            # The launcher's session holds only it and the tasks it started.
             if child.poll() is None:
-                child.kill()
+                try:
+                    os.killpg(child.pid, 9)
+                except ProcessLookupError:
+                    pass
             child.wait()
         atomic_json(out / 'report.json', report)
         print(json.dumps({k: report.get(k) for k in ('shape', 'arm', 'status', 'own', 'admitted_at', 'error')}))

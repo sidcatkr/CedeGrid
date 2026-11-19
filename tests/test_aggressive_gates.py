@@ -81,6 +81,26 @@ class EndedTest(unittest.TestCase):
             self.assertTrue(gates.ended(path))
 
 
+class PlainLauncherTest(unittest.TestCase):
+    """The plain arm starts its tasks from one process already on the scope, as a user's shell or
+    taskset there would, so the kernel places them as it places CedeGrid's forked tasks."""
+
+    def test_the_launcher_moves_itself_then_starts_every_task(self):
+        argv = gates.plain_launcher('/usr/bin/python3', [0, 2], [['a', '1'], ['b', '2']])
+        self.assertEqual(argv[:2], ['/usr/bin/python3', '-c'])
+        self.assertEqual(argv[3:], ['[0, 2]', '[["a", "1"], ["b", "2"]]'])
+
+    @unittest.skipUnless(hasattr(__import__('os'), 'sched_setaffinity'), 'Linux only')
+    def test_tasks_inherit_the_scope(self):
+        import os, tempfile
+        cpus = sorted(os.sched_getaffinity(0))[:1]
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / 'aff'
+            task = [sys.executable, '-c', f'import os; open({str(out)!r}, "w").write(str(sorted(os.sched_getaffinity(0))))']
+            subprocess.run(gates.plain_launcher(sys.executable, cpus, [task]), check=True, timeout=30)
+            self.assertEqual(out.read_text(), str(cpus))
+
+
 class ArgumentsTest(unittest.TestCase):
     def test_fill_runs_only_the_two_modes(self):
         for arm in ('alone', 'plain', 'unprotected'):
