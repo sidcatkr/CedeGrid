@@ -2108,6 +2108,24 @@ impl AgentLoop<'_> {
             next_control_due(&mut self.last_heartbeat, interval)
         };
         self.heartbeat_prompt = false;
+        // Qualification runs trace what each heartbeat offered the coordinator (SC-004).
+        let trace = (std::env::var_os("CEDEGRID_RPC_EVIDENCE").as_deref()
+            == Some(std::ffi::OsStr::new("1")))
+        .then(|| {
+            serde_json::json!({
+                "event": "heartbeat_trace",
+                "observed_at_unix_ms": report.observed_at_unix_ms,
+                "prompt": prompt,
+                "launch_slots": report.launch_slots,
+                "running": running_workers,
+                "preparations": self.preparations.len(),
+                "admitted": self.admitted_parallelism,
+                "may_grow": may_grow,
+                "cpu_headroom": decision.admission_headroom.cpu_millicores,
+                "released": report.allocations.iter().filter(|a| a.phase == RemotePhase::Released).count(),
+                "allocations": report.allocations.len(),
+            })
+        });
         match bounded(
             self.rpc_budget,
             self.client
@@ -2116,6 +2134,10 @@ impl AgentLoop<'_> {
         .await
         {
             Ok(Response::Heartbeat { reply }) => {
+                if let Some(mut trace) = trace {
+                    trace["offers"] = reply.assignments.len().into();
+                    emit(&trace)?;
+                }
                 self.negotiated.learn(&reply);
                 self.work.enabled.store(
                     self.negotiated.await_work,
