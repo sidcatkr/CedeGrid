@@ -402,6 +402,24 @@ pub(super) async fn start_assignment(
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
+    // The agent may run off its tasks' CPUs; the supervisor starts on them, and narrows and
+    // reads back its own affinity there as before (006 SC-001).
+    #[cfg(target_os = "linux")]
+    if let Some(cpus) = &agent.cpu_affinity {
+        use std::os::unix::process::CommandExt;
+        let set = crate::supervision::cpu_set_of(cpus)?;
+        // SAFETY: the closure makes one async-signal-safe system call on a set built before the
+        // fork.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::sched_setaffinity(0, std::mem::size_of_val(&set), &set) == 0 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            });
+        }
+    }
     let mut child = command.spawn()?;
     let stderr = child.stderr.take().context("supervisor stderr absent")?;
     let stderr_path = output.join("supervisor.stderr");

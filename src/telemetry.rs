@@ -693,6 +693,12 @@ impl Collector {
         self.gpus_in_scope = in_scope;
     }
 
+    /// Observes the tasks' CPUs `cpus` rather than this process's own affinity, for an agent
+    /// that runs off its tasks' CPUs (006 SC-001).
+    pub fn set_cpu_scope(&mut self, cpus: Option<Vec<u32>>) {
+        self.kernel.set_cpu_scope(cpus);
+    }
+
     /// The last sample's own CPU by part, in nanoseconds of this thread's CPU time: host CPU
     /// and memory, GPUs, the process table, and kernel readings (SC-014).
     pub fn last_sample_cost(&self) -> &BTreeMap<&'static str, u64> {
