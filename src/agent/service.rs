@@ -256,6 +256,11 @@ pub(super) fn heartbeat_due(since_last: Duration, interval: Duration, prompt: bo
     since_last >= interval || (prompt && since_last >= PROMPT_HEARTBEAT_GAP)
 }
 
+/// Whether admission reopened this interval after a hold (006 SC-004).
+pub(super) fn admission_reopened(was_open: bool, open: bool) -> bool {
+    open && !was_open
+}
+
 /// Whether this interval opened room for new work: a plain user started to compete for the
 /// CPU, so Performance starts more (FR-007a), or the CPU headroom grew by half a core or more.
 pub(super) fn room_opened(
@@ -514,6 +519,8 @@ struct AgentLoop<'a> {
     heartbeat_prompt: bool,
     /// Last interval's CPU headroom and whether a plain user competed, for `room_opened`.
     last_room: (u64, bool),
+    /// Whether admission was open at the last interval, for `admission_reopened`.
+    last_open: bool,
     /// Shared with the wait for work, which brings the next heartbeat forward (006 SC-001).
     work: std::sync::Arc<WorkWatch>,
     /// Signalled when a launch finishes preparing, so its authorization is asked at once.
@@ -1910,6 +1917,11 @@ impl AgentLoop<'_> {
             self.heartbeat_prompt = true;
         }
         self.last_room = room;
+        let open = decision.expansion_allowed || decision.cpu_ram_expansion_allowed;
+        if admission_reopened(self.last_open, open) {
+            self.heartbeat_prompt = true;
+        }
+        self.last_open = open;
         // Work queued at the coordinator while the node had room: take it now.
         let ordering = std::sync::atomic::Ordering::SeqCst;
         if self.work.arrived.swap(false, ordering) {
@@ -2818,6 +2830,7 @@ pub async fn run(
         raise: RaiseSteer::default(),
         heartbeat_prompt: false,
         last_room: (0, false),
+        last_open: true,
         work: std::sync::Arc::clone(&work),
         launched: std::sync::Arc::new(tokio::sync::Notify::new()),
         released: BTreeSet::new(),

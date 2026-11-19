@@ -3275,6 +3275,18 @@ mod pacing_tests {
         assert!(!room_opened(false, false, 1500, 1000));
     }
 
+    /// Admission that reopens after a hold, a cooldown say, brings the heartbeat forward too:
+    /// in the batch gate the next wave otherwise waited up to 2 s more for the interval
+    /// (006 SC-004).
+    #[test]
+    fn reopened_admission_brings_the_heartbeat_forward() {
+        use super::service::admission_reopened;
+        assert!(admission_reopened(false, true));
+        assert!(!admission_reopened(true, true));
+        assert!(!admission_reopened(true, false));
+        assert!(!admission_reopened(false, false));
+    }
+
     /// A release that the journal records after a heartbeat went out brings the next heartbeat
     /// forward, so the coordinator frees its reservation and places the next task without
     /// waiting out the interval (006 SC-004: 3 s on one task per batch wave in the gate).
