@@ -510,6 +510,8 @@ struct AgentLoop<'a> {
     last_room: (u64, bool),
     /// Shared with the wait for work, which brings the next heartbeat forward (006 SC-001).
     work: std::sync::Arc<WorkWatch>,
+    /// Signalled when a launch finishes preparing, so its authorization is asked at once.
+    launched: std::sync::Arc<tokio::sync::Notify>,
     /// Whether the descriptor limit holds launch slots back, as last reported.
     descriptor_limited: bool,
     /// Host floor warnings already printed.
@@ -544,6 +546,14 @@ struct AgentLoop<'a> {
 
 impl AgentLoop<'_> {
     /// Finished preparations become slots; refused launches get a durable refusal.
+    /// Between intervals, takes the launches that finished preparing and asks for their
+    /// authorization at once, so a task does not wait for the next interval to start (006
+    /// SC-004). Renewals keep their interval; the next interval repeats anything that failed.
+    async fn launch_pass(&mut self) -> Result<()> {
+        self.collect_preparations().await?;
+        self.service_slots().await
+    }
+
     async fn collect_preparations(&mut self) -> Result<()> {
         let config = std::sync::Arc::clone(&self.config);
         let config = &*config;
@@ -2372,8 +2382,9 @@ impl AgentLoop<'_> {
                     // write at once (research R19).
                     let runtime = tokio::runtime::Handle::current();
                     let gate = self.launch_gate.clone();
+                    let launched = std::sync::Arc::clone(&self.launched);
                     let handle = tokio::task::spawn_blocking(move || {
-                        runtime.block_on(async move {
+                        let prepared = runtime.block_on(async move {
                             let _permit = gate.acquire().await?;
                             validate_gpu_launch_contract(
                                 &task_config,
@@ -2391,7 +2402,9 @@ impl AgentLoop<'_> {
                                 arrival,
                             )
                             .await
-                        })
+                        });
+                        launched.notify_one();
+                        prepared
                     });
                     self.preparations.insert(id, (assignment, handle, false));
                     if active >= self.admitted_parallelism {
@@ -2780,6 +2793,7 @@ pub async fn run(
         heartbeat_prompt: false,
         last_room: (0, false),
         work: std::sync::Arc::clone(&work),
+        launched: std::sync::Arc::new(tokio::sync::Notify::new()),
         descriptor_limited: false,
         floor_warnings: BTreeSet::new(),
         host_checked: false,
@@ -2921,7 +2935,30 @@ pub async fn run(
             }
             Err(error) => return Err(error),
         }
-        tokio::select! {_ = tokio::time::sleep_until(tokio::time::Instant::from_std(next_observation))=>{}, _=&mut stop_signal,if state.stopping.is_none()=>{state.stopping=Some(Instant::now()); state.leave_supervisors=true;}, _=reload_signal(&mut hangup)=>{state.reload_config()?;}}
+        let launched = std::sync::Arc::clone(&state.launched);
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(next_observation)) => break,
+                _ = &mut stop_signal, if state.stopping.is_none() => {
+                    state.stopping = Some(Instant::now());
+                    state.leave_supervisors = true;
+                    break;
+                }
+                _ = reload_signal(&mut hangup) => {
+                    state.reload_config()?;
+                    break;
+                }
+                _ = launched.notified(), if !state.preparations.is_empty() && state.stopping.is_none() => {
+                    if let Err(error) = state.launch_pass().await {
+                        // The next interval does the same work, with its own handling.
+                        emit(&serde_json::json!({
+                            "event": "launch_pass_deferred",
+                            "detail": format!("{error:#}"),
+                        }))?;
+                    }
+                }
+            }
+        }
     }
     waiter.abort();
     state.shutdown().await?;
