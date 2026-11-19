@@ -58,6 +58,8 @@ pub struct Collector {
     /// Per device, memory attributed to no listed PID at the last measured,
     /// own-only or empty interval (research R18).
     gpu_memory_baseline: BTreeMap<String, u64>,
+    /// The last sample's own CPU by part, in this thread's CPU time (SC-014).
+    last_cost: BTreeMap<&'static str, u64>,
     managed_gpu_usage: BTreeMap<u32, BTreeMap<String, u64>>,
     gpu_accounting_known: BTreeSet<String>,
     gpu_quiet: BTreeMap<String, QuietState>,
@@ -378,6 +380,7 @@ impl Collector {
             managed_pids: BTreeSet::new(),
             managed_identities: BTreeMap::new(),
             gpu_memory_baseline: BTreeMap::new(),
+            last_cost: BTreeMap::new(),
             managed_gpu_usage: BTreeMap::new(),
             gpu_accounting_known: BTreeSet::new(),
             gpu_quiet: BTreeMap::new(),
@@ -554,7 +557,20 @@ impl Collector {
 
     /// Read a snapshot without sleeping. Calls faster than the OS sampling
     /// interval return unknown CPU usage instead of reusing the previous sample.
+    /// The last sample's own CPU by part, in nanoseconds of this thread's CPU time: host CPU
+    /// and memory, GPUs, the process table, and kernel readings (SC-014).
+    pub fn last_sample_cost(&self) -> &BTreeMap<&'static str, u64> {
+        &self.last_cost
+    }
+
     pub fn sample(&mut self) -> Result<Snapshot> {
+        let mut mark = thread_cpu_ns();
+        let mut charge = |cost: &mut BTreeMap<&'static str, u64>, part: &'static str| {
+            let now = thread_cpu_ns();
+            cost.insert(part, now.saturating_sub(mark));
+            mark = now;
+        };
+        let mut cost = BTreeMap::new();
         let observed_at_unix_ms =
             u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())?;
         let mut capabilities = self.platform_capabilities.clone();
@@ -614,11 +630,17 @@ impl Collector {
         self.gpu_accounting_known.clear();
         self.external_gpu_memory.clear();
         self.external_gpu_compute.clear();
+        charge(&mut cost, "host");
         let (gpu_inventory, gpus) = self.sample_gpus(&mut capabilities, observed_at_unix_ms);
+        charge(&mut cost, "gpus");
         let (principals, external_processes) = match self.sample_principals() {
             Some((principals, external)) => (Some(principals), Some(external)),
             None => (None, None),
         };
+        charge(&mut cost, "processes");
+        let kernel = self.kernel.sample();
+        charge(&mut cost, "kernel");
+        self.last_cost = cost;
         Ok(Snapshot {
             schema_version: SCHEMA_VERSION,
             node_id: self.node_id.clone(),
@@ -636,7 +658,7 @@ impl Collector {
             gpu_inventory,
             gpus,
             capabilities,
-            kernel: Some(self.kernel.sample()),
+            kernel: Some(kernel),
             principals,
             external_processes,
         })
@@ -1247,6 +1269,25 @@ pub(crate) fn pidfd_capability() -> Capability {
         CapabilityStatus::Unsupported,
         "Linux pidfd interface is not available on this platform.",
     )
+}
+
+/// This thread's CPU time in nanoseconds; zero where the clock is unavailable.
+fn thread_cpu_ns() -> u64 {
+    #[cfg(unix)]
+    {
+        let mut time = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: valid output pointer.
+        if unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) } == 0 {
+            return u64::try_from(time.tv_sec)
+                .unwrap_or(0)
+                .saturating_mul(1_000_000_000)
+                .saturating_add(u64::try_from(time.tv_nsec).unwrap_or(0));
+        }
+    }
+    0
 }
 
 #[cfg(test)]

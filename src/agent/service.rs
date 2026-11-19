@@ -1483,6 +1483,18 @@ impl AgentLoop<'_> {
         )?;
         self.sampled_at = Instant::now();
         mark = self.cost.charge("sample", mark);
+        // Parts of `sample`, so CedeGrid's own cost shows where it goes (SC-014).
+        for (part, ns) in self.collector.collector.last_sample_cost() {
+            self.cost.record(
+                match *part {
+                    "host" => "sample_host",
+                    "gpus" => "sample_gpus",
+                    "processes" => "sample_processes",
+                    _ => "sample_kernel",
+                },
+                *ns,
+            );
+        }
         self.oom_kills.push_back(crate::telemetry::host_oom_kills());
         if self.oom_kills.len() > 3 {
             self.oom_kills.pop_front();
