@@ -171,7 +171,7 @@ class Cluster:
     """A coordinator and an agent for one run; the agent on `cpus`, everything else outside."""
 
     def __init__(self, repo, out, cpus, mode, workers, lifetime, gpu_uuid=None, gpu_mib=2048,
-                 gpu_reserve_mib=None, ram_mib=None):
+                 gpu_reserve_mib=None, ram_mib=None, agent_outside=False):
         from anchor_validation import deployment
         from runtime_config import atomic_runtime_config, read_runtime_config
         from validation_runtime import OwnedProcess
@@ -206,6 +206,9 @@ class Cluster:
         agent.update(max_workers=workers, capacity={'cpu_millicores': len(self.cpus) * 1000,
                      'ram_mib': ram_mib or max(4096, workers * 1024 * 2),
                      'gpu_memory_mib': {gpu_uuid: gpu_mib} if gpu_uuid else {}})
+        if agent_outside:
+            # Diagnostic: tasks still get the scope through the agent's affinity setting.
+            agent['cpu_affinity'] = list(self.cpus)
         atomic_runtime_config(self.out / 'agent.toml', agent, 'agent')
         self.services = {'coordinator': OwnedProcess(
             [str(self.binary), 'coordinator', '--deployment', str(self.out / 'coordinator.toml')],
@@ -228,6 +231,12 @@ class Cluster:
             if time.monotonic() > deadline:
                 raise TimeoutError('agent did not register')
             time.sleep(.2)
+        if agent_outside:
+            # Diagnostic: every thread of the agent this harness started moves off the scope;
+            # threads it starts later inherit that, and its tasks are pinned to the scope.
+            pid = self.services['agent'].child.pid
+            for tid in os.listdir(f'/proc/{pid}/task'):
+                os.sched_setaffinity(int(tid), outside)
         self.client.put_pool(self.run_id, [self.node_id], max_workers=workers, min_workers=0,
                              allocation_class='opportunistic')
 
@@ -402,6 +411,8 @@ def main():
     p.add_argument('--shape', choices=sorted(SHAPES))
     p.add_argument('--arm', choices=['alone', 'plain', 'performance', 'admit', 'aggressive', 'unprotected'])
     p.add_argument('--plain-tasks', type=int, help="own tasks the plain arm starts (default: the shape's)")
+    p.add_argument('--agent-outside', action='store_true',
+                   help='diagnostic: run the agent off the scope, its tasks on it')
     p.add_argument('--window', type=int, default=60)
     p.add_argument('--lead', type=int, default=40)
     p.add_argument('--peer-arm', choices=['cedegrid', 'plain'], default='cedegrid')
@@ -422,6 +433,8 @@ def main():
         p.error('fill runs performance or aggressive')
     if a.shape in FIXED_SHAPES and a.arm not in ('plain', 'performance'):
         p.error(f'{a.shape} runs plain or performance')
+    if a.agent_outside and a.arm in ('alone', 'plain'):
+        p.error('--agent-outside needs an arm through CedeGrid')
     if a.plain_tasks is not None and (a.arm != 'plain' or a.plain_tasks < 1):
         p.error('--plain-tasks takes a positive count, with --arm plain')
     repo = Path(a.repo).resolve()
@@ -445,8 +458,9 @@ def main():
         total = subprocess.run(['nvidia-smi', '--query-gpu=memory.total', '--format=csv,noheader,nounits'],
                                capture_output=True, text=True, check=True).stdout.split()[0]
         gpu_mib = int(total)
-    report = {'shape': a.shape, 'arm': a.arm, 'cpus': cpus, 'tasks': tasks, 'task_millicores': millicores,
-              'window_seconds': a.window, 'status': 'running'}
+    report = {'shape': a.shape, 'arm': a.arm, 'agent_outside': a.agent_outside, 'cpus': cpus,
+              'tasks': tasks, 'task_millicores': millicores, 'window_seconds': a.window,
+              'status': 'running'}
     cluster = None
     plain = []
     try:
@@ -456,7 +470,8 @@ def main():
             total_ram = os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES') // 2**20
             cluster = Cluster(repo, out, cpus, mode, tasks, lifetime, gpu, gpu_mib,
                               1024 if a.shape == 'vram' else None,
-                              total_ram if a.shape == 'ram' else None)
+                              total_ram if a.shape == 'ram' else None,
+                              agent_outside=a.agent_outside)
             if a.arm == 'unprotected' and allow(cluster.binary, out / 'node.toml') != 0:
                 raise RuntimeError('the allowance was not set')
             time.sleep(3)
