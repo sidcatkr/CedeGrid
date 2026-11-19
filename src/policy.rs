@@ -788,6 +788,7 @@ impl<'a> Interval<'a> {
                     ..self.budget.clone()
                 }),
             cpu_beside_plain: self.cpu_beside_plain,
+            cpu_plain_admission: self.cpu_plain_admission,
             managed_budget: self.budget,
             admission_headroom: self.headroom,
             expansion_allowed: self.expansion_allowed,

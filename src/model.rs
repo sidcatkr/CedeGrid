@@ -527,6 +527,11 @@ pub struct Decision {
     /// first-comer holds it, so the agent may start tasks as plain Linux would (006 FR-007a).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cpu_beside_plain: bool,
+    /// CPU admission is as plain Linux would start work, in Performance or Aggressive with no
+    /// first-comer holding it: own CPU counts at no more than each request, and any bound the
+    /// agent adds counts it the same way (006 FR-007, SC-002).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cpu_plain_admission: bool,
     /// Remaining admission capacity after one charge per existing/pending allocation.
     pub admission_headroom: Resources,
     pub expansion_allowed: bool,
