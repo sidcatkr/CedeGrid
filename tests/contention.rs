@@ -6254,6 +6254,7 @@ mod gpu_demand {
                     "{mode:?}"
                 );
                 assert!(!plain.resources[&key].principals[0].cedegrid);
+                assert!(plain.resources[&key].plain_admission, "{mode:?}");
                 // CedeGrid work that arrived later: the same.
                 assert_eq!(code(&run(Some((OWN + 1, true)), mode)), None, "{mode:?}");
                 // A first-comer running only Neutral work: held; admit immediately lifts it.
@@ -6265,6 +6266,7 @@ mod gpu_demand {
                 );
                 assert!(reasons(&first).contains(&"held_for_first_comer".into()));
                 assert!(first.resources[&key].principals[0].held_for);
+                assert!(!first.resources[&key].plain_admission, "{mode:?}");
                 assert_eq!(
                     vram(&first),
                     first.managed_budget.gpu_memory_mib.get(GPU).copied()
@@ -6279,10 +6281,12 @@ mod gpu_demand {
                 );
             }
             // Neutral holds beside every principal, as before (006 FR-010).
+            let neutral = run(None, ContentionMode::Neutral);
             assert_eq!(
-                code(&run(None, ContentionMode::Neutral)).as_deref(),
+                code(&neutral).as_deref(),
                 Some("gpu_time_slice_admission_held")
             );
+            assert!(!neutral.resources[&key].plain_admission);
         }
 
         /// The first-come record of the device (FR-090).

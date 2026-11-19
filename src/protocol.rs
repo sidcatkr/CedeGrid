@@ -238,6 +238,10 @@ pub struct ResourceContentionReport {
     /// What the resource holds back and why (SC-016).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held_back: Option<crate::model::HeldBack>,
+    /// Admission there is as plain Linux would start work (006 FR-007): on a GPU, the
+    /// coordinator may place more than one new task on the device in one pass.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub plain_admission: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Assignment {

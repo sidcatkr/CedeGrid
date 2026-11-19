@@ -189,6 +189,8 @@ const GPU_DEMAND_INTERVALS: usize = 60;
 /// sets, and how long it holds after the contention ends (006 FR-007a).
 const BESIDE_PLAIN_INTERVALS: u32 = 3;
 const BESIDE_PLAIN_HOLD_MS: u64 = 10_000;
+/// A named plain account using at least this much of a full CPU sets the flag at once.
+const ONE_CPU_MILLICORES: u64 = 1000;
 
 /// A device's external GPU compute demand: the average total and each principal UID's.
 type DemandEstimate = (u64, BTreeMap<u32, u64>);

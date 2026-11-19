@@ -6,8 +6,9 @@ CedeGrid source distribution. See [LICENSE](LICENSE), [release scope](docs/relea
 CedeGrid runs explicitly selected compute jobs on spare CPU, RAM, and NVIDIA GPU
 capacity, most usefully on a shared server where other people's processes already run, so
 that no capacity sits idle. Own work runs as fast as it can, and the contention mode says how
-much it gives back when others need capacity: Performance, the default, keeps everything
-others do not use minus a small margin; Neutral and Yield First give back more. A standalone Rust coordinator and native node agents own scheduling,
+much it gives back when others need capacity: Performance, the default, starts work as plain
+Linux would beside other users' work and is built to finish it sooner than plain Linux does;
+Neutral and Yield First give back more. A standalone Rust coordinator and native node agents own scheduling,
 leases, process supervision, checkpoints, artifacts, and result receipts. Python
 and TypeScript SDKs submit work and provide cooperative worker hooks. Any executable
 that meets the process contract can run; no application framework is required.

@@ -705,26 +705,27 @@ fn flags(
 /// 10 s after it ends, so one reading does not swing admission (006 FR-007a).
 #[test]
 fn the_beside_plain_flag_is_debounced_and_held() {
-    // The other user contends from interval 10 to 29, the CPU saturated beside two own tasks.
+    // The other user, at less than a whole CPU, contends from interval 10 to 29, the CPU
+    // saturated beside three own tasks.
     let run = flags(
         ContentionMode::Performance,
         80,
-        &|i| if (10..30).contains(&i) { 1950 } else { 0 },
+        &|i| if (10..30).contains(&i) { 950 } else { 0 },
         &|_| 0,
-        &|_| 2,
+        &|_| 3,
     );
     assert!(!run[..12].iter().any(|on| *on), "{run:?}");
     assert!(run[12..30].iter().all(|on| *on), "{run:?}");
     // Held for 10 s, 20 intervals, after the last contended interval.
     assert!(run[30..50].iter().all(|on| *on), "{run:?}");
     assert!(!run[51..].iter().any(|on| *on), "{run:?}");
-    // A one-interval reading never sets it.
+    // A one-interval reading of such a user never sets it.
     let blip = flags(
         ContentionMode::Performance,
         40,
-        &|i| if i == 10 || i == 20 { 1950 } else { 0 },
+        &|i| if i == 10 || i == 20 { 950 } else { 0 },
         &|_| 0,
-        &|_| 2,
+        &|_| 3,
     );
     assert!(!blip.iter().any(|on| *on), "{blip:?}");
 }
@@ -1027,7 +1028,12 @@ fn the_decision_says_when_cpu_admission_is_plain() {
                     .unwrap(),
             );
         }
-        last.unwrap().cpu_plain_admission
+        let last = last.unwrap();
+        assert_eq!(
+            last.resources[&ResourceKey::Cpu].plain_admission,
+            last.cpu_plain_admission
+        );
+        last.cpu_plain_admission
     };
     assert!(plain(ContentionMode::Performance, None));
     assert!(plain(ContentionMode::Aggressive, None));
@@ -1108,4 +1114,59 @@ fn own_tasks_ending_hold_no_admission_in_performance() {
             .any(|(_, _, code)| code == "admission_measurement_unknown"),
         "Neutral keeps the unknown hold: {neutral:?}"
     );
+}
+
+/// A plain user taking at least one whole CPU on a CPU full this interval is plainly competing:
+/// the flag rises on that first reading, so own work fills as plain Linux would start it. A
+/// smaller one still needs the three-interval streak (006 FR-007a).
+#[test]
+fn a_plain_user_on_a_whole_cpu_sets_the_flag_at_once() {
+    let first_on = |other_busy: u64| {
+        let mut engine = PolicyEngine::new();
+        let mut first = None;
+        for i in 0..10u64 {
+            // From interval 4, four own 1000 m tasks fill what the plain user leaves.
+            let started = if i >= 4 { 4 } else { 0 };
+            let other = if started > 0 { other_busy } else { 2000 };
+            let (mut snapshot, mut input) = reading_beside(other, 50, 0, Some(true), None);
+            let job = input.allocations[0].clone();
+            let each = (4000 - 50 - other) / 4;
+            input.allocations = (0..started)
+                .map(|k| Allocation {
+                    id: format!("job-{k}"),
+                    observed: Some(Resources {
+                        cpu_millicores: each,
+                        ram_mib: 256,
+                        gpu_memory_mib: BTreeMap::new(),
+                    }),
+                    ..job.clone()
+                })
+                .collect();
+            input.arrivals = (0..started)
+                .map(|k| (format!("job-{k}"), OWN_ARRIVAL))
+                .collect();
+            let own = each * started as u64;
+            let busy = (own + 50 + other).min(4000);
+            snapshot.managed_cpu_lower_millicores = Some(own);
+            snapshot.cpu_busy_millicores = Some(busy);
+            snapshot.kernel.as_mut().unwrap().cpu.busy_millicores = Some(busy);
+            snapshot.observed_at_unix_ms = 100 + i * 500;
+            snapshot.kernel.as_mut().unwrap().monotonic_elapsed_ms = 500 + i * 500;
+            let on = engine
+                .evaluate(
+                    &config(ContentionMode::Performance),
+                    &snapshot,
+                    &input,
+                    i * 500,
+                )
+                .unwrap()
+                .cpu_beside_plain;
+            if on && first.is_none() {
+                first = Some(i);
+            }
+        }
+        first
+    };
+    assert_eq!(first_on(1550), Some(4), "a whole CPU or more: at once");
+    assert_eq!(first_on(600), Some(6), "less: after the streak");
 }
