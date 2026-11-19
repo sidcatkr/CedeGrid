@@ -367,9 +367,7 @@ Performance or Aggressive work there. Beside plain principals and CedeGrid work 
 later, Performance and Aggressive start new work as plain Linux would: up to the capacity less
 the operator reserve, within the envelope and the ancestor quota, with no margin, no deduction
 of others' usage and CedeGrid's own CPU left in, and on GPU compute without the time-slice
-admission hold; VRAM headroom and the memory floors still apply (`admitted_as_plain`). On CPU
-one own task more may start, as large as the largest own task running or waiting, so no CPU
-sits idle while the next task starts after one ends; plain Linux keeps every CPU busy then. Beside
+admission hold; VRAM headroom and the memory floors still apply (`admitted_as_plain`). Beside
 a first-comer, admission holds as below, counting only first-comers: new own work starts only
 within the larger of the fair share and capacity minus their observed usage minus the margin,
 and nothing new starts while their activity is of unknown amount (`held_for_first_comer`).
@@ -448,10 +446,11 @@ resource (`admission_own_work_yielding`) only while it is being reclaimed there:
 holds more than its target, or a step is still moving down. A cap or hint that holds at its
 target does not block, and coordinator placement follows the node's admission without
 counting steps. When CPU or RAM admission is closed only by the node's own new allocations
-that have no first measurement yet, or by the cooldown only they restarted, the report says
-so for that resource, and the coordinator still authorizes reservations it placed earlier
-while they fit the budget; it places nothing new there, and any other cause, a GPU resource or
-a report without that statement still refuses. A move within the noise tolerance on memory, or within the reversal hysteresis
+that have no first measurement yet, or by the cooldown only they restarted, or GPU compute
+admission only for one more own process beyond tasks placed there and not yet listed, which
+the time-slice rule allows to run, the report says so for that resource, and the coordinator
+still authorizes reservations it placed earlier while they fit the budget; it places nothing
+new there, and any other cause or a report without that statement still refuses. A move within the noise tolerance on memory, or within the reversal hysteresis
 of the external growth a compute step answered (`hysteresis_percent` of that demand), is
 jitter: it blocks no admission, and a step that holds within it resets no cooldown. A pause
 that moves to another task at its bound is the hold staying, not a step down. Admission then follows headroom, cooldown and reclaim backoff: own
@@ -540,8 +539,9 @@ saturated CPU: a named account at the contention floor on a CPU full in this int
 while own work holds more than half of it; usage no account accounts for only on the saturation
 Performance judges, after the principal window, and not within two monitor intervals after an
 own task stops, when it is that task's last usage. The
-flag sets after three intervals in a row of such contention, or at once for a named account
-taking at least a whole CPU of a full one, and holds 10 s after it ends.
+flag sets after three intervals in a row of such contention, or at once, before own work has
+filled the CPU, for a named account taking at least a whole CPU, so a batch starts at once
+beside it as plain Linux starts it; it holds 10 s after the contention ends.
 Performance and Aggressive release no CPU reservation that was admitted, and own charges over
 the CPU budget restart no cooldown: new work waits through the headroom until they fit, and
 work already placed is still authorized. Guaranteed work is
@@ -863,7 +863,18 @@ a supported containment backend. The system is not a sandbox for hostile program
 Only Yield First tasks launch at `cpu.nice` (10); Neutral and Performance tasks launch at
 the default priority and leave yielding to their steps. A task that moves from Yield First
 to another mode keeps its launch nice, since an unprivileged process cannot lower it again,
-and its decisions say so (`launch_nice_kept`). Own priority is never raised.
+and its decisions say so (`launch_nice_kept`). Own priority is raised above the default only
+by the unprotected option and by priority over plain users, below; neither uses real-time
+scheduling classes.
+
+Priority over plain users. With the administrator's `modes.plain_priority` and the user's
+`contention.priority_over_plain`, in System mode on a host that splits CPU by account, the
+broker sets the user's account slice to `modes.plain_priority_cpu_weight` (200 by default)
+while own Performance or Aggressive CPU work runs and every other account with CedeGrid work on
+the CPU runs at that weight or more. A plain user's CPU share then shrinks: one plain user at
+weight 100 against 200 gets about a third of a contended CPU. CedeGrid users keep equal shares
+among themselves, and an account falling below that weight ends the raise within two monitor
+intervals. Rootless hosts never raise.
 
 At start the agent raises its own soft `RLIMIT_NOFILE` to its hard limit, and the worker
 gate gives each task back the soft limit the agent started with before the user's command

@@ -1123,14 +1123,12 @@ impl<'a> Interval<'a> {
             && self.next.cpu_unattributed_intervals
                 >= self.config.contention.principal_window_intervals
             && self.cpu_unattributed >= floor.max(self.cpu_bound);
-        // The most a named plain account uses of a CPU full this interval, when one reaches the
-        // contention floor.
+        // The most a named plain account uses, when one reaches the contention floor.
         let named_plain = self
             .snapshot
             .principals
             .iter()
             .flatten()
-            .filter(|_| saturated_now)
             .filter(|p| {
                 !p.is_owner
                     && match p.uid {
@@ -1146,7 +1144,7 @@ impl<'a> Interval<'a> {
             .map(|p| in_scope(p.cpu_millicores))
             .filter(|usage| *usage >= floor)
             .max();
-        let plain_contends = unattributed || named_plain.is_some();
+        let plain_contends = unattributed || saturated_now && named_plain.is_some();
         // The flag needs a plain principal's contention for a few intervals in a row and holds
         // a while after it ends, so one reading does not swing admission either way.
         let open = view.mode >= ContentionMode::Performance && held.is_none();
@@ -1156,8 +1154,9 @@ impl<'a> Interval<'a> {
             0
         };
         self.next.beside_plain_streak = streak;
-        // A named account taking at least a whole CPU of a full one is plainly competing: the
-        // flag rises on that first reading.
+        // A named account taking at least a whole CPU competes as soon as own work fills the
+        // rest: the flag rises on that first reading, before own work has started, so a batch
+        // starts at once beside it, as plain Linux starts it, rather than in two steps.
         let whole_cpu = named_plain.is_some_and(|usage| usage >= crate::policy::ONE_CPU_MILLICORES);
         if streak >= crate::policy::BESIDE_PLAIN_INTERVALS || open && whole_cpu {
             self.next.beside_plain_ms = Some(self.now);
@@ -1424,21 +1423,6 @@ impl<'a> Interval<'a> {
                 }
             }
         }
-        // Where CPU admission is plain, one own task more than the scope holds may start, so no
-        // CPU sits idle while the next task starts after one ends, as plain Linux keeps every
-        // CPU busy. The next task is taken as large as the largest own task now; memory
-        // admission and its floors are unchanged (006 SC-004).
-        if self.cpu_plain_admission && !self.cpu_unknown && !self.cpu_held {
-            let next = self
-                .input
-                .allocations
-                .iter()
-                .filter(|a| matches!(a.phase, AllocationPhase::Running | AllocationPhase::Pending))
-                .map(|a| a.requested.cpu_millicores)
-                .max()
-                .unwrap_or(0);
-            self.budget.cpu_millicores = self.budget.cpu_millicores.saturating_add(next);
-        }
         for (key, floor) in [
             (ResourceKey::Cpu, self.cpu_reserve),
             (ResourceKey::Ram, self.ram_reserve),
@@ -1517,6 +1501,7 @@ impl<'a> Interval<'a> {
         demand_record.first_come = self.note_arrivals(gpu).map(str::to_string);
         let mut time_slice = None;
         let mut slice_admission_held = false;
+        let mut slice_held_by_own_new = false;
         if !telemetry_unknown {
             let mut budget = self.compute_budget_for(gpu, measured, activity, estimate.as_ref());
             // Performance and Aggressive hold GPU admission only for the accounts that arrived
@@ -1535,9 +1520,10 @@ impl<'a> Interval<'a> {
             let mode = governing(self.config, ResourceKind::GpuCompute);
             // The record and the hold of running tasks count every principal: a Yield First or
             // Neutral job keeps its give-back on any node (FR-010).
-            let (slice, mut next_held) = self
-                .time_slice(gpu, measured.is_some(), budget.unattributed, None)
-                .unzip();
+            let full = self.time_slice(gpu, measured.is_some(), budget.unattributed, None);
+            let slice = full.as_ref().map(|(slice, _, _)| slice.clone());
+            let mut next_held = full.as_ref().map(|(_, next, _)| *next);
+            let mut own_new = full.as_ref().is_some_and(|(_, _, own_new)| *own_new);
             let mut bound = slice.as_ref().is_some_and(|slice| !slice.bound.is_empty());
             if mode >= ContentionMode::Performance {
                 let first_comers = first(false);
@@ -1549,12 +1535,13 @@ impl<'a> Interval<'a> {
                 );
                 bound = held
                     .as_ref()
-                    .is_some_and(|(slice, _)| !slice.bound.is_empty());
-                next_held = held.map(|(_, next)| next);
+                    .is_some_and(|(slice, _, _)| !slice.bound.is_empty());
+                own_new = held.as_ref().is_some_and(|(_, _, own_new)| *own_new);
+                next_held = held.map(|(_, next, _)| next);
             }
             if self.config.contention.max_mode() >= ContentionMode::Performance {
                 let protected = first(true);
-                if let Some((slice, next)) = self.time_slice(
+                if let Some((slice, next, _)) = self.time_slice(
                     gpu,
                     measured.is_some(),
                     budget.unattributed,
@@ -1607,6 +1594,7 @@ impl<'a> Interval<'a> {
             // No mode sets a duty: a slice-bound principal holds GPU admission in every mode, and
             // in Yield First and Neutral own tasks there are held by whole tasks (FR-021, FR-089).
             slice_admission_held = bound || next_held == Some(true);
+            slice_held_by_own_new = !bound && next_held == Some(true) && own_new;
             if let Some(hold) = time_slice.as_ref().and_then(|slice| slice.hold) {
                 self.slice_hold.insert(gpu.uuid.clone(), hold);
                 note_reason(&mut self.statuses, &gpu.uuid, "gpu_time_slice_hold");
@@ -1670,6 +1658,10 @@ impl<'a> Interval<'a> {
         } else {
             compute_admission
         });
+        // Held only for one more own process beyond tasks placed and not yet started: their
+        // authorization may proceed, and placement still waits (FR-028).
+        compute_status.admission_own_new =
+            !telemetry_unknown && slice_admission_held && slice_held_by_own_new;
         let gpu_budget = self.gpu_memory_budget(gpu, &memory, telemetry_unknown);
         self.budget
             .gpu_memory_mib
@@ -2082,7 +2074,7 @@ impl<'a> Interval<'a> {
         measured: bool,
         unattributed: bool,
         holds_for: Option<&dyn Fn(Option<u32>) -> bool>,
-    ) -> Option<(TimeSliceRecord, bool)> {
+    ) -> Option<(TimeSliceRecord, bool, bool)> {
         if gpu.time_sliced != Some(true) {
             return None;
         }
@@ -2228,7 +2220,17 @@ impl<'a> Interval<'a> {
             self.slice_hold(&principals, read, true, &gpu.uuid, &mut beside);
             !beside.bound.is_empty()
         };
-        Some((record, next_held))
+        // The hold comes only from own tasks placed but not yet listed when the rule holds with
+        // them running: their own authorization adds nothing beyond what was counted, so it is
+        // own new work's, as on CPU (FR-028).
+        let own_new = next_held
+            && placed > own
+            && if counted {
+                own_admitting.saturating_mul(count) <= external
+            } else {
+                own_admitting <= 1
+            };
+        Some((record, next_held, own_new))
     }
 
     /// Own work's and each listed UID's arrival on the device, and the first-come floor's state

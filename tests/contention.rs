@@ -54,21 +54,6 @@ pub fn snapshot(cpu_busy_millicores: u64) -> Snapshot {
     }
 }
 
-/// Running jobs at their requests, sharing the CPU as the kernel does once their requests add
-/// up to more than `capacity`: Performance may start one task more than the scope holds
-/// (006 SC-004).
-pub fn run_at_requests(jobs: &mut [Allocation], capacity: u64) {
-    let requested: u64 = jobs.iter().map(|j| j.requested.cpu_millicores).sum();
-    for job in jobs.iter_mut() {
-        job.phase = AllocationPhase::Running;
-        let mut observed = job.requested.clone();
-        if requested > capacity {
-            observed.cpu_millicores = observed.cpu_millicores * capacity / requested;
-        }
-        job.observed = Some(observed);
-    }
-}
-
 pub fn allocation(
     id: &str,
     class: AllocationClass,
@@ -2284,7 +2269,10 @@ mod scenarios {
         let mut reached = None;
         let mut last_growth = 0;
         for now in (0..=30_000).step_by(INTERVAL as usize) {
-            run_at_requests(&mut jobs, CAPACITY);
+            for job in &mut jobs {
+                job.phase = AllocationPhase::Running;
+                job.observed = Some(job.requested.clone());
+            }
             let own: u64 = jobs
                 .iter()
                 .filter_map(|j| j.observed.as_ref())
@@ -2580,7 +2568,10 @@ mod ramp {
         let (mut admitted, mut last_growth) = (0usize, 0u64);
         let mut own_per_interval = vec![];
         for now in (0..=until_ms).step_by(INTERVAL as usize) {
-            run_at_requests(&mut jobs, CAPACITY);
+            for job in &mut jobs {
+                job.phase = AllocationPhase::Running;
+                job.observed = Some(job.requested.clone());
+            }
             let own: u64 = jobs
                 .iter()
                 .filter_map(|j| j.observed.as_ref())
@@ -3661,9 +3652,8 @@ mod psi_saturation {
             .map(|d| d.resources[&ResourceKey::Cpu].target_share)
             .collect();
         // 8000 − 500 external − each mode's margin (15%, 5%); the other user runs no CedeGrid
-        // work, so Performance's is the whole 8000 and one more task of the 72 the host's
-        // 1000 m of requests is split into (006 FR-007, SC-004).
-        assert_eq!(targets, [Some(6300), Some(7100), Some(8000 + 1000 / 72)]);
+        // work, so Performance's is the whole 8000 (006 FR-007).
+        assert_eq!(targets, [Some(6300), Some(7100), Some(8000)]);
         assert_eq!(hosts.map(|host| host.own()), [6300, 7100, 7200]);
     }
 
@@ -6055,8 +6045,52 @@ mod gpu_demand {
                         Some("gpu_time_slice_admission_held"),
                         "{mode:?} {phase:?}"
                     );
+                    // The hold is only for one more beyond the placed task, which the rule
+                    // allows: it is own new work's, so the placed task's own authorization may
+                    // proceed while placement waits (FR-028).
+                    assert!(
+                        decision.resources[&ResourceKey::GpuCompute(GPU.into())].admission_own_new,
+                        "{mode:?} {phase:?}"
+                    );
                 }
             }
+        }
+
+        /// With the own task listed on the device, the hold is for a further one, not for work
+        /// already placed: nothing is own new work's then (FR-028).
+        #[test]
+        fn a_listed_own_task_leaves_no_own_new_hold() {
+            let config = mode_config(ContentionMode::Neutral);
+            let mut engine = PolicyEngine::new();
+            for i in 0..60u64 {
+                let snap = sliced(None, 990, i + 1, 0, 1);
+                engine
+                    .evaluate(&config, &snap, &PolicyInput::default(), i * INTERVAL)
+                    .unwrap();
+            }
+            let input = PolicyInput {
+                allocations: vec![job(None)],
+                ..PolicyInput::default()
+            };
+            let mut last = None;
+            for i in 60..66u64 {
+                last = Some(
+                    engine
+                        .evaluate(
+                            &config,
+                            &sliced(Some(495), 495, i + 1, 1, 1),
+                            &input,
+                            i * INTERVAL,
+                        )
+                        .unwrap(),
+                );
+            }
+            let status = &last.unwrap().resources[&ResourceKey::GpuCompute(GPU.into())];
+            assert_eq!(
+                status.admission.as_ref().and_then(|a| a.code()),
+                Some("gpu_time_slice_admission_held")
+            );
+            assert!(!status.admission_own_new);
         }
 
         /// A principal that has just become busy is read by its latest measured intervals as well
