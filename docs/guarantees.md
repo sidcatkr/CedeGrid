@@ -272,7 +272,12 @@ account with a readable user ID; with no list, or one that shows only the owner,
 and the interval's estimate applies (`cpu_window_estimate_not_kept`). The price: on a host that
 hides other accounts' processes nothing is ever kept, so there an own task's unknown sample can
 read as external growth for one window. When an own task's sample is
-missing, `allocation_unknown_hold`'s reason names the check that failed.
+missing, `allocation_unknown_hold`'s reason names the check that failed. In Performance and
+Aggressive, a measured task whose process is gone (`not_alive` or `not_verified`), as when it
+ends, holds neither CPU nor RAM admission and starts no cooldown: it is charged at the larger of
+its request and last known usage, and admission starts the next tasks as plain Linux would. Any
+other unknown usage, and on CPU any task while an account whose CedeGrid work came first uses
+the CPU, holds as before (006 FR-007).
 
 CedeGrid's own CPU, the agent's process clock and its supervisors', is in use by CedeGrid on
 the owner's side: it comes out of external usage and the owner's unmanaged usage, never

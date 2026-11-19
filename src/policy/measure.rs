@@ -161,6 +161,12 @@ impl<'a> Interval<'a> {
                     self.unknown_charge.add_checked(&charge)?;
                     if last.is_none() {
                         self.unknown_new.add_checked(&charge)?;
+                    } else if matches!(
+                        allocation.usage_unknown.as_deref(),
+                        Some("not_alive" | "not_verified")
+                    ) {
+                        // Its process is gone: the task has ended (FR-018's checks).
+                        self.unknown_ended.add_checked(&charge)?;
                     }
                     self.unknown_allocations.insert(allocation.id.clone());
                     let check = allocation
@@ -274,8 +280,28 @@ impl<'a> Interval<'a> {
     /// operator drain and unknown capacity.
     pub(super) fn node_reasons(&mut self) {
         let (snapshot, input) = (self.snapshot, self.input);
-        self.cpu_held = self.unknown_charge.cpu_millicores > 0;
-        self.ram_held = self.unknown_charge.ram_mib > 0;
+        // In Performance and Aggressive, a measured task whose process is gone, as when it ends,
+        // holds nothing: it is charged at max(request, last known), and admission starts the
+        // next tasks as plain Linux would. Any other unknown usage, and CPU beside an account
+        // whose CedeGrid work came first, holds as before (006 FR-007).
+        let config = self.config;
+        let plain = |kind: ResourceKind| governing(config, kind) >= ContentionMode::Performance;
+        let cpu_unknown = if plain(ResourceKind::Cpu) && !self.cpu_first_comer_present() {
+            self.unknown_charge
+                .cpu_millicores
+                .saturating_sub(self.unknown_ended.cpu_millicores)
+        } else {
+            self.unknown_charge.cpu_millicores
+        };
+        let ram_unknown = if plain(ResourceKind::Ram) {
+            self.unknown_charge
+                .ram_mib
+                .saturating_sub(self.unknown_ended.ram_mib)
+        } else {
+            self.unknown_charge.ram_mib
+        };
+        self.cpu_held = cpu_unknown > 0;
+        self.ram_held = ram_unknown > 0;
         for (key, held) in [
             (ResourceKey::Cpu, self.cpu_held),
             (ResourceKey::Ram, self.ram_held),

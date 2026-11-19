@@ -74,6 +74,22 @@ impl Interval<'_> {
         earliest.map_or(OwnArrival::Nothing, OwnArrival::At)
     }
 
+    /// Whether an account whose CedeGrid work came first uses the CPU, or the principal list
+    /// cannot be read, so none is known to be plain: before the CPU's own reading, for holds
+    /// that only Performance's plain admission lifts (006 FR-008).
+    pub(super) fn cpu_first_comer_present(&self) -> bool {
+        let own = self.own_arrival(&|_| true);
+        let Some(standings) = self.standings(own, &|p| p.cedegrid_cpu) else {
+            return true;
+        };
+        self.snapshot.principals.iter().flatten().any(|p| {
+            p.cpu_millicores > 0
+                && p.uid
+                    .and_then(|uid| standings.get(&uid))
+                    .is_some_and(|s| s.first_comer)
+        })
+    }
+
     /// Each other account's standing on a resource, by UID, from its CedeGrid work there as
     /// `work` picks it; None while the principal list cannot be read, so no account is known to
     /// be plain. Accounts below `uid_min` and usage without a UID are plain (006 FR-004).
