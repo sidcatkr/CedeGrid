@@ -77,6 +77,16 @@
   account (`modes.unprotected_cpu_weight`, 400 by default). The raise never replaces a weight
   the broker did not set, and ends within 5 s of the key turning off or the member leaving the
   group, and when the broker stops or restarts.
+- **Priority over plain users.** An install option that runs own CPU work above users who run
+  no CedeGrid work, never above another CedeGrid user. It needs both the administrator's
+  permission in System mode (`modes.plain_priority`, weight `modes.plain_priority_cpu_weight`,
+  200 by default) and the user's choice in `cedegrid setup`, which asks on a terminal with Yes
+  preselected (`contention.priority_over_plain`; `--priority-over-plain` and
+  `--no-priority-over-plain` set it unattended, where it is otherwise off). The broker raises
+  the account slice while own Performance or Aggressive CPU work runs and no other CedeGrid
+  user on the CPU is below the weight, and ends it as it ends the unprotected raise. `doctor`
+  and `observe` show whether it is chosen, permitted and in force. In System mode, an account
+  whose unit runs work counts as CedeGrid even where its processes are hidden.
 - **Waiting for work.** A node with room waits at the coordinator for the next queued task
   (`await_work/1`), so new work starts within one monitor interval of its submission instead of
   at the next 2 s heartbeat.

@@ -109,6 +109,30 @@ with the same steps as on a delegated Full host. `cedegrid_idle.slice` (with `cp
 the idle unit are installed and started for a later version that runs Yield First work there;
 `cpu.idle` gives way on CPU time only, not on SMT siblings, caches or memory bandwidth.
 
+## Priority over plain users
+
+With `modes.plain_priority = true`, each member chooses in `cedegrid setup` whether their CedeGrid
+work runs above users who run no CedeGrid work. Setup asks on a terminal with Yes preselected;
+`--priority-over-plain` and `--no-priority-over-plain` set it unattended, and without either an
+unattended setup leaves it off. Running setup again changes it. The choice is
+`contention.priority_over_plain` in the member's configuration.
+
+While the choice is on and the member's Performance or Aggressive CPU work runs, the agent asks
+the broker to set the member's account slice to `modes.plain_priority_cpu_weight`. It does so
+only while every other account with CedeGrid work on the CPU runs at that weight or more, read
+from each account slice's `cpu.weight`; a slice that cannot be read counts as not raised. When
+another account falls below, the raise ends within two monitor intervals; an account that chose
+the option too sees the raise in that time and raises as well, so both keep it. The broker ends
+the raise as it ends the unprotected one. Where unprotected also applies, the higher weight is
+asked for.
+
+A plain user's CPU share then shrinks while the member's work runs: with one plain user at the
+default weight of 100 and the member at 200, the member gets about two thirds of a contended CPU.
+CedeGrid users keep equal shares among themselves. An account whose unit runs work counts as a
+CedeGrid user even where its processes are hidden from other users.
+
+`cedegrid doctor` shows whether the option is chosen, permitted and in force, and why it is not.
+
 ## Memory and OOM scores
 
 The broker reads each user's memory from `/proc` and computes each user's fair share as the

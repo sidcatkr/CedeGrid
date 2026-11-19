@@ -24,7 +24,8 @@ candidate's commit, and this list is updated at that commit.
    on every attempt, a database that cannot be read refuses, and a restore forgets every started
    grant. A new run reads the host's allowance.
 6. Memory, the floors, unknown activity, the no-priority-raise rule and the operator envelope are
-   unchanged by either form (FR-006, FR-010, FR-017).
+   unchanged by either form (FR-006, FR-010, FR-017). 006's priority over plain users is a
+   separate install option with its own policy key and weight; no unprotected field reaches it.
 
 ## The unprotected admission path
 

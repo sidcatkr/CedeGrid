@@ -86,9 +86,11 @@ the support boundary. In short:
 
 - CedeGrid acts only on processes it launched and verified. It never signals, renices,
   throttles, pauses, moves or adopts any other process, and never acts on a persisted PID.
-- Harm is measured against the same own work run without CedeGrid. Yield First and Neutral give
-  capacity back first; Performance and Aggressive hold back only at admission. Own priority is
-  never raised above the default.
+- Harm is measured against the same own work run without CedeGrid, and Performance must do
+  better for own work than that baseline. Yield First and Neutral give capacity back first;
+  Performance and Aggressive hold back only at admission. Own priority is never raised above
+  the default, except by the broker's two raises the constitution names: priority over plain
+  users (an install option) and unprotected (per run).
 - Unknown or stale telemetry is never idle or free. Responses to it are graduated.
 - User code runs only after the launch barrier persists Authorized.
 - `policy.rs` stays pure; telemetry and kernel code are read-only; effects live in the agent,
