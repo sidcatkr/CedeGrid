@@ -126,8 +126,9 @@ never let CedeGrid act on a process it does not own.
   applies only to the part of own memory within its fair share, and only while the lowering is
   in force; when it is in force is the feature's rule (005 FR-024, decision N1).
 - Own priority MUST NOT be raised above the default: no negative nice values, no CPU weight above
-  other users' and no real-time scheduling classes. The unprotected option, below, is the one
-  exception, and it never uses real-time scheduling classes.
+  other users' and no real-time scheduling classes. Two exceptions, below, are the only ones:
+  priority over plain users, an install option, and the unprotected run option. Neither uses
+  real-time scheduling classes.
 - **Modes.** The modes are ordered Yield First ≤ Neutral ≤ Performance ≤ Aggressive.
   Performance is the default mode. Aggressive is a *caution* option with a red label: Performance
   with no admission margin. It keeps every rule of this principle, and never holds less than
@@ -149,7 +150,18 @@ never let CedeGrid act on a process it does not own.
   work there, the hold stays and the option is ignored for that principal. It covers starting
   compute work only: the floors, Principle I, the OOM order and the priority rule hold in full.
   It is a *caution* option.
-- **Unprotected, the one priority exception.** A per-run option for Performance and Aggressive
+- **Priority over plain users, an install option.** The operator MAY choose at setup, and change
+  later, that own Performance and Aggressive work runs at a higher CPU weight than the work of
+  principals with no CedeGrid work. It acts only where the System mode broker can raise the
+  caller's account slice, where the host splits CPU by account and the caller's ordinary unit
+  sits in that slice (Principle V), and only while every CedeGrid principal contending on the
+  CPU runs at that weight or more, so CedeGrid users never take each other's share. It needs
+  both the administrator's permission in the System mode policy and the user's choice, and it is
+  off unless both are given: an interactive setup asks the user, and an unattended setup turns
+  it on only by its explicit flag. A principal whose CedeGrid work cannot be identified counts as
+  plain. The floors, Principle I, the OOM order and the first-comer hold beside CedeGrid
+  principals are unchanged; GPU compute gets no raise.
+- **Unprotected, the run priority exception.** A per-run option for Performance and Aggressive
   work, at the highest warning level. Beyond admit immediately, it MAY raise own work's CPU share
   above other users' where the host provides a way that reaches the level at which other
   users' work competes with it: the System mode broker raising the CPU weight of the caller's
@@ -200,8 +212,10 @@ keeps its fair share, so two of them never fight over admission. CedeGrid never 
 floors and never touches another process. An operator may trade away their own work's progress
 in a more yielding mode: Neutral gives back down to own work's fair share, and Yield First gives
 others first. Capacity held back without a reclaim reason protects no workload. Raising own
-priority above other users' is the operator's explicit, rare and visible choice, and it never
-threatens another workload's safety.
+priority above other users' is the operator's explicit and visible choice, and it never
+threatens another workload's safety: priority over plain users is chosen at setup and never
+reaches another CedeGrid user's share, and unprotected is chosen per run at the highest warning
+level.
 
 ### III. Unknown Is Never Silently Idle
 
@@ -248,10 +262,11 @@ from effects keeps every action auditable.
     never runs user input;
   - moves only the caller's own verified work between the caller's own units, held still from
     the check to the move;
-  - under the unprotected option, and only where the administrator policy permits it, raises the
-    CPU weight of the caller's account slice, where the caller's ordinary unit sits in it, while
-    the caller asks, and returns it to the default when the caller stops asking, stops or is
-    removed; it raises no other unit's or process's priority;
+  - under priority over plain users or the unprotected option, each only where the
+    administrator policy permits it, raises the CPU weight of the caller's account slice, where
+    the caller's ordinary unit sits in it, to that policy's weight while the caller asks, and
+    returns it to the default when the caller stops asking, stops or is removed; it raises no
+    other unit's or process's priority;
   - writes OOM score adjustments only for processes in its verified set (Principle I), and
     lowers one only for the part of its user's memory within that user's fair share, which it
     reads from kernel counters itself; it never writes −1000;
@@ -372,4 +387,4 @@ These existing constraints apply to every feature.
 - Every pull request review checks the change against Principles I–VIII and the constraints
   above. A deviation is documented with its justification, or rejected.
 
-**Version**: 9.1.0 | **Ratified**: 2026-10-24 | **Last Amended**: 2026-11-19
+**Version**: 9.2.0 | **Ratified**: 2026-10-24 | **Last Amended**: 2026-11-19

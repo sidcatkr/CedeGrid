@@ -119,6 +119,39 @@ this thread's.
     same-cgroup layout and the System mode raise (both need the user's sudo steps); the own-first
     CPU gap (start and reaction latency) and the batch's total time (handoff between tasks).
 
+## Phase 6b: Priority over plain users (US6, maintainer decisions of 2026-11-19)
+
+- [x] T070 Amend the constitution to 9.2.0 in `.specify/memory/constitution.md`: Principle II's
+  priority rule names two exceptions, priority over plain users (install option, both the
+  administrator's permission and the user's choice) and unprotected; Principle V lets the broker
+  set the account slice weight for either.
+- [ ] T071 [US6] Test first, then `modes.plain_priority` (bool, default false) and
+  `modes.plain_priority_cpu_weight` (101 to 10000, default 200) in
+  `src/broker/admin_policy.rs`, `docs/system-mode.md` and
+  `specs/005-system-mode/contracts/admin-policy.md`.
+- [ ] T072 [US6] Test first, then the broker's `raise` request with a `level` (`plain` or
+  `unprotected`, default `unprotected` for compatibility) in `src/broker/request.rs`,
+  `src/broker/systemd.rs` and `src/broker/server.rs`: the level's policy key and weight, one lease
+  per caller at the higher level asked, and every end of FR-027. Container fixture in
+  `tests/system_mode.rs`.
+- [ ] T073 [US6] Test first, then the user's choice `contention.priority_over_plain` (bool,
+  default false) in `src/config.rs`, validated once, and the setup question with Yes preselected
+  and `--priority-over-plain` / `--no-priority-over-plain` in `src/setup.rs` and
+  `src/setup/interface.rs`; setup says when the host cannot apply it.
+- [ ] T074 [US6] Test first, then the agent's steering in `src/system_mode.rs` and
+  `src/agent/service.rs`: wanted while the choice is on, own Performance or Aggressive CPU work
+  runs and every contending CedeGrid principal's account slice reads at the weight or more
+  (read-only, from the cgroup tree; unreadable counts as not raised); withdrawn within two
+  monitor intervals; the higher of the two raises when unprotected also applies. System mode
+  units count as CedeGrid work while they run work (FR-028), in `src/telemetry.rs`.
+- [ ] T075 [US6] `doctor` and `observe` rows for the option: chosen, permitted, in force, weight,
+  reason (`src/main.rs`, `src/explain.rs` with the 001 thread).
+- [ ] T076 [US6] Docs: `docs/system-mode.md`, `docs/guarantees.md` (with the 001 thread),
+  `CHANGELOG.md`, both security review packages.
+- [ ] T077 [US6] SC-009 gate on the test host from installed packages: F2c and own-first on CPU
+  against a plain account, and against a second CedeGrid account with and without the option,
+  with plain arms, three runs each; record in `docs/validation.md`.
+
 ## Phase 7: Docs and checks
 
 - [ ] T060 Update `docs/guarantees.md` (with T023), the 004 and 005 docs and specs for the

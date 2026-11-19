@@ -51,6 +51,21 @@ Arrival order, Admission, Admit immediately and Unprotected rules, and Principle
 - Q: Is matching plain Linux enough for Performance in the default mode? → A: No. The goal is a
   measurable gain over plain Linux in the default mode, not only no loss; a result within the
   run-to-run spread does not yet meet it.
+- Q: Where the kernel splits CPU evenly per account, how does Performance get more CPU than plain
+  Linux beside a plain user? → A: by an install option, priority over plain users: CedeGrid work
+  runs at a higher CPU weight than the work of accounts with no CedeGrid work, while CedeGrid
+  users never take each other's share.
+- Q: What weight? → A: 200 against the default 100, so own work gets about two thirds of a
+  contended CPU against one plain user; the administrator policy may set 101 to 10000, and the
+  unprotected run option stays at its own weight (400 by default).
+- Q: Who turns it on? → A: both. The administrator permits it in the System mode policy (at
+  install, changeable later), and each user chooses it in `cedegrid setup` (changeable by running
+  setup again).
+- Q: What does setup default to? → A: on a terminal the question has Yes preselected; an
+  unattended setup leaves it off unless given its flag.
+- Q: How does a principal whose CedeGrid work cannot be identified count? → A: as plain, so the
+  raise applies; in System mode other CedeGrid users are recognized by their broker units in the
+  cgroup tree, which stays readable where `/proc` is hidden.
 
 ## Terms
 
@@ -171,6 +186,36 @@ hand.
 3. **Given** more GPU jobs than the device's memory holds, **Then** under CedeGrid no own job
    fails to allocate, where by hand at least one does.
 
+### User Story 6 - Priority over plain users, chosen at install (Priority: P1)
+
+An operator in System mode, with the administrator's permission, answers yes in setup. When a
+user who runs no CedeGrid work competes for the CPU, own Performance work gets about two thirds
+of it, where plain Linux would give each account half. Another CedeGrid user is never pushed
+below their fair share by it.
+
+**Why this priority**: where the kernel splits CPU per account, it is the only way Performance
+gets more CPU than plain Linux by default, the maintainer's goal of 2026-11-19.
+
+**Independent Test**: in System mode with the policy key on and the user's choice on, run F2c
+and own-first on CPU with a plain arm; then again beside a second CedeGrid account with and
+without the option.
+
+**Acceptance Scenarios**:
+
+1. **Given** the policy permits it, the user chose it and own Performance work runs, **When** a
+   plain account saturates the same CPUs, **Then** the account slice runs at weight 200 and own
+   work's CPU share is above the even split by at least 10 points.
+2. **Given** the same, **When** a second CedeGrid account without the option competes, **Then**
+   no raise applies while it competes, and both get the even split.
+3. **Given** both CedeGrid accounts chose it, **When** they compete with each other and a plain
+   account, **Then** both run at 200, the even split holds between them and both get more than
+   the plain account.
+4. **Given** the policy forbids it, or the user did not choose it, or the host is rootless,
+   **Then** no raise applies, and `doctor` says which condition is missing.
+5. **Given** a raise in force, **When** own work ends, the user turns it off, the policy turns it
+   off or the user leaves the group, **Then** the weight returns to the default within two
+   monitor intervals, or within the broker's 5 s check.
+
 ### User Story 5 - See who holds whom (Priority: P3)
 
 `doctor` and `observe` show, for each other principal on each compute resource, whether it is
@@ -283,6 +328,33 @@ and for own work, its arrival and the options in force.
   coordinator status and the log, with the raise in force (slice weight, nice value, or none
   available).
 
+**Priority over plain users**
+
+- **FR-024**: The administrator policy MUST gain `modes.plain_priority` (bool, default false) and
+  `modes.plain_priority_cpu_weight` (101 to 10000, default 200). Only with both the key true and
+  the user's choice on does the agent ask the broker for this raise.
+- **FR-025**: `cedegrid setup` MUST ask, on a terminal, whether CedeGrid work gets priority over
+  users who run no CedeGrid work, with Yes preselected; `--priority-over-plain` and
+  `--no-priority-over-plain` set it unattended, and without either an unattended setup leaves it
+  off. Running setup again changes it. Setup MUST say when the host cannot apply it (rootless,
+  or the policy forbids it).
+- **FR-026**: While the choice is on, own Performance or Aggressive CPU work runs and every
+  CedeGrid principal contending on the CPU runs at the policy's weight or more, the agent MUST
+  ask the broker to set the caller's account slice to `modes.plain_priority_cpu_weight`, and
+  MUST withdraw within two monitor intervals once any of these stops holding. A CedeGrid
+  principal's weight is read from its account slice in the cgroup tree; one whose slice cannot
+  be read counts as not raised. Where the unprotected raise also applies, the higher weight wins.
+- **FR-027**: The broker MUST serve this raise as it serves the unprotected one (FR-016, FR-018):
+  only for the caller's own account slice, only while the policy key is true and the caller's
+  ordinary unit sits in that slice, read back, with a 30 s lease, and ended on withdrawal, the
+  units' stop, the lease's expiry, the key turning off, the caller leaving the group, and the
+  broker's stop or start. It MUST never set a weight over one the broker did not set.
+- **FR-028**: A principal whose CedeGrid work cannot be identified counts as plain. In System
+  mode an account with a broker unit in the cgroup tree counts as CedeGrid on the CPU while its
+  unit runs work, whether or not its processes are visible.
+- **FR-029**: `doctor` and `observe` MUST show whether priority over plain users is chosen,
+  permitted and in force, with the weight, and the reason when it is not.
+
 **Visibility and decisions**
 
 - **FR-020**: Each admission decision MUST state, in one sentence, whether it admitted as plain
@@ -305,7 +377,9 @@ and for own work, its arrival and the options in force.
   - fill on an idle scope;
   - two CedeGrid accounts in each order, with and without admit immediately;
   - batch completion time, more jobs than RAM, and more GPU jobs than VRAM;
-  - the unprotected raise in System mode, with and without a protected first-comer.
+  - the unprotected raise in System mode, with and without a protected first-comer;
+  - priority over plain users in System mode: F2c and own-first on CPU against a plain account,
+    and against a second CedeGrid account with and without the option.
 
 ### Key Entities
 
@@ -338,6 +412,10 @@ and for own work, its arrival and the options in force.
 - **SC-007**: No test or gate shows CedeGrid acting on a process outside its verified set.
 - **SC-008**: Identification adds less than 0.2% of one CPU to the agent at a 500 ms monitor
   interval with 200 other processes.
+- **SC-009**: In System mode with priority over plain users permitted and chosen, own work's CPU
+  share beside a saturating plain account is above the even split by at least 10 points, and its
+  throughput above the same work by hand, in 3 of 3 runs of F2c and own-first; beside a second
+  CedeGrid account without the option, both stay at the even split.
 
 ## Assumptions
 
