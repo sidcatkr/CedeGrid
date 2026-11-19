@@ -537,6 +537,14 @@ struct Interval<'a> {
     unknown_allocations: BTreeSet<String>,
     first_observed_gpus: BTreeSet<String>,
     cpu_credit: i128,
+    /// Own CPU charged at no more than each allocation's request, and the credit without the
+    /// usage above requests: admission in Performance and Aggressive with no first-comer
+    /// counts own work as plain Linux does (006 FR-007, SC-002).
+    charged_cpu_requests: u64,
+    cpu_credit_requests: i128,
+    /// CPU admission is as plain Linux would start work: Performance or Aggressive with no
+    /// first-comer holding it.
+    cpu_plain_admission: bool,
     /// What held-back allocations are charged above what they hold now: it closes
     /// admission but is not own usage beyond the budget.
     held_back_cpu: u64,
@@ -681,6 +689,9 @@ impl<'a> Interval<'a> {
             unknown_allocations: BTreeSet::new(),
             first_observed_gpus: BTreeSet::new(),
             cpu_credit: 0,
+            charged_cpu_requests: 0,
+            cpu_credit_requests: 0,
+            cpu_plain_admission: false,
             held_back_cpu: 0,
             allocation_modes: BTreeMap::new(),
             budget: Resources::default(),
@@ -797,9 +808,12 @@ impl<'a> Interval<'a> {
             oom_preferred: self.next.oom_preferred.clone(),
             save_progress: self.save_progress,
             ram_fair_share_mib: self.memory_fair_share.get(&ResourceKey::Ram).copied(),
-            cpu_admission_credit_millicores: self
-                .cpu_credit
-                .clamp(i128::from(i64::MIN), i128::from(i64::MAX))
+            cpu_admission_credit_millicores: if self.cpu_plain_admission {
+                self.cpu_credit_requests
+            } else {
+                self.cpu_credit
+            }
+            .clamp(i128::from(i64::MIN), i128::from(i64::MAX))
                 as i64,
         };
         // Every reported code is in the catalog, so tests fail on a new one (T113).

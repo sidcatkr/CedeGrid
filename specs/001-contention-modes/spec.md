@@ -1803,7 +1803,8 @@ node reports with the expected per-resource values at each step.
     compute as plain Linux would start it: up to the capacity less the operator reserve, within
     the envelope and the ancestor quota, with no admission margin, no deduction of their usage,
     CedeGrid's own CPU left in, and without the time-slice admission hold, recording
-    `admitted_as_plain`. The bullets on admission below apply only beside a CedeGrid principal
+    `admitted_as_plain`; own CPU then counts at no more than each request, so usage above the
+    requests takes no room from tasks still to start (006 SC-002). The bullets on admission below apply only beside a CedeGrid principal
     that arrived first, counting only such first-comers, and record `held_for_first_comer`;
     while the principal list cannot be read, they count every principal. The decision also
     carries an admit immediately budget that counts only protected first-comers, those running
