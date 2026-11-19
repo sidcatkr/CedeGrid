@@ -219,8 +219,10 @@ CPU uses millicores of logical CPU time: 1,000 millicores equals one logical CPU
 Physical-core reserves are mapped conservatively using available topology.
 For admission, each running or draining allocation is charged the greater of its request
 and observed usage once, except where CPU admission is as plain Linux would start work, in
-Performance and Aggressive with no first-comer holding it: there own CPU counts at no more than
-each request, so usage above the requests takes no room from tasks still to start (006 SC-002).
+Performance and Aggressive with no first-comer holding it (the decision's
+`cpu_plain_admission`): there own CPU counts at no more than each request, in the policy and in
+any bound the agent adds, so usage above the requests takes no room from tasks still to start
+(006 SC-002).
 Running opportunistic CPU, once it has a full window of
 samples over `contention.cpu.admission_usage_window_s` (60 s), is charged at its mean usage
 while no other principal is active on CPU, and at its p95 from the interval one appears, so work

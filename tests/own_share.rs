@@ -1009,3 +1009,32 @@ fn performance_admits_by_requests_where_tasks_use_more() {
     assert_eq!(held.managed_budget.cpu_millicores, 2000);
     assert_eq!(held.admission_headroom.cpu_millicores, 1000);
 }
+
+/// The decision says when CPU admission is as plain Linux would start work, so the agent's own
+/// bounds count own CPU at its requests too (006 FR-007, SC-002).
+#[test]
+fn the_decision_says_when_cpu_admission_is_plain() {
+    let plain = |mode: ContentionMode, work: Option<CedeGridWork>| {
+        let (mut snapshot, input) = reading_beside(2000, 50, 0, Some(true), work);
+        let mut engine = PolicyEngine::new();
+        let mut last = None;
+        for i in 0..4u64 {
+            snapshot.observed_at_unix_ms = 100 + i * 500;
+            snapshot.kernel.as_mut().unwrap().monotonic_elapsed_ms = 500 + i * 500;
+            last = Some(
+                engine
+                    .evaluate(&config(mode), &snapshot, &input, i * 500)
+                    .unwrap(),
+            );
+        }
+        last.unwrap().cpu_plain_admission
+    };
+    assert!(plain(ContentionMode::Performance, None));
+    assert!(plain(ContentionMode::Aggressive, None));
+    assert!(
+        !plain(ContentionMode::Performance, FIRST),
+        "a first-comer holds it"
+    );
+    assert!(!plain(ContentionMode::Neutral, None));
+    assert!(!plain(ContentionMode::YieldFirst, None));
+}

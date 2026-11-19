@@ -55,6 +55,7 @@ fn observation() -> (Snapshot, Decision) {
         managed_budget: Resources::default(),
         admit_immediately_budget: None,
         cpu_beside_plain: false,
+        cpu_plain_admission: false,
         admission_headroom: Resources::default(),
         expansion_allowed: false,
         cpu_ram_expansion_allowed: false,
