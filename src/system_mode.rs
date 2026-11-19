@@ -177,6 +177,116 @@ pub fn plain_priority_host_now() -> PlainPriorityHost {
     PlainPriorityHost::Rootless
 }
 
+/// Priority over plain users as `doctor` and `observe` show it (006 FR-029).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct PlainPriorityStatus {
+    /// The user's choice, `contention.priority_over_plain`.
+    pub chosen: bool,
+    /// Whether this host's System mode policy permits it.
+    pub permitted: bool,
+    /// The account slice weight it sets, where the policy can be read.
+    pub weight: Option<u64>,
+    /// Whether this account's slice runs at that weight now.
+    pub in_force: bool,
+    /// Why it is not in force, in one sentence.
+    pub reason: Option<String>,
+}
+
+/// The status from the choice, what the host offers, this account's slice weight and the number
+/// of other accounts with CedeGrid work on the CPU below the weight.
+pub fn plain_priority_status(
+    chosen: bool,
+    host: &PlainPriorityHost,
+    own_weight: Option<u64>,
+    below: usize,
+) -> PlainPriorityStatus {
+    let weight = match host {
+        PlainPriorityHost::Permitted(weight) => Some(*weight),
+        _ => None,
+    };
+    let in_force = chosen && weight.is_some() && own_weight == weight;
+    let reason = match (host, weight) {
+        _ if in_force => None,
+        _ if !chosen => {
+            Some("not chosen; run cedegrid setup --priority-over-plain to choose it".to_owned())
+        }
+        (PlainPriorityHost::Rootless, _) => {
+            Some("this host runs CedeGrid rootless; it needs System mode".to_owned())
+        }
+        (PlainPriorityHost::NotPermitted, _) => {
+            Some("the System mode policy does not permit it (modes.plain_priority)".to_owned())
+        }
+        (PlainPriorityHost::Unreadable(why), _) => {
+            Some(format!("the System mode policy cannot be read: {why}"))
+        }
+        (_, Some(weight)) if own_weight.is_some_and(|own| own > weight) => Some(format!(
+            "the unprotected raise is in force at weight {}",
+            own_weight.unwrap_or_default()
+        )),
+        (_, Some(weight)) if below > 0 => Some(format!(
+            "another account's CedeGrid work on the CPU runs below weight {weight}"
+        )),
+        _ => Some("it holds only while own Performance or Aggressive CPU work runs".to_owned()),
+    };
+    PlainPriorityStatus {
+        chosen,
+        permitted: weight.is_some(),
+        weight,
+        in_force,
+        reason,
+    }
+}
+
+/// `doctor`'s section for priority over plain users.
+pub fn plain_priority_text(status: &PlainPriorityStatus) -> String {
+    let yes_no = |on: bool| if on { "yes" } else { "no" };
+    let permitted = match status.weight {
+        Some(weight) => format!("yes, at weight {weight}"),
+        None => "no".to_owned(),
+    };
+    let in_force = match &status.reason {
+        Some(reason) if !status.in_force => format!("no: {reason}"),
+        _ => yes_no(status.in_force).to_owned(),
+    };
+    let mut out = String::from("\nPriority over plain users\n");
+    for line in crate::setup::key_values(
+        &[
+            ("chosen", yes_no(status.chosen).to_owned()),
+            ("permitted", permitted),
+            ("in force", in_force),
+        ],
+        2,
+    ) {
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out
+}
+
+/// The status on this host now: the policy where System mode is installed, this account's slice
+/// weight and the other accounts in `principals` below the weight.
+pub fn plain_priority_status_now(
+    chosen: bool,
+    principals: &[crate::model::PrincipalUsage],
+) -> PlainPriorityStatus {
+    let host = plain_priority_host_now();
+    #[cfg(unix)]
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let own = crate::broker::units::account_slice_weight(unsafe { libc::getuid() });
+    #[cfg(not(unix))]
+    let own = None;
+    let below = match host {
+        PlainPriorityHost::Permitted(weight) => below_plain_weight(
+            weight,
+            principals,
+            crate::broker::units::account_slice_weight,
+        )
+        .len(),
+        _ => 0,
+    };
+    plain_priority_status(chosen, &host, own, below)
+}
+
 /// The accounts with CedeGrid work on the CPU whose account slice is below `weight`, which keep
 /// priority over plain users from holding (006 FR-026). `slice_weight` reads one account
 /// slice's CPU weight; an unreadable slice or an unknown owner counts as below.

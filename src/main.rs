@@ -702,6 +702,11 @@ async fn async_main(cli: Cli) -> Result<()> {
             // One read-only evaluation shows each resource's state; no state is opened.
             let decision =
                 PolicyEngine::new().evaluate(&config, &snapshot, &PolicyInput::default(), 0)?;
+            // Priority over plain users: chosen, permitted, in force (006 FR-029).
+            let priority = cedegrid::system_mode::plain_priority_status_now(
+                config.contention.priority_over_plain,
+                snapshot.principals.as_deref().unwrap_or_default(),
+            );
             if text {
                 // Unprotected is shown where the configuration names Aggressive or the
                 // allowance is on; on a System mode host the administrator key applies too.
@@ -742,8 +747,18 @@ async fn async_main(cli: Cli) -> Result<()> {
                 } else {
                     String::new()
                 };
+                // Shown where chosen or where System mode could apply it.
+                let priority = if priority.chosen
+                    || std::path::Path::new(cedegrid::broker::admin_policy::POLICY_DIR)
+                        .join(cedegrid::broker::admin_policy::POLICY_FILE)
+                        .exists()
+                {
+                    cedegrid::system_mode::plain_priority_text(&priority)
+                } else {
+                    String::new()
+                };
                 let text = format!(
-                    "{}{unprotected}{}{}",
+                    "{}{unprotected}{priority}{}{}",
                     cedegrid::explain::doctor_text(&config, &snapshot, &decision, &config_warnings),
                     cedegrid::explain::derived_text(&config),
                     cedegrid::explain::descendants_text(cedegrid::supervision::descendant_lists())
@@ -786,6 +801,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                 "exceptions": decision.exceptions,
                 "reason_codes": decision.reason_codes,
                 "available_steps": cedegrid::explain::available_steps(&config),
+                "priority_over_plain": priority,
                 "descendant_lists": cedegrid::supervision::descendant_lists(),
                 "derived": config.derived_settings()
                 }))?;
@@ -848,6 +864,11 @@ async fn async_main(cli: Cli) -> Result<()> {
                         .transpose()?
                         .unwrap_or_default(),
                 )?;
+                observation["priority_over_plain"] =
+                    serde_json::to_value(cedegrid::system_mode::plain_priority_status_now(
+                        config.contention.priority_over_plain,
+                        snapshot.principals.as_deref().unwrap_or_default(),
+                    ))?;
                 emit(&observation)?;
                 count = count.saturating_add(1);
                 if samples != 0 && count >= samples {

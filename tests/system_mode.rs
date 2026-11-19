@@ -4114,6 +4114,130 @@ c.submit('{job}', 'pool', [t])
         outcome.unwrap();
     }
 
+    /// 006 T072, FR-027: under `modes.plain_priority` a member's plain raise weights its own
+    /// account slice at `modes.plain_priority_cpu_weight` and nothing else. It is refused without
+    /// the key; the unprotected level stays refused without its own key and leaves the plain
+    /// weight alone. Withdrawal, the key turning off, the broker's stop and the next broker's start
+    /// each end it.
+    #[test]
+    #[ignore = "not tested: requires the system-mode container (CEDEGRID_TEST_SYSTEM_CONTAINER)"]
+    fn a_plain_raise_weights_only_the_account_slice_at_its_own_weight() {
+        assert!(enabled(), "{GATE}");
+        install();
+        stop_units(MEMBER);
+        let slice = format!("user-{MEMBER_UID}.slice");
+        let holder = "raise-fixture-plain-split.service";
+        let cleanup = || {
+            let _ = run("systemctl", &["stop", holder]);
+            stop_units(MEMBER);
+            let _ = std::fs::remove_file("/etc/cedegrid/policy.toml");
+            let _ = run("systemctl", &["revert", "--", &slice]);
+        };
+        cleanup();
+        let outcome = std::panic::catch_unwind(|| {
+            let weight = || show(&slice, "CPUWeight")["CPUWeight"].clone();
+            let raise = |on: bool, level: &str| {
+                reply_code(&raw_request(
+                    Some(MEMBER),
+                    format!(
+                        "{{\"protocol\":1,\"kind\":\"raise\",\"on\":{on},\"level\":\"{level}\"}}\n"
+                    )
+                    .as_bytes(),
+                    false,
+                ))
+            };
+            let policy = |plain: bool| {
+                ok("install", &["-d", "-m", "0755", "/etc/cedegrid"]);
+                std::fs::write(
+                    "/etc/cedegrid/policy.toml",
+                    format!(
+                        "policy_version = 1\n[modes]\nplain_priority = {plain}\nplain_priority_cpu_weight = 300\n"
+                    ),
+                )
+                .unwrap();
+                ok("chmod", &["0644", "/etc/cedegrid/policy.toml"]);
+            };
+            let start = || {
+                let output = cedegrid_as(MEMBER, &["system", "start"]);
+                assert!(output.status.success(), "{}", stderr(&output));
+                assert!(wait_until(Duration::from_secs(10), || {
+                    show(&ordinary(MEMBER_UID), "ActiveState")["ActiveState"] == "active"
+                }));
+                show(&ordinary(MEMBER_UID), "Slice")["Slice"].clone()
+            };
+            let unset = "[not set]";
+            // Another account's work with a CPU weight splits user.slice by account.
+            ok(
+                "systemd-run",
+                &[
+                    "--quiet",
+                    "--unit",
+                    holder,
+                    "--slice",
+                    &format!("user-{SECOND_UID}.slice"),
+                    "-p",
+                    "CPUWeight=100",
+                    "sleep",
+                    "600",
+                ],
+            );
+            assert!(wait_until(Duration::from_secs(5), || {
+                std::fs::read_to_string("/sys/fs/cgroup/user.slice/cgroup.subtree_control")
+                    .is_ok_and(|text| text.split_whitespace().any(|c| c == "cpu"))
+            }));
+            policy(false);
+            assert_eq!(start(), slice);
+            assert_eq!(raise(true, "plain"), "raise_refused");
+            assert_eq!(weight(), unset);
+            // Permitted: the account slice, and no other, at the plain weight, read back.
+            policy(true);
+            assert_eq!(raise(true, "plain"), "ok");
+            assert_eq!(weight(), "300");
+            assert_eq!(
+                show(&format!("user-{SECOND_UID}.slice"), "CPUWeight")["CPUWeight"],
+                unset
+            );
+            // The unprotected level has its own key, and a refusal leaves the weight.
+            assert_eq!(raise(true, "unprotected"), "raise_refused");
+            assert_eq!(weight(), "300");
+            assert_eq!(raise(false, "plain"), "ok");
+            assert_eq!(weight(), unset);
+            // The key off ends it at the broker's next check, within 5 s.
+            assert_eq!(raise(true, "plain"), "ok");
+            policy(false);
+            assert!(
+                wait_until(Duration::from_secs(8), || weight() == unset),
+                "{}",
+                weight()
+            );
+            policy(true);
+            // The broker's stop ends it through its unit's stop hook.
+            assert_eq!(raise(true, "plain"), "ok");
+            ok("systemctl", &["stop", "cedegrid-broker.service"]);
+            assert!(
+                wait_until(Duration::from_secs(10), || weight() == unset),
+                "{}",
+                weight()
+            );
+            // A plain raise left without the hook ends at the next broker's start.
+            ok(
+                "systemctl",
+                &["set-property", "--runtime", "--", &slice, "CPUWeight=300"],
+            );
+            assert_eq!(
+                reply_code(&raw_request(
+                    Some(MEMBER),
+                    b"{\"protocol\":1,\"kind\":\"status\"}\n",
+                    false
+                )),
+                "ok"
+            );
+            assert_eq!(weight(), unset);
+        });
+        cleanup();
+        outcome.unwrap();
+    }
+
     #[test]
     #[ignore = "not tested: requires the system-mode container (CEDEGRID_TEST_SYSTEM_CONTAINER)"]
     fn a_member_start_makes_both_units_with_the_contract_properties() {
@@ -5311,6 +5435,69 @@ fn the_plain_raise_holds_only_while_no_cedegrid_account_is_below() {
     assert!(steer.wanted(true, &below(&[]), 32_000, 2000));
     assert!(!steer.wanted(true, &[None].into(), 32_500, 2000));
     assert!(!steer.wanted(true, &below(&[2002]), 33_000, 2000));
+}
+
+/// 006 FR-029: doctor and observe show whether priority over plain users is chosen, permitted
+/// and in force, with the weight, and the reason when it is not.
+#[test]
+fn priority_over_plain_users_shows_chosen_permitted_and_in_force() {
+    use cedegrid::system_mode::{PlainPriorityHost, plain_priority_status, plain_priority_text};
+    let status = |chosen, host: PlainPriorityHost, own: Option<u64>, below: usize| {
+        plain_priority_status(chosen, &host, own, below)
+    };
+    let held = status(true, PlainPriorityHost::Permitted(200), Some(200), 0);
+    assert!(held.chosen && held.permitted && held.in_force);
+    assert_eq!(held.weight, Some(200));
+    assert_eq!(held.reason, None);
+    assert_eq!(
+        plain_priority_text(&held),
+        "\nPriority over plain users\n  chosen      yes\n  permitted   yes, at weight 200\n  in force    yes\n"
+    );
+    let cases = [
+        (
+            status(false, PlainPriorityHost::Permitted(200), Some(100), 0),
+            "not chosen; run cedegrid setup --priority-over-plain to choose it",
+        ),
+        (
+            status(true, PlainPriorityHost::Rootless, None, 0),
+            "this host runs CedeGrid rootless; it needs System mode",
+        ),
+        (
+            status(true, PlainPriorityHost::NotPermitted, Some(100), 0),
+            "the System mode policy does not permit it (modes.plain_priority)",
+        ),
+        (
+            status(
+                true,
+                PlainPriorityHost::Unreadable("bad".into()),
+                Some(100),
+                0,
+            ),
+            "the System mode policy cannot be read: bad",
+        ),
+        (
+            status(true, PlainPriorityHost::Permitted(200), Some(100), 1),
+            "another account's CedeGrid work on the CPU runs below weight 200",
+        ),
+        (
+            status(true, PlainPriorityHost::Permitted(200), Some(100), 0),
+            "it holds only while own Performance or Aggressive CPU work runs",
+        ),
+        (
+            status(true, PlainPriorityHost::Permitted(200), Some(400), 0),
+            "the unprotected raise is in force at weight 400",
+        ),
+    ];
+    for (status, reason) in cases {
+        assert!(!status.in_force, "{reason}");
+        assert_eq!(status.reason.as_deref(), Some(reason));
+    }
+    let text = plain_priority_text(&status(true, PlainPriorityHost::NotPermitted, None, 0));
+    assert!(text.contains("  permitted   no\n"), "{text}");
+    assert!(
+        text.contains("  in force    no: the System mode policy does not permit it"),
+        "{text}"
+    );
 }
 
 /// 006 FR-026: where both raises are wanted, the one with the higher policy weight is asked

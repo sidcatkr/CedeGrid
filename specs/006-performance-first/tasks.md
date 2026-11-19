@@ -144,7 +144,7 @@ this thread's.
   (read-only, from the cgroup tree; unreadable counts as not raised); withdrawn within two
   monitor intervals; the higher of the two raises when unprotected also applies. System mode
   units count as CedeGrid work while they run work (FR-028), in `src/telemetry.rs`.
-- [ ] T075 [US6] `doctor` and `observe` rows for the option: chosen, permitted, in force, weight,
+- [x] T075 [US6] `doctor` and `observe` rows for the option: chosen, permitted, in force, weight,
   reason (`src/main.rs`, `src/explain.rs` with the 001 thread).
 - [ ] T076 [US6] Docs: `docs/system-mode.md`, `docs/guarantees.md` (with the 001 thread),
   `CHANGELOG.md`, both security review packages.
