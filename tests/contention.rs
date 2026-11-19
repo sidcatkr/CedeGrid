@@ -54,21 +54,6 @@ pub fn snapshot(cpu_busy_millicores: u64) -> Snapshot {
     }
 }
 
-/// Running jobs at their requests, sharing the CPU as the kernel does once their requests add
-/// up to more than `capacity`: Performance may start one task more than the scope holds
-/// (006 SC-004).
-pub fn run_at_requests(jobs: &mut [Allocation], capacity: u64) {
-    let requested: u64 = jobs.iter().map(|j| j.requested.cpu_millicores).sum();
-    for job in jobs.iter_mut() {
-        job.phase = AllocationPhase::Running;
-        let mut observed = job.requested.clone();
-        if requested > capacity {
-            observed.cpu_millicores = observed.cpu_millicores * capacity / requested;
-        }
-        job.observed = Some(observed);
-    }
-}
-
 pub fn allocation(
     id: &str,
     class: AllocationClass,
@@ -2284,7 +2269,10 @@ mod scenarios {
         let mut reached = None;
         let mut last_growth = 0;
         for now in (0..=30_000).step_by(INTERVAL as usize) {
-            run_at_requests(&mut jobs, CAPACITY);
+            for job in &mut jobs {
+                job.phase = AllocationPhase::Running;
+                job.observed = Some(job.requested.clone());
+            }
             let own: u64 = jobs
                 .iter()
                 .filter_map(|j| j.observed.as_ref())
@@ -2580,7 +2568,10 @@ mod ramp {
         let (mut admitted, mut last_growth) = (0usize, 0u64);
         let mut own_per_interval = vec![];
         for now in (0..=until_ms).step_by(INTERVAL as usize) {
-            run_at_requests(&mut jobs, CAPACITY);
+            for job in &mut jobs {
+                job.phase = AllocationPhase::Running;
+                job.observed = Some(job.requested.clone());
+            }
             let own: u64 = jobs
                 .iter()
                 .filter_map(|j| j.observed.as_ref())
@@ -3661,9 +3652,8 @@ mod psi_saturation {
             .map(|d| d.resources[&ResourceKey::Cpu].target_share)
             .collect();
         // 8000 − 500 external − each mode's margin (15%, 5%); the other user runs no CedeGrid
-        // work, so Performance's is the whole 8000 and one more task of the 72 the host's
-        // 1000 m of requests is split into (006 FR-007, SC-004).
-        assert_eq!(targets, [Some(6300), Some(7100), Some(8000 + 1000 / 72)]);
+        // work, so Performance's is the whole 8000 (006 FR-007).
+        assert_eq!(targets, [Some(6300), Some(7100), Some(8000)]);
         assert_eq!(hosts.map(|host| host.own()), [6300, 7100, 7200]);
     }
 

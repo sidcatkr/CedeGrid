@@ -1813,10 +1813,7 @@ node reports with the expected per-resource values at each step.
     the envelope and the ancestor quota, with no admission margin, no deduction of their usage,
     CedeGrid's own CPU left in, and without the time-slice admission hold, recording
     `admitted_as_plain`; own CPU then counts at no more than each request, so usage above the
-    requests takes no room from tasks still to start (006 SC-002), and one own task more than
-    the capacity holds may start, as large as the largest own task running or waiting, so no CPU
-    sits idle while the next task starts after one ends (006 SC-004). The bullets on admission
-    below apply only beside a CedeGrid principal
+    requests takes no room from tasks still to start (006 SC-002). The bullets on admission below apply only beside a CedeGrid principal
     that arrived first, counting only such first-comers, and record `held_for_first_comer`;
     while the principal list cannot be read, they count every principal. The decision also
     carries an admit immediately budget that counts only protected first-comers, those running
