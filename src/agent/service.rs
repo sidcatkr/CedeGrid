@@ -1633,7 +1633,10 @@ impl AgentLoop<'_> {
                 tokio::task::spawn_blocking(move || {
                     crate::system_mode::ask(
                         Path::new(crate::broker::SOCKET_PATH),
-                        &crate::broker::request::Request::Raise { on },
+                        &crate::broker::request::Request::Raise {
+                            on,
+                            level: crate::broker::request::RaiseLevel::Unprotected,
+                        },
                         crate::system_mode::CLIENT_TIMEOUT,
                     )
                 }),

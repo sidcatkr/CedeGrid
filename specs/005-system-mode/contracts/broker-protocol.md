@@ -19,13 +19,18 @@ of the coordinator's v1 wire and is not exposed to the SDKs.
 {"protocol": 1, "kind": "stop"}
 {"protocol": 1, "kind": "status"}
 {"protocol": 1, "kind": "move", "job": "<job id>", "mode": "yield_first"}
+{"protocol": 1, "kind": "raise", "on": true, "level": "plain"}
 ```
 
 - `protocol`: required, must equal the broker's.
-- `kind`: required, one of `start`, `stop`, `status`, `move`.
+- `kind`: required, one of `start`, `stop`, `status`, `move`, `raise` (006).
 - `mode`: `start` and `move` only; one of 001's mode names, and allowed by the policy.
 - `job`: `move` only; at most 128 bytes of `[A-Za-z0-9_-]`; resolved only inside the caller's
   own units.
+- `on`: `raise` only, required: raise or end the raise of the caller's account slice weight.
+- `level`: `raise` only, `plain` (priority over plain users, `modes.plain_priority` and its
+  weight) or `unprotected` (`modes.unprotected` and its weight); absent means `unprotected`. One
+  lease per caller, 30 s, at the level last asked.
 - Unknown fields are refused with `unknown_field`. A field named for an identity (`uid`, `user`,
   `unit`, `path`, `cgroup`, `exec`, `mount`, `device`, `capability`, or any other) is refused
   with `identity_in_request` and logged at warning level.
@@ -53,6 +58,7 @@ Each `message` is one sentence that says what to do.
 | `rate_limited` | the caller's request rate is over its bound |
 | `unit_not_ours` | a unit with the caller's name exists without the broker's marker |
 | `job_not_found`, `move_refused` | a move whose job is not in the caller's source unit, or whose members fail a check |
+| `raise_refused` | the level's policy key is false, the caller's ordinary unit is not in its account slice, or the slice has a weight the broker did not set |
 | `systemd_timeout`, `systemd_failed` | the systemd call did not finish or failed |
 
 ## Journal

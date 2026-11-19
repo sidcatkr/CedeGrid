@@ -41,7 +41,7 @@ const IDENTITY_WORDS: &[&str] = &[
     "caps",
 ];
 
-const FIELDS: &[&str] = &["protocol", "kind", "mode", "job", "on"];
+const FIELDS: &[&str] = &["protocol", "kind", "mode", "job", "on", "level"];
 
 /// One request about the caller's own units (FR-005).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,9 +54,27 @@ pub enum Request {
     Status,
     /// Move one of the caller's jobs to the unit for `mode` (FR-018).
     Move { job: JobId, mode: ModeName },
-    /// Raise, or stop raising, the CPU weight of the caller's account slice under unprotected
-    /// (006 FR-016).
-    Raise { on: bool },
+    /// Raise, or stop raising, the CPU weight of the caller's account slice, at the weight of
+    /// `level` (006 FR-016, FR-027).
+    Raise { on: bool, level: RaiseLevel },
+}
+
+/// Which raise a `raise` request asks for; each has its own policy key and weight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RaiseLevel {
+    /// Priority over plain users, the install option (006 FR-024 to FR-028).
+    Plain,
+    /// The unprotected run option (006 FR-016); a request without a level asks for it.
+    Unprotected,
+}
+
+impl RaiseLevel {
+    pub fn name(self) -> &'static str {
+        match self {
+            RaiseLevel::Plain => "plain",
+            RaiseLevel::Unprotected => "unprotected",
+        }
+    }
 }
 
 impl Request {
@@ -71,8 +89,12 @@ impl Request {
         if let Request::Move { job, .. } = self {
             fields.insert("job".to_owned(), Value::from(job.as_str()));
         }
-        if let Request::Raise { on } = self {
+        if let Request::Raise { on, level } = self {
             fields.insert("on".to_owned(), Value::from(*on));
+            // Unprotected is the level a request without one asks for, as 006 first sent it.
+            if *level != RaiseLevel::Unprotected {
+                fields.insert("level".to_owned(), Value::from(level.name()));
+            }
         }
         let mut line = Value::Object(fields).to_string();
         line.push('\n');
@@ -314,9 +336,20 @@ pub fn parse_frame(frame: &[u8]) -> Result<Request, Refusal> {
             Ok(Request::Move { job, mode })
         }
         "raise" => {
-            only_fields(&fields, &["protocol", "kind", "on"])?;
+            only_fields(&fields, &["protocol", "kind", "on", "level"])?;
+            let level = match fields.get("level") {
+                None => RaiseLevel::Unprotected,
+                Some(Value::String(level)) if level == "unprotected" => RaiseLevel::Unprotected,
+                Some(Value::String(level)) if level == "plain" => RaiseLevel::Plain,
+                Some(_) => {
+                    return Err(Refusal::new(
+                        RefusalCode::Malformed,
+                        "raise level must be plain or unprotected",
+                    ));
+                }
+            };
             match fields.get("on") {
-                Some(Value::Bool(on)) => Ok(Request::Raise { on: *on }),
+                Some(Value::Bool(on)) => Ok(Request::Raise { on: *on, level }),
                 _ => Err(Refusal::new(
                     RefusalCode::Malformed,
                     "raise request without a true or false field on",
@@ -385,7 +418,7 @@ fn unknown_field(name: &str) -> Refusal {
         format!(
             "unknown field {} (this request accepts {})",
             shown(name),
-            "protocol, kind, and mode, job or on where the kind takes them"
+            "protocol, kind, and mode, job, on or level where the kind takes them"
         ),
     )
 }

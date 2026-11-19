@@ -7,7 +7,9 @@ use super::admin_policy::AdminPolicy;
 use super::moves::{CgroupFs, move_job};
 use super::oom::ProcessAccess;
 use super::peer::{Accounts, PeerCredentials, authorize, peer_credentials};
-use super::request::{MAX_REQUEST_BYTES, Refusal, RefusalCode, Reply, Request, parse_frame};
+use super::request::{
+    MAX_REQUEST_BYTES, RaiseLevel, Refusal, RefusalCode, Reply, Request, parse_frame,
+};
 use super::systemd::{Systemd, caller_units, start_units, status_units, stop_units};
 use super::units::Placement;
 use std::collections::HashMap;
@@ -87,7 +89,7 @@ pub struct BrokerState {
     /// One lock per caller, so a caller's requests run one at a time.
     pub callers: Mutex<HashMap<u32, Arc<Mutex<()>>>>,
     /// When each raised account slice's lease ends, by caller (006 FR-018).
-    pub raises: Mutex<HashMap<u32, Instant>>,
+    pub raises: Mutex<HashMap<u32, (Instant, RaiseLevel)>>,
 }
 
 /// How long a raise lasts without the caller renewing it (006 FR-018).
@@ -96,21 +98,25 @@ pub const RAISE_LEASE: Duration = Duration::from_secs(30);
 /// Resets every account slice whose raise lease ended before `now`, and every one at once while
 /// the policy does not permit unprotected or its caller is no longer a member (006 FR-018).
 pub fn expire_raises(state: &BrokerState, now: Instant) {
-    let leases: Vec<(u32, Instant)> = state
+    let leases: Vec<(u32, Instant, RaiseLevel)> = state
         .raises
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .iter()
-        .map(|(uid, until)| (*uid, *until))
+        .map(|(uid, (until, level))| (*uid, *until, *level))
         .collect();
     if leases.is_empty() {
         return;
     }
     // An unreadable policy or group database ends the raise: it fails closed.
-    let permitted = (state.load_policy)().is_ok_and(|policy| policy.unprotected.value);
-    for (uid, until) in leases {
+    let policy = (state.load_policy)().ok();
+    for (uid, until, level) in leases {
+        let permitted = policy.as_ref().is_some_and(|policy| match level {
+            RaiseLevel::Unprotected => policy.unprotected.value,
+            RaiseLevel::Plain => policy.plain_priority.value,
+        });
         let reason = if !permitted {
-            "unprotected not permitted"
+            "its level not permitted"
         } else if !state.accounts.is_member(uid).unwrap_or(false) {
             "not a member"
         } else if until <= now {
@@ -158,13 +164,25 @@ pub fn end_left_raises(systemd: &dyn Systemd, weight: u64, dir: &std::path::Path
 /// The second argument with which the broker's unit runs it after it stops (`ExecStopPost`).
 pub const END_RAISES_ARGUMENT: &str = "end-raises";
 
-/// The weight a left raise carries: the policy's, or the default when the policy is unreadable.
+/// The weights a left raise can carry: both levels' from the policy, or their defaults when
+/// the policy is unreadable.
 #[cfg(target_os = "linux")]
-fn left_raise_weight() -> u64 {
-    super::admin_policy::load().map_or(
-        super::admin_policy::DEFAULT_UNPROTECTED_CPU_WEIGHT,
-        |policy| policy.unprotected_cpu_weight.value,
-    )
+fn left_raise_weights() -> Vec<u64> {
+    let mut weights = super::admin_policy::load().map_or(
+        vec![
+            super::admin_policy::DEFAULT_UNPROTECTED_CPU_WEIGHT,
+            super::admin_policy::DEFAULT_PLAIN_PRIORITY_CPU_WEIGHT,
+        ],
+        |policy| {
+            vec![
+                policy.unprotected_cpu_weight.value,
+                policy.plain_priority_cpu_weight.value,
+            ]
+        },
+    );
+    weights.sort_unstable();
+    weights.dedup();
+    weights
 }
 
 /// One journal line (FR-011). Losing a log line never stops the broker.
@@ -316,22 +334,29 @@ pub fn handle(state: &BrokerState, peer: PeerCredentials, frame: &[u8]) -> Handl
                 .remove(&caller.uid)
                 .is_some()
             {
-                super::systemd::raise_account_slice(systemd, caller, &policy, false)?;
+                super::systemd::raise_account_slice(
+                    systemd,
+                    caller,
+                    &policy,
+                    false,
+                    RaiseLevel::Unprotected,
+                )?;
             }
             Ok(units)
         }),
-        Request::Raise { on } => super::systemd::raise_account_slice(systemd, caller, &policy, on)
-            .inspect(|_| {
+        Request::Raise { on, level } => {
+            super::systemd::raise_account_slice(systemd, caller, &policy, on, level).inspect(|_| {
                 let mut raises = state
                     .raises
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 if on {
-                    raises.insert(caller.uid, Instant::now() + RAISE_LEASE);
+                    raises.insert(caller.uid, (Instant::now() + RAISE_LEASE, level));
                 } else {
                     raises.remove(&caller.uid);
                 }
-            }),
+            })
+        }
         Request::Status => status_units(systemd, caller),
         Request::Move { job, mode } => caller_units(systemd, caller).and_then(|units| {
             let moved = move_job(
@@ -522,7 +547,9 @@ pub fn run() -> anyhow::Result<()> {
     let control = std::path::Path::new(super::systemd::RUNTIME_CONTROL_DIR);
     // After the broker stopped, however it stopped, its raises end with it.
     if std::env::args_os().nth(2).as_deref() == Some(std::ffi::OsStr::new(END_RAISES_ARGUMENT)) {
-        end_left_raises(&SystemctlRunner::default(), left_raise_weight(), control);
+        for weight in left_raise_weights() {
+            end_left_raises(&SystemctlRunner::default(), weight, control);
+        }
         return Ok(());
     }
     // Socket activation passes the listener as descriptor 3 (sd_listen_fds).
@@ -569,7 +596,9 @@ pub fn run() -> anyhow::Result<()> {
         raises: Mutex::new(HashMap::new()),
     });
     // No lease is held yet, so any raise found is one an earlier broker left.
-    end_left_raises(state.systemd.as_ref(), left_raise_weight(), control);
+    for weight in left_raise_weights() {
+        end_left_raises(state.systemd.as_ref(), weight, control);
+    }
     let expiring = Arc::clone(&state);
     std::thread::Builder::new()
         .name("broker-raise".to_owned())

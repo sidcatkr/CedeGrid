@@ -5,7 +5,7 @@
 
 use cedegrid::broker::admin_policy::{self, AdminPolicy, Source};
 use cedegrid::broker::request::{
-    JobId, MAX_REQUEST_BYTES, RefusalCode, Reply, Request, parse_frame,
+    JobId, MAX_REQUEST_BYTES, RaiseLevel, RefusalCode, Reply, Request, parse_frame,
 };
 use cedegrid::broker::score::{
     Lowering, OverShareMarking, ProcessKey, ScoreInput, ScoreWrite, ScoredProcess, ScoredTask,
@@ -64,10 +64,17 @@ fn closed_request_set_parses() {
             parse_frame(&frame(&format!(
                 r#"{{"protocol":1,"kind":"raise","on":{on}}}"#
             ))),
-            Ok(Request::Raise { on })
+            Ok(Request::Raise {
+                on,
+                level: RaiseLevel::Unprotected
+            })
         );
         assert_eq!(
-            Request::Raise { on }.to_line(),
+            Request::Raise {
+                on,
+                level: RaiseLevel::Unprotected
+            }
+            .to_line(),
             format!("{{\"kind\":\"raise\",\"on\":{on},\"protocol\":1}}\n")
         );
     }
@@ -86,6 +93,38 @@ fn closed_request_set_parses() {
     assert_eq!(
         refused(r#"{"protocol":1,"kind":"raise","on":true,"weight":10000}"#),
         RefusalCode::UnknownField
+    );
+    // 006 FR-027: priority over plain users is the same request at its own level; a request
+    // without a level is unprotected's, as before.
+    assert_eq!(
+        parse_frame(&frame(
+            r#"{"protocol":1,"kind":"raise","on":true,"level":"plain"}"#
+        )),
+        Ok(Request::Raise {
+            on: true,
+            level: RaiseLevel::Plain
+        })
+    );
+    assert_eq!(
+        parse_frame(&frame(
+            r#"{"protocol":1,"kind":"raise","on":true,"level":"unprotected"}"#
+        )),
+        Ok(Request::Raise {
+            on: true,
+            level: RaiseLevel::Unprotected
+        })
+    );
+    assert_eq!(
+        Request::Raise {
+            on: true,
+            level: RaiseLevel::Plain
+        }
+        .to_line(),
+        "{\"kind\":\"raise\",\"level\":\"plain\",\"on\":true,\"protocol\":1}\n"
+    );
+    assert_eq!(
+        refused(r#"{"protocol":1,"kind":"raise","on":true,"level":"realtime"}"#),
+        RefusalCode::Malformed
     );
 }
 
@@ -1947,6 +1986,75 @@ mod broker_service {
         assert!(handle(&granted, peer(1234), &raise).reply.ok);
         assert_eq!(systemd.weights.lock().unwrap()["user-1234.slice"], 500);
         assert!(granted.raises.lock().unwrap().contains_key(&1234));
+    }
+
+    /// 006 FR-027: priority over plain users is the same raise at its own level, with its own
+    /// policy key and weight. Either level's weight counts as the broker's, so a caller can move
+    /// between them, and each lease ends when its own key turns off.
+    #[test]
+    fn the_plain_level_has_its_own_key_and_weight() {
+        use cedegrid::broker::request::RaiseLevel;
+        use cedegrid::broker::server::expire_raises;
+        let systemd = Arc::new(FakeSystemd::default());
+        for kind in [UnitKind::Ordinary, UnitKind::Idle] {
+            let mut show = ours(kind, 1234, "active");
+            show.control_group = format!(
+                "/user.slice/user-1234.slice/{}",
+                cedegrid::broker::units::unit_name(kind, 1234)
+            );
+            systemd.put(&cedegrid::broker::units::unit_name(kind, 1234), show);
+        }
+        let policy = Arc::new(Mutex::new(String::new()));
+        let mut broker = state(FakeSystemd::default(), &[1234], None);
+        broker.systemd = Box::new(Shared(Arc::clone(&systemd)));
+        let text = Arc::clone(&policy);
+        broker.load_policy = Box::new(move || AdminPolicy::parse(&text.lock().unwrap(), 1000));
+        let raise = |level: RaiseLevel| {
+            line(&format!(
+                r#"{{"protocol":1,"kind":"raise","on":true,"level":"{}"}}"#,
+                level.name()
+            ))
+        };
+        let weight = || {
+            systemd
+                .weights
+                .lock()
+                .unwrap()
+                .get("user-1234.slice")
+                .copied()
+        };
+        // Unprotected permitted does not permit the plain level.
+        *policy.lock().unwrap() = "[modes]\nunprotected = true\n".into();
+        let handled = handle(&broker, peer(1234), &raise(RaiseLevel::Plain));
+        assert_eq!(handled.reply.code, Some(RefusalCode::RaiseRefused));
+        assert_eq!(weight(), None);
+        *policy.lock().unwrap() =
+            "[modes]\nunprotected = true\nplain_priority = true\nplain_priority_cpu_weight = 250\n"
+                .into();
+        assert!(
+            handle(&broker, peer(1234), &raise(RaiseLevel::Plain))
+                .reply
+                .ok
+        );
+        assert_eq!(weight(), Some(250));
+        // Up to unprotected's weight and back: both are the broker's.
+        assert!(
+            handle(&broker, peer(1234), &raise(RaiseLevel::Unprotected))
+                .reply
+                .ok
+        );
+        assert_eq!(weight(), Some(400));
+        assert!(
+            handle(&broker, peer(1234), &raise(RaiseLevel::Plain))
+                .reply
+                .ok
+        );
+        assert_eq!(weight(), Some(250));
+        // The plain key off ends the plain lease at the next check.
+        *policy.lock().unwrap() = "[modes]\nunprotected = true\n".into();
+        expire_raises(&broker, Instant::now());
+        assert_eq!(weight(), None);
+        assert!(broker.raises.lock().unwrap().is_empty());
     }
 
     /// 006 FR-016, FR-018: a raise ends at the next check, without waiting for its lease, once

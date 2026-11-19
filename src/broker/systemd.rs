@@ -5,7 +5,7 @@
 //! `Systemd` trait so it can be tested without systemd.
 
 use super::admin_policy::AdminPolicy;
-use super::request::{Refusal, RefusalCode, UnitStatus};
+use super::request::{RaiseLevel, Refusal, RefusalCode, UnitStatus};
 use super::units::{
     Caller, DESCRIPTION_PREFIX, MARKER_VARIABLE, Placement, SYSTEMCTL, SYSTEMD_RUN, UnitKind,
     UnitSpec, build, marker_value, systemd_run_args, unit_name,
@@ -262,14 +262,27 @@ pub fn raise_account_slice(
     caller: Caller,
     policy: &AdminPolicy,
     on: bool,
+    level: RaiseLevel,
 ) -> Result<Vec<UnitStatus>, Refusal> {
     let slice = account_slice(caller.uid);
     let units = status_units(systemd, caller);
     let weight = if on {
-        if !policy.unprotected.value {
+        let (permitted, key, weight) = match level {
+            RaiseLevel::Unprotected => (
+                policy.unprotected.value,
+                "modes.unprotected",
+                policy.unprotected_cpu_weight.value,
+            ),
+            RaiseLevel::Plain => (
+                policy.plain_priority.value,
+                "modes.plain_priority",
+                policy.plain_priority_cpu_weight.value,
+            ),
+        };
+        if !permitted {
             return Err(Refusal::new(
                 RefusalCode::RaiseRefused,
-                "policy modes.unprotected is false; ask an administrator to permit unprotected",
+                format!("policy {key} is false; ask an administrator to permit it"),
             ));
         }
         let prefix = format!("/user.slice/{slice}/");
@@ -286,11 +299,11 @@ pub fn raise_account_slice(
                 "your ordinary unit is not running in your account slice, so no raise reaches other accounts",
             ));
         }
-        let weight = policy.unprotected_cpu_weight.value;
-        // The policy's own weight is a raise this broker or an earlier one set; any other is
-        // someone else's, and a reset would lose it.
+        // Either level's policy weight is a raise this broker or an earlier one set; any other
+        // is someone else's, and a reset would lose it.
         if let Some(current) = systemd.slice_weight(&slice)?
-            && current != weight
+            && current != policy.unprotected_cpu_weight.value
+            && current != policy.plain_priority_cpu_weight.value
         {
             return Err(Refusal::new(
                 RefusalCode::RaiseRefused,
