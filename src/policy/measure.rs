@@ -1541,12 +1541,14 @@ impl<'a> Interval<'a> {
             }
             if self.config.contention.max_mode() >= ContentionMode::Performance {
                 let protected = first(true);
-                if let Some((slice, next, _)) = self.time_slice(
+                // A hold that comes only from own work placed and not yet listed keeps the device,
+                // as admission does, so that work's own authorization fits the budget (FR-028).
+                if let Some((slice, next, own_new)) = self.time_slice(
                     gpu,
                     measured.is_some(),
                     budget.unattributed,
                     Some(&protected),
-                ) && (!slice.bound.is_empty() || next)
+                ) && (!slice.bound.is_empty() || next && !own_new)
                 {
                     self.admit_immediately_closed.insert(gpu.uuid.clone());
                     let uids: Vec<u32> = slice.bound.iter().filter_map(|b| b.uid).collect();
