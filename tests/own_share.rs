@@ -530,8 +530,8 @@ fn the_decision_flags_cpu_beside_a_plain_principal() {
         );
         assert!(!flag(mode, 0, None), "{mode:?}: nobody contends");
         assert!(
-            !flag(mode, 1000, None),
-            "{mode:?}: a plain principal on a CPU with room to spare does not contend"
+            !flag(mode, 900, None),
+            "{mode:?}: a plain principal under a whole CPU, with room to spare, does not contend"
         );
     }
     for mode in [ContentionMode::YieldFirst, ContentionMode::Neutral] {
@@ -1116,18 +1116,18 @@ fn own_tasks_ending_hold_no_admission_in_performance() {
     );
 }
 
-/// A plain user taking at least one whole CPU on a CPU full this interval is plainly competing:
-/// the flag rises on that first reading, so own work fills as plain Linux would start it. A
-/// smaller one still needs the three-interval streak (006 FR-007a).
+/// A plain user taking at least one whole CPU competes as soon as own work fills the rest: the
+/// flag rises on the first reading, before own work starts, so the batch starts at once beside
+/// it, as plain Linux starts it. A smaller one needs a full CPU and the three-interval streak
+/// (006 FR-007a).
 #[test]
 fn a_plain_user_on_a_whole_cpu_sets_the_flag_at_once() {
-    let first_on = |other_busy: u64| {
+    let first_on = |other: u64| {
         let mut engine = PolicyEngine::new();
         let mut first = None;
         for i in 0..10u64 {
             // From interval 4, four own 1000 m tasks fill what the plain user leaves.
             let started = if i >= 4 { 4 } else { 0 };
-            let other = if started > 0 { other_busy } else { 2000 };
             let (mut snapshot, mut input) = reading_beside(other, 50, 0, Some(true), None);
             let job = input.allocations[0].clone();
             let each = (4000 - 50 - other) / 4;
@@ -1167,6 +1167,14 @@ fn a_plain_user_on_a_whole_cpu_sets_the_flag_at_once() {
         }
         first
     };
-    assert_eq!(first_on(1550), Some(4), "a whole CPU or more: at once");
-    assert_eq!(first_on(600), Some(6), "less: after the streak");
+    assert_eq!(
+        first_on(1550),
+        Some(0),
+        "a whole CPU or more: before own work starts"
+    );
+    assert_eq!(
+        first_on(600),
+        Some(6),
+        "less: on a full CPU, after the streak"
+    );
 }

@@ -6045,8 +6045,52 @@ mod gpu_demand {
                         Some("gpu_time_slice_admission_held"),
                         "{mode:?} {phase:?}"
                     );
+                    // The hold is only for one more beyond the placed task, which the rule
+                    // allows: it is own new work's, so the placed task's own authorization may
+                    // proceed while placement waits (FR-028).
+                    assert!(
+                        decision.resources[&ResourceKey::GpuCompute(GPU.into())].admission_own_new,
+                        "{mode:?} {phase:?}"
+                    );
                 }
             }
+        }
+
+        /// With the own task listed on the device, the hold is for a further one, not for work
+        /// already placed: nothing is own new work's then (FR-028).
+        #[test]
+        fn a_listed_own_task_leaves_no_own_new_hold() {
+            let config = mode_config(ContentionMode::Neutral);
+            let mut engine = PolicyEngine::new();
+            for i in 0..60u64 {
+                let snap = sliced(None, 990, i + 1, 0, 1);
+                engine
+                    .evaluate(&config, &snap, &PolicyInput::default(), i * INTERVAL)
+                    .unwrap();
+            }
+            let input = PolicyInput {
+                allocations: vec![job(None)],
+                ..PolicyInput::default()
+            };
+            let mut last = None;
+            for i in 60..66u64 {
+                last = Some(
+                    engine
+                        .evaluate(
+                            &config,
+                            &sliced(Some(495), 495, i + 1, 1, 1),
+                            &input,
+                            i * INTERVAL,
+                        )
+                        .unwrap(),
+                );
+            }
+            let status = &last.unwrap().resources[&ResourceKey::GpuCompute(GPU.into())];
+            assert_eq!(
+                status.admission.as_ref().and_then(|a| a.code()),
+                Some("gpu_time_slice_admission_held")
+            );
+            assert!(!status.admission_own_new);
         }
 
         /// A principal that has just become busy is read by its latest measured intervals as well

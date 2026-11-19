@@ -446,10 +446,11 @@ resource (`admission_own_work_yielding`) only while it is being reclaimed there:
 holds more than its target, or a step is still moving down. A cap or hint that holds at its
 target does not block, and coordinator placement follows the node's admission without
 counting steps. When CPU or RAM admission is closed only by the node's own new allocations
-that have no first measurement yet, or by the cooldown only they restarted, the report says
-so for that resource, and the coordinator still authorizes reservations it placed earlier
-while they fit the budget; it places nothing new there, and any other cause, a GPU resource or
-a report without that statement still refuses. A move within the noise tolerance on memory, or within the reversal hysteresis
+that have no first measurement yet, or by the cooldown only they restarted, or GPU compute
+admission only for one more own process beyond tasks placed there and not yet listed, which
+the time-slice rule allows to run, the report says so for that resource, and the coordinator
+still authorizes reservations it placed earlier while they fit the budget; it places nothing
+new there, and any other cause or a report without that statement still refuses. A move within the noise tolerance on memory, or within the reversal hysteresis
 of the external growth a compute step answered (`hysteresis_percent` of that demand), is
 jitter: it blocks no admission, and a step that holds within it resets no cooldown. A pause
 that moves to another task at its bound is the hold staying, not a step down. Admission then follows headroom, cooldown and reclaim backoff: own
@@ -538,8 +539,9 @@ saturated CPU: a named account at the contention floor on a CPU full in this int
 while own work holds more than half of it; usage no account accounts for only on the saturation
 Performance judges, after the principal window, and not within two monitor intervals after an
 own task stops, when it is that task's last usage. The
-flag sets after three intervals in a row of such contention, or at once for a named account
-taking at least a whole CPU of a full one, and holds 10 s after it ends.
+flag sets after three intervals in a row of such contention, or at once, before own work has
+filled the CPU, for a named account taking at least a whole CPU, so a batch starts at once
+beside it as plain Linux starts it; it holds 10 s after the contention ends.
 Performance and Aggressive release no CPU reservation that was admitted, and own charges over
 the CPU budget restart no cooldown: new work waits through the headroom until they fit, and
 work already placed is still authorized. Guaranteed work is
