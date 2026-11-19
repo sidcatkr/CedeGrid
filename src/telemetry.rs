@@ -374,13 +374,18 @@ impl UnitWork {
 }
 
 /// Counts each other account whose System mode unit runs work as CedeGrid on the CPU, adding
-/// one whose processes are hidden with the unit's CPU (006 FR-028). Its arrival stays unknown.
+/// one whose processes are hidden with the unit's CPU (006 FR-028). Work known only from its
+/// unit has unknown modes, so it counts as a protected first-comer that arrived earliest.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn count_unit_work(
     principals: &mut Vec<PrincipalUsage>,
     unit_cpu: &BTreeMap<u32, u64>,
     owner: Option<u32>,
 ) {
+    let unknown = crate::model::CedeGridWork {
+        arrival_unix_ms: Some(0),
+        protected_arrival_unix_ms: Some(0),
+    };
     for (uid, millicores) in unit_cpu {
         if Some(*uid) == owner || *millicores < UNIT_WORK_MIN_MILLICORES {
             continue;
@@ -391,12 +396,12 @@ pub(crate) fn count_unit_work(
         {
             Some(principal) => {
                 principal.cpu_millicores = principal.cpu_millicores.max(*millicores);
-                principal.cedegrid_cpu.get_or_insert_with(Default::default);
+                principal.cedegrid_cpu.get_or_insert(unknown);
             }
             None => principals.push(PrincipalUsage {
                 uid: Some(*uid),
                 cpu_millicores: *millicores,
-                cedegrid_cpu: Some(crate::model::CedeGridWork::default()),
+                cedegrid_cpu: Some(unknown),
                 ..PrincipalUsage::default()
             }),
         }
@@ -4929,7 +4934,9 @@ mod tests {
     }
 
     /// 006 FR-028: an account whose unit runs work counts as CedeGrid on the CPU, and one whose
-    /// processes are hidden is added with the unit's CPU. Own account and idle units are left.
+    /// processes are hidden is added with the unit's CPU. Work known only from its unit counts
+    /// as a protected first-comer that arrived earliest; a known arrival is kept. Own account
+    /// and units below the threshold are left.
     #[test]
     fn running_unit_work_counts_as_cedegrid() {
         let mut principals = vec![
@@ -4967,15 +4974,16 @@ mod tests {
         );
         assert_eq!(principals[0].cedegrid_cpu, None);
         assert_eq!(principals[1].cpu_millicores, 900);
-        assert_eq!(
-            principals[1].cedegrid_cpu,
-            Some(crate::model::CedeGridWork::default())
-        );
+        let unknown = Some(crate::model::CedeGridWork {
+            arrival_unix_ms: Some(0),
+            protected_arrival_unix_ms: Some(0),
+        });
+        assert_eq!(principals[1].cedegrid_cpu, unknown);
         assert_eq!(principals[2].cpu_millicores, 800);
         assert_eq!(principals[2].cedegrid_cpu.unwrap().arrival_unix_ms, Some(5));
         assert_eq!(principals.len(), 4);
         assert_eq!(principals[3].uid, Some(2004));
         assert_eq!(principals[3].cpu_millicores, 1500);
-        assert!(principals[3].cedegrid_cpu.is_some());
+        assert_eq!(principals[3].cedegrid_cpu, unknown);
     }
 }
