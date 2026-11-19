@@ -1525,12 +1525,8 @@ impl AgentLoop<'_> {
         let allocations = input.allocations;
         let mark = self.cost.charge("policy", mark);
         decision.observe_only = false;
-        bound_by_envelope(
-            &mut decision,
-            &agent.capacity,
-            agent.max_workers,
-            &allocation_charge(&allocations),
-        );
+        let charge = admission_charge(&allocations, decision.cpu_plain_admission);
+        bound_by_envelope(&mut decision, &agent.capacity, agent.max_workers, &charge);
         self.cost.charge("decision", mark);
         self.note_ram_views(&snapshot, &allocations, &decision);
         Ok((snapshot, allocations, decision))
@@ -3258,6 +3254,22 @@ pub(super) fn remaining_capacity(capacity: &Resources, used: &Resources) -> Reso
     remaining
 }
 
+/// The charge the agent bounds admission with: `allocation_charge`, with each allocation's CPU
+/// at its request where the policy admits CPU as plain Linux does (006 SC-002), so usage above
+/// the requests does not hold back work plain Linux would start.
+pub(super) fn admission_charge(
+    allocations: &[crate::model::Allocation],
+    plain_cpu: bool,
+) -> Resources {
+    let mut used = allocation_charge(allocations);
+    if plain_cpu {
+        used.cpu_millicores = allocations.iter().fold(0u64, |sum, a| {
+            sum.saturating_add(a.requested.cpu_millicores)
+        });
+    }
+    used
+}
+
 pub(super) fn allocation_charge(allocations: &[crate::model::Allocation]) -> Resources {
     let mut used = Resources::default();
     for allocation in allocations {
@@ -3347,6 +3359,52 @@ mod beside_plain_tests {
         bound_by_envelope(&mut decision, &capacity, 8, &over);
         assert_eq!(decision.managed_budget.cpu_millicores, 4000);
         assert_eq!(decision.admission_headroom.cpu_millicores, 0);
+    }
+
+    /// 006 SC-002: where the policy admits CPU as plain Linux does, own work is charged its CPU
+    /// requests, not usage above them, as the policy charged it; elsewhere the larger of the two.
+    #[test]
+    fn plain_admission_charges_cpu_at_requests() {
+        use super::admission_charge;
+        use crate::model::{Allocation, AllocationPhase};
+        let allocations: Vec<Allocation> = (0..5)
+            .map(|i| Allocation {
+                id: format!("a{i}"),
+                class: crate::execution_model::AllocationClass::Opportunistic,
+                phase: AllocationPhase::Running,
+                requested: Resources {
+                    cpu_millicores: 500,
+                    ram_mib: 100,
+                    gpu_memory_mib: Default::default(),
+                },
+                observed: Some(Resources {
+                    cpu_millicores: 800,
+                    ram_mib: 200,
+                    gpu_memory_mib: Default::default(),
+                }),
+                observed_upper: None,
+                observed_window_cpu: None,
+                usage_unknown: None,
+                modes: Default::default(),
+            })
+            .collect();
+        let capacity = resources(4000);
+        for (plain, headroom) in [(true, 1500), (false, 0)] {
+            let mut decision: Decision = serde_json::from_value(serde_json::json!({
+                "schema_version": 1, "node_id": "n", "observe_only": false,
+                "managed_budget": resources(4000), "admission_headroom": resources(4000),
+                "expansion_allowed": true, "would_drain": [], "reasons": [],
+            }))
+            .unwrap();
+            let charge = admission_charge(&allocations, plain);
+            // RAM keeps the larger of request and usage either way.
+            assert_eq!(charge.ram_mib, 1000);
+            bound_by_envelope(&mut decision, &capacity, 8, &charge);
+            assert_eq!(
+                decision.admission_headroom.cpu_millicores, headroom,
+                "plain {plain}"
+            );
+        }
     }
 
     /// In Performance and Aggressive, CPU started beside a plain user that later left blocks no
