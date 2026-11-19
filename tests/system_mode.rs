@@ -5236,6 +5236,120 @@ fn the_raise_is_wanted_only_without_a_protected_first_comer() {
     assert!(raise_wanted(1, None, &[plain]));
 }
 
+/// 006 FR-026: the accounts that keep priority over plain users from holding are those with
+/// CedeGrid work on the CPU whose account slice is below the weight. An unreadable slice or an
+/// unknown owner counts as below; plain accounts and this one do not count.
+#[test]
+fn the_plain_raise_waits_for_cedegrid_accounts_below_the_weight() {
+    use cedegrid::model::{CedeGridWork, PrincipalUsage};
+    use cedegrid::system_mode::below_plain_weight;
+    let cedegrid = |uid: Option<u32>| PrincipalUsage {
+        uid,
+        cedegrid_cpu: Some(CedeGridWork::default()),
+        ..PrincipalUsage::default()
+    };
+    let principals = [
+        PrincipalUsage {
+            uid: Some(2000),
+            is_owner: true,
+            cedegrid_cpu: Some(CedeGridWork::default()),
+            ..PrincipalUsage::default()
+        },
+        PrincipalUsage {
+            uid: Some(2001),
+            cpu_millicores: 4000,
+            ..PrincipalUsage::default()
+        },
+        cedegrid(Some(2002)),
+        cedegrid(Some(2003)),
+        cedegrid(Some(2004)),
+        cedegrid(Some(2005)),
+    ];
+    let weights = |uid: u32| match uid {
+        2002 => Some(200),
+        2003 => Some(100),
+        2005 => Some(400),
+        _ => None,
+    };
+    assert_eq!(
+        below_plain_weight(200, &principals, weights),
+        [Some(2003), Some(2004)].into()
+    );
+    assert!(below_plain_weight(200, &principals[..3], weights).is_empty());
+    assert_eq!(
+        below_plain_weight(200, &[cedegrid(None)], weights),
+        [None].into()
+    );
+}
+
+/// 006 FR-026: the raise is wanted while no CedeGrid account is below the weight. One falling
+/// below a held raise has the two-interval withdrawal window to follow; without a held raise,
+/// or past the window, it is not wanted until none is below. An unknown owner ends it at once.
+#[test]
+fn the_plain_raise_holds_only_while_no_cedegrid_account_is_below() {
+    use cedegrid::system_mode::PlainSteer;
+    use std::collections::BTreeSet;
+    let below = |uids: &[u32]| -> BTreeSet<Option<u32>> { uids.iter().map(|u| Some(*u)).collect() };
+    let mut steer = PlainSteer::default();
+    assert!(!steer.wanted(false, &below(&[]), 0, 2000));
+    // Not holding: another account below keeps it off.
+    assert!(!steer.wanted(true, &below(&[2002]), 2000, 2000));
+    assert!(!steer.wanted(true, &below(&[2002]), 9000, 2000));
+    // None below: held. One falls below: kept for the window, then not.
+    assert!(steer.wanted(true, &below(&[]), 10_000, 2000));
+    assert!(steer.wanted(true, &below(&[2002]), 11_000, 2000));
+    assert!(steer.wanted(true, &below(&[2002, 2003]), 12_999, 2000));
+    assert!(!steer.wanted(true, &below(&[2002]), 13_000, 2000));
+    assert!(!steer.wanted(true, &below(&[2002]), 14_000, 2000));
+    // It followed: held again, and a later fall gets a new window.
+    assert!(steer.wanted(true, &below(&[]), 20_000, 2000));
+    assert!(steer.wanted(true, &below(&[2003]), 21_000, 2000));
+    assert!(steer.wanted(true, &below(&[]), 22_000, 2000));
+    assert!(steer.wanted(true, &below(&[2003]), 30_000, 2000));
+    // Not eligible, or an unknown owner, ends it at once.
+    assert!(!steer.wanted(false, &below(&[]), 31_000, 2000));
+    assert!(steer.wanted(true, &below(&[]), 32_000, 2000));
+    assert!(!steer.wanted(true, &[None].into(), 32_500, 2000));
+    assert!(!steer.wanted(true, &below(&[2002]), 33_000, 2000));
+}
+
+/// 006 FR-026: where both raises are wanted, the one with the higher policy weight is asked
+/// for, unprotected on a tie.
+#[test]
+fn the_higher_raise_wins() {
+    use cedegrid::system_mode::pick_raise;
+    assert_eq!(pick_raise(false, false, 400, 200), None);
+    assert_eq!(
+        pick_raise(true, false, 400, 200),
+        Some(RaiseLevel::Unprotected)
+    );
+    assert_eq!(pick_raise(false, true, 400, 200), Some(RaiseLevel::Plain));
+    assert_eq!(
+        pick_raise(true, true, 400, 200),
+        Some(RaiseLevel::Unprotected)
+    );
+    assert_eq!(pick_raise(true, true, 150, 200), Some(RaiseLevel::Plain));
+    assert_eq!(
+        pick_raise(true, true, 200, 200),
+        Some(RaiseLevel::Unprotected)
+    );
+}
+
+/// 006 FR-026: an account slice's CPU weight is read from the cgroup tree; a missing or
+/// malformed file reads as unknown.
+#[test]
+fn an_account_slice_weight_is_read_from_the_cgroup_tree() {
+    use cedegrid::broker::units::account_slice_weight_in;
+    let root = tempfile::tempdir().unwrap();
+    let slice = root.path().join("user.slice/user-2002.slice");
+    std::fs::create_dir_all(&slice).unwrap();
+    std::fs::write(slice.join("cpu.weight"), "200\n").unwrap();
+    assert_eq!(account_slice_weight_in(root.path(), 2002), Some(200));
+    assert_eq!(account_slice_weight_in(root.path(), 2003), None);
+    std::fs::write(slice.join("cpu.weight"), "max\n").unwrap();
+    assert_eq!(account_slice_weight_in(root.path(), 2002), None);
+}
+
 #[test]
 fn an_unprotected_grant_starts_only_with_every_condition_met() {
     use cedegrid::contention::{ContentionMode, ResourceKind};

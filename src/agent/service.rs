@@ -1,6 +1,7 @@
 //! The node service loop: each interval samples, evaluates policy, drains,
 //! reports and launches.
 use super::*;
+use crate::broker::request::RaiseLevel;
 
 /// What the agent's launch slots depend on in one heartbeat.
 #[derive(Debug, Clone, Copy)]
@@ -465,17 +466,26 @@ const RAISE_RENEWAL: Duration = Duration::from_secs(10);
 /// How often the agent checks whether a raise is wanted while none is in force.
 const RAISE_CHECK: Duration = Duration::from_secs(5);
 
-/// The unprotected raise as this agent last asked the System mode broker for it (006 FR-016).
+/// The raise as this agent last asked the System mode broker for it: unprotected (006 FR-016)
+/// or priority over plain users (FR-026).
 #[derive(Default)]
 struct RaiseSteer {
-    /// Whether the broker last confirmed it on.
-    on: bool,
+    /// The level the broker last confirmed on, if any.
+    level: Option<RaiseLevel>,
     last_check: Option<Instant>,
     last_ask: Option<Instant>,
     /// The last refusal or silence reported, so it is reported once.
     last_problem: Option<String>,
-    pending: Option<(bool, tokio::task::JoinHandle<crate::system_mode::Outcome>)>,
+    pending: Option<(
+        Option<RaiseLevel>,
+        tokio::task::JoinHandle<crate::system_mode::Outcome>,
+    )>,
+    plain: crate::system_mode::PlainSteer,
 }
+
+/// How long, in monitor intervals, a held priority over plain users stays raised after another
+/// CedeGrid account falls below its weight, for that account to follow (006 FR-026).
+const PLAIN_WINDOW_INTERVALS: u64 = 2;
 
 /// State of one agent service loop. Each stage of an interval is a method.
 struct AgentLoop<'a> {
@@ -1558,13 +1568,18 @@ impl AgentLoop<'_> {
         Ok((snapshot, allocations, decision))
     }
 
-    /// Asks the System mode broker to raise, renew or end the raise of this account's slice
-    /// for unprotected runs, off the loop's thread (006 FR-016, FR-018). Outside a unit, or where
-    /// no raise reaches other accounts, nothing is asked.
-    async fn steer_raise(&mut self, snapshot: &crate::model::Snapshot) -> Result<()> {
-        if let Some((on, handle)) = self.raise.pending.take() {
+    /// Asks the System mode broker to raise, renew or end the raise of this account's slice,
+    /// off the loop's thread: for unprotected runs (006 FR-016, FR-018) or for priority over
+    /// plain users (FR-026), the higher where both apply. Outside a unit, or where no raise
+    /// reaches other accounts, nothing is asked.
+    async fn steer_raise(
+        &mut self,
+        snapshot: &crate::model::Snapshot,
+        allocations: &[crate::model::Allocation],
+    ) -> Result<()> {
+        if let Some((asked, handle)) = self.raise.pending.take() {
             if !handle.is_finished() {
-                self.raise.pending = Some((on, handle));
+                self.raise.pending = Some((asked, handle));
                 return Ok(());
             }
             // A finished task's result is ready; a panicked one is no answer.
@@ -1573,17 +1588,21 @@ impl AgentLoop<'_> {
             });
             let problem = match outcome {
                 crate::system_mode::Outcome::Units(_) => {
-                    if self.raise.on != on {
+                    if self.raise.level != asked {
                         emit(&serde_json::json!({
-                            "event": if on { "raise_on" } else { "raise_off" },
-                            "detail": if on {
-                                "warning: this account's CPU weight is raised for an UNPROTECTED run"
-                            } else {
-                                "this account's CPU weight is back at the default"
+                            "event": if asked.is_some() { "raise_on" } else { "raise_off" },
+                            "detail": match asked {
+                                Some(RaiseLevel::Unprotected) => {
+                                    "warning: this account's CPU weight is raised for an UNPROTECTED run"
+                                }
+                                Some(RaiseLevel::Plain) => {
+                                    "this account's CPU weight is raised over users without CedeGrid work"
+                                }
+                                None => "this account's CPU weight is back at the default",
                             },
                         }))?;
                     }
-                    self.raise.on = on;
+                    self.raise.level = asked;
                     None
                 }
                 crate::system_mode::Outcome::Refused(refusal) => Some(refusal.message),
@@ -1604,12 +1623,17 @@ impl AgentLoop<'_> {
         }
         let now = Instant::now();
         let due = |at: Option<Instant>, every: Duration| at.is_none_or(|at| now >= at + every);
-        if !self.raise.on && !due(self.raise.last_check, RAISE_CHECK) {
+        // With priority over plain users chosen, other accounts' weights are read each interval,
+        // so a raise ends within two intervals of an account falling below.
+        let chosen = self.config.contention.priority_over_plain;
+        if self.raise.level.is_none() && !chosen && !due(self.raise.last_check, RAISE_CHECK) {
             return Ok(());
         }
         self.raise.last_check = Some(now);
-        let wanted = crate::system_mode::in_unit()
-            && crate::actuation::Raise::current() == crate::actuation::Raise::AccountSlice
+        let account_slice = crate::system_mode::in_unit()
+            && crate::actuation::Raise::current() == crate::actuation::Raise::AccountSlice;
+        let principals = snapshot.principals.as_deref().unwrap_or_default();
+        let unprotected = account_slice
             && crate::system_mode::raise_wanted(
                 self.store
                     .unprotected_runs()
@@ -1619,24 +1643,79 @@ impl AgentLoop<'_> {
                     .arrivals()
                     .ok()
                     .and_then(|arrivals| arrivals.into_values().min()),
-                snapshot.principals.as_deref().unwrap_or_default(),
+                principals,
             );
-        let ask = if wanted {
-            (!self.raise.on || due(self.raise.last_ask, RAISE_RENEWAL)).then_some(true)
+        // The policy names both weights; one that cannot be read permits no plain raise.
+        let policy = (account_slice && (chosen || unprotected))
+            .then(crate::broker::admin_policy::load)
+            .and_then(Result::ok);
+        let cpu_mode = self
+            .config
+            .contention
+            .mode(crate::contention::ResourceKind::Cpu);
+        let own_protected_cpu = allocations.iter().any(|allocation| {
+            allocation
+                .modes
+                .get(&crate::contention::ResourceKind::Cpu)
+                .copied()
+                .unwrap_or(cpu_mode)
+                >= crate::contention::ContentionMode::Performance
+        });
+        let (unprotected_weight, plain_weight) = policy.as_ref().map_or(
+            (
+                crate::broker::admin_policy::DEFAULT_UNPROTECTED_CPU_WEIGHT,
+                crate::broker::admin_policy::DEFAULT_PLAIN_PRIORITY_CPU_WEIGHT,
+            ),
+            |policy| {
+                (
+                    policy.unprotected_cpu_weight.value,
+                    policy.plain_priority_cpu_weight.value,
+                )
+            },
+        );
+        let eligible = account_slice
+            && chosen
+            && own_protected_cpu
+            && policy
+                .as_ref()
+                .is_some_and(|policy| policy.plain_priority.value);
+        let below = if eligible {
+            crate::system_mode::below_plain_weight(
+                plain_weight,
+                principals,
+                crate::broker::units::account_slice_weight,
+            )
         } else {
-            self.raise.on.then_some(false)
+            BTreeSet::new()
         };
-        if let Some(on) = ask {
+        let plain = self.raise.plain.wanted(
+            eligible,
+            &below,
+            self.start.elapsed().as_millis() as u64,
+            PLAIN_WINDOW_INTERVALS.saturating_mul(self.config.monitor.interval_ms),
+        );
+        let wanted =
+            crate::system_mode::pick_raise(unprotected, plain, unprotected_weight, plain_weight);
+        let ask = match wanted {
+            Some(level) => (self.raise.level != Some(level)
+                || due(self.raise.last_ask, RAISE_RENEWAL))
+            .then_some(Some(level)),
+            None => self.raise.level.is_some().then_some(None),
+        };
+        if let Some(asked) = ask {
             self.raise.last_ask = Some(now);
+            let request = crate::broker::request::Request::Raise {
+                on: asked.is_some(),
+                level: asked
+                    .or(self.raise.level)
+                    .unwrap_or(RaiseLevel::Unprotected),
+            };
             self.raise.pending = Some((
-                on,
+                asked,
                 tokio::task::spawn_blocking(move || {
                     crate::system_mode::ask(
                         Path::new(crate::broker::SOCKET_PATH),
-                        &crate::broker::request::Request::Raise {
-                            on,
-                            level: crate::broker::request::RaiseLevel::Unprotected,
-                        },
+                        &request,
                         crate::system_mode::CLIENT_TIMEOUT,
                     )
                 }),
@@ -2931,7 +3010,7 @@ pub async fn run(
             state.cost.charge("records", mark);
             // Observation charges its own stages.
             let (snapshot, allocations, mut decision) = state.observe(&records).await?;
-            state.steer_raise(&snapshot).await?;
+            state.steer_raise(&snapshot, &allocations).await?;
             mark = LoopCost::thread_ns();
             state.share_observation(&snapshot);
             state.actuate(&mut decision, &allocations)?;

@@ -138,7 +138,7 @@ this thread's.
   default false) in `src/config.rs`, validated once, and the setup question with Yes preselected
   and `--priority-over-plain` / `--no-priority-over-plain` in `src/setup.rs` and
   `src/setup/interface.rs`; setup says when the host cannot apply it.
-- [ ] T074 [US6] Test first, then the agent's steering in `src/system_mode.rs` and
+- [x] T074 [US6] Test first, then the agent's steering in `src/system_mode.rs` and
   `src/agent/service.rs`: wanted while the choice is on, own Performance or Aggressive CPU work
   runs and every contending CedeGrid principal's account slice reads at the weight or more
   (read-only, from the cgroup tree; unreadable counts as not raised); withdrawn within two

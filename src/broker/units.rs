@@ -8,6 +8,7 @@ use super::admin_policy::AdminPolicy;
 use super::{AGENT_SUBCOMMAND, IDLE_EXECUTOR_SUBCOMMAND, INSTALLED_BINARY};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
+use std::path::Path;
 
 /// The fixed `systemd-run` path the broker calls (research R8).
 pub const SYSTEMD_RUN: &str = "/usr/bin/systemd-run";
@@ -103,6 +104,25 @@ pub fn user_slice_splits_cpu() -> bool {
                 .any(|controller| controller == "cpu")
         })
         .unwrap_or(false)
+}
+
+/// The CPU weight of `uid`'s account slice under the cgroup v2 mount `root`, read-only;
+/// `None` when it cannot be read (006 FR-026).
+pub fn account_slice_weight_in(root: &Path, uid: u32) -> Option<u64> {
+    std::fs::read_to_string(
+        root.join("user.slice")
+            .join(format!("user-{uid}.slice"))
+            .join("cpu.weight"),
+    )
+    .ok()?
+    .trim()
+    .parse()
+    .ok()
+}
+
+/// `account_slice_weight_in` on this host's cgroup v2 mount.
+pub fn account_slice_weight(uid: u32) -> Option<u64> {
+    account_slice_weight_in(Path::new("/sys/fs/cgroup"), uid)
 }
 
 /// Whether a unit opens a PAM session (decision N3), set by the policy's `units.pam_session`.

@@ -177,6 +177,85 @@ pub fn plain_priority_host_now() -> PlainPriorityHost {
     PlainPriorityHost::Rootless
 }
 
+/// The accounts with CedeGrid work on the CPU whose account slice is below `weight`, which keep
+/// priority over plain users from holding (006 FR-026). `slice_weight` reads one account
+/// slice's CPU weight; an unreadable slice or an unknown owner counts as below.
+pub fn below_plain_weight(
+    weight: u64,
+    principals: &[crate::model::PrincipalUsage],
+    slice_weight: impl Fn(u32) -> Option<u64>,
+) -> std::collections::BTreeSet<Option<u32>> {
+    principals
+        .iter()
+        .filter(|principal| !principal.is_owner && principal.cedegrid_cpu.is_some())
+        .filter(|principal| {
+            !principal
+                .uid
+                .and_then(&slice_weight)
+                .is_some_and(|current| current >= weight)
+        })
+        .map(|principal| principal.uid)
+        .collect()
+}
+
+/// Priority over plain users across intervals (006 FR-026). It is raised only while no other
+/// CedeGrid account on the CPU is below its weight. When one falls below a held raise, the raise
+/// is kept for the withdrawal window of two monitor intervals: an account that chose it too sees
+/// the raise and follows, and one that did not gets its share back when the window ends. An
+/// account whose owner is unknown can never follow, so the raise ends at once for it.
+#[derive(Clone, Debug, Default)]
+pub struct PlainSteer {
+    /// Whether the last answer held the raise.
+    held: bool,
+    /// When an account first fell below the held raise.
+    below_since: Option<u64>,
+}
+
+impl PlainSteer {
+    /// Whether the plain raise is wanted at `now_ms`. `eligible` means the user chose it, the
+    /// policy permits it and own Performance or Aggressive CPU work runs; `below` is
+    /// `below_plain_weight`; `window_ms` is two monitor intervals.
+    pub fn wanted(
+        &mut self,
+        eligible: bool,
+        below: &std::collections::BTreeSet<Option<u32>>,
+        now_ms: u64,
+        window_ms: u64,
+    ) -> bool {
+        if eligible && below.is_empty() {
+            self.held = true;
+            self.below_since = None;
+            return true;
+        }
+        if eligible && self.held && !below.contains(&None) {
+            let since = *self.below_since.get_or_insert(now_ms);
+            if now_ms < since.saturating_add(window_ms) {
+                return true;
+            }
+        }
+        self.held = false;
+        self.below_since = None;
+        false
+    }
+}
+
+/// The raise to ask for: the one wanted, or of two the one whose policy weight is higher,
+/// unprotected on a tie (006 FR-026).
+pub fn pick_raise(
+    unprotected: bool,
+    plain: bool,
+    unprotected_weight: u64,
+    plain_weight: u64,
+) -> Option<crate::broker::request::RaiseLevel> {
+    use crate::broker::request::RaiseLevel;
+    match (unprotected, plain) {
+        (true, true) if plain_weight > unprotected_weight => Some(RaiseLevel::Plain),
+        (true, _) => Some(RaiseLevel::Unprotected),
+        (false, true) => Some(RaiseLevel::Plain),
+        (false, false) => None,
+    }
+}
+
 /// One condition an unprotected grant lacks: its code, what is missing and how to
 /// fix it. `doctor` lists them as bullets; a refusal joins them into one line.
 #[derive(Clone, Debug, PartialEq, Eq)]

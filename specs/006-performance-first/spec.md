@@ -343,7 +343,10 @@ and for own work, its arrival and the options in force.
   ask the broker to set the caller's account slice to `modes.plain_priority_cpu_weight`, and
   MUST withdraw within two monitor intervals once any of these stops holding. A CedeGrid
   principal's weight is read from its account slice in the cgroup tree; one whose slice cannot
-  be read counts as not raised. Where the unprotected raise also applies, the higher weight wins.
+  be read counts as not raised. A principal that falls below a held raise sees it during those
+  two intervals, so one that chose the option too follows and the raise holds; one that did not
+  gets its share back when they end. Where the unprotected raise also applies, the higher weight
+  wins.
 - **FR-027**: The broker MUST serve this raise as it serves the unprotected one (FR-016, FR-018):
   only for the caller's own account slice, only while the policy key is true and the caller's
   ordinary unit sits in that slice, read back, with a 30 s lease, and ended on withdrawal, the

@@ -77,6 +77,9 @@ pub struct Collector {
     /// Linux principals and external processes, one `stat` read per process (research R26).
     #[cfg(target_os = "linux")]
     process_table: Option<processes::ProcessTable>,
+    /// Other accounts' System mode unit work, read from the cgroup tree (006 FR-028).
+    #[cfg(target_os = "linux")]
+    unit_work: UnitWork,
     /// External context memory per device and PID from the last GPU sample.
     external_gpu_memory: BTreeMap<String, BTreeMap<u32, u64>>,
     /// Measured external GPU compute per device and PID from the last GPU sample.
@@ -291,6 +294,115 @@ pub(crate) fn in_broker_unit(cgroup: &str, uid: u32) -> bool {
         })
 }
 
+/// Below this, an account's System mode unit is not counted as running work on the CPU.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const UNIT_WORK_MIN_MILLICORES: u64 = 10;
+
+/// Each account's System mode unit work CPU time in nanoseconds under the cgroup v2 mount `root`:
+/// the `jobs` cgroup of its ordinary and idle units, in its account slice or `cedegrid.slice`
+/// (006 FR-028). Read-only; what cannot be read is left out.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn unit_work_usage(root: &std::path::Path) -> BTreeMap<u32, u64> {
+    let mut usage: BTreeMap<u32, u64> = BTreeMap::new();
+    let mut parents = vec![root.join("cedegrid.slice")];
+    if let Ok(slices) = std::fs::read_dir(root.join("user.slice")) {
+        parents.extend(slices.flatten().map(|entry| entry.path()));
+    }
+    for parent in parents {
+        let Ok(units) = std::fs::read_dir(&parent) else {
+            continue;
+        };
+        for unit in units.flatten() {
+            let name = unit.file_name();
+            let Some(uid) = name.to_str().and_then(|name| {
+                name.strip_prefix("cedegrid-idle-u")
+                    .or_else(|| name.strip_prefix("cedegrid-u"))?
+                    .strip_suffix(".service")?
+                    .parse::<u32>()
+                    .ok()
+            }) else {
+                continue;
+            };
+            // An account's units sit in its own slice; one named for another account is not its.
+            let slice = parent.file_name().and_then(|name| name.to_str());
+            if slice != Some("cedegrid.slice") && slice != Some(&format!("user-{uid}.slice")) {
+                continue;
+            }
+            if let Some(nanos) = std::fs::read_to_string(unit.path().join("jobs/cpu.stat"))
+                .ok()
+                .and_then(|stat| crate::kernel::parse_usage_usec(&stat))
+            {
+                let total = usage.entry(uid).or_default();
+                *total = total.saturating_add(nanos);
+            }
+        }
+    }
+    usage
+}
+
+/// System mode unit work's CPU between reads (006 FR-028).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Debug, Default)]
+pub(crate) struct UnitWork {
+    previous: BTreeMap<u32, u64>,
+    at: Option<Instant>,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+impl UnitWork {
+    /// Millicores each account's unit work used since the last read; an account first seen, or
+    /// one whose usage went back, has none yet.
+    pub(crate) fn sample(&mut self, usage: BTreeMap<u32, u64>, now: Instant) -> BTreeMap<u32, u64> {
+        let elapsed = self
+            .at
+            .map(|at| now.saturating_duration_since(at).as_nanos())
+            .filter(|nanos| *nanos > 0);
+        let cpu = elapsed.map_or_else(BTreeMap::new, |elapsed| {
+            usage
+                .iter()
+                .filter_map(|(uid, nanos)| {
+                    let used = nanos.checked_sub(*self.previous.get(uid)?)?;
+                    let millicores = u128::from(used) * 1000 / elapsed;
+                    Some((*uid, u64::try_from(millicores).unwrap_or(u64::MAX)))
+                })
+                .collect()
+        });
+        self.previous = usage;
+        self.at = Some(now);
+        cpu
+    }
+}
+
+/// Counts each other account whose System mode unit runs work as CedeGrid on the CPU, adding
+/// one whose processes are hidden with the unit's CPU (006 FR-028). Its arrival stays unknown.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn count_unit_work(
+    principals: &mut Vec<PrincipalUsage>,
+    unit_cpu: &BTreeMap<u32, u64>,
+    owner: Option<u32>,
+) {
+    for (uid, millicores) in unit_cpu {
+        if Some(*uid) == owner || *millicores < UNIT_WORK_MIN_MILLICORES {
+            continue;
+        }
+        match principals
+            .iter_mut()
+            .find(|principal| principal.uid == Some(*uid))
+        {
+            Some(principal) => {
+                principal.cpu_millicores = principal.cpu_millicores.max(*millicores);
+                principal.cedegrid_cpu.get_or_insert_with(Default::default);
+            }
+            None => principals.push(PrincipalUsage {
+                uid: Some(*uid),
+                cpu_millicores: *millicores,
+                cedegrid_cpu: Some(crate::model::CedeGridWork::default()),
+                ..PrincipalUsage::default()
+            }),
+        }
+    }
+}
+
 /// The marker that makes `pid` CedeGrid work: its own, or its nearest marked ancestor's within
 /// 32 levels, through processes of the same account only (006 FR-002).
 fn cedegrid_work_of(
@@ -407,6 +519,8 @@ impl Collector {
             processes: System::new(),
             #[cfg(target_os = "linux")]
             process_table: processes::ProcessTable::new(),
+            #[cfg(target_os = "linux")]
+            unit_work: UnitWork::default(),
             external_gpu_memory: BTreeMap::new(),
             external_gpu_compute: BTreeMap::new(),
             tracked_external: BTreeSet::new(),
@@ -427,7 +541,15 @@ impl Collector {
             // A table that could not be read is unknown, not a host without processes: no
             // list is reported and the tracked external processes stay tracked.
             let samples = table.sample()?;
-            return Some(self.principals_from(&samples));
+            let (mut principals, external) = self.principals_from(&samples);
+            // With System mode installed, a unit running work is CedeGrid even where its
+            // processes are hidden (006 FR-028).
+            if std::path::Path::new(crate::broker::SOCKET_PATH).exists() {
+                let usage = unit_work_usage(std::path::Path::new("/sys/fs/cgroup"));
+                let cpu = self.unit_work.sample(usage, Instant::now());
+                count_unit_work(&mut principals, &cpu, owner_uid());
+            }
+            return Some((principals, external));
         }
         if !sysinfo::IS_SUPPORTED_SYSTEM {
             return None;
@@ -4745,5 +4867,115 @@ mod tests {
         );
         child.kill().unwrap();
         child.wait().unwrap();
+    }
+
+    /// 006 FR-028: each account's System mode unit work is read from the cgroup tree, in the
+    /// account slice or `cedegrid.slice`, ordinary and idle units together, own account included.
+    #[test]
+    fn unit_work_is_read_from_the_cgroup_tree() {
+        let root = tempfile::tempdir().unwrap();
+        let write = |path: &str, usec: u64| {
+            let dir = root.path().join(path);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("cpu.stat"),
+                format!("usage_usec {usec}\nuser_usec 1\nsystem_usec 1\n"),
+            )
+            .unwrap();
+        };
+        write(
+            "user.slice/user-2002.slice/cedegrid-u2002.service/jobs",
+            1_000,
+        );
+        write(
+            "user.slice/user-2002.slice/cedegrid-idle-u2002.service/jobs",
+            500,
+        );
+        write("cedegrid.slice/cedegrid-u2003.service/jobs", 2_000);
+        // The agent's own cgroup and anything not named like a unit are not work.
+        write(
+            "user.slice/user-2004.slice/cedegrid-u2004.service/agent",
+            9_000,
+        );
+        write("user.slice/user-2004.slice/session-3.scope", 9_000);
+        write(
+            "user.slice/user-2005.slice/cedegrid-u2006.service/jobs",
+            9_000,
+        );
+        assert_eq!(
+            unit_work_usage(root.path()),
+            BTreeMap::from([(2002, 1_500_000), (2003, 2_000_000)])
+        );
+        assert!(unit_work_usage(&root.path().join("missing")).is_empty());
+    }
+
+    /// 006 FR-028: unit work's CPU is the usage between two reads; an account first seen, or
+    /// one whose usage went back, has none yet.
+    #[test]
+    fn unit_work_cpu_is_the_usage_between_reads() {
+        let start = Instant::now();
+        let mut work = UnitWork::default();
+        assert!(work.sample(BTreeMap::from([(2002, 0)]), start).is_empty());
+        let second = start + Duration::from_millis(500);
+        assert_eq!(
+            work.sample(BTreeMap::from([(2002, 250_000_000), (2003, 7)]), second),
+            BTreeMap::from([(2002, 500)])
+        );
+        let third = second + Duration::from_millis(500);
+        assert_eq!(
+            work.sample(BTreeMap::from([(2002, 1), (2003, 7)]), third),
+            BTreeMap::from([(2003, 0)])
+        );
+    }
+
+    /// 006 FR-028: an account whose unit runs work counts as CedeGrid on the CPU, and one whose
+    /// processes are hidden is added with the unit's CPU. Own account and idle units are left.
+    #[test]
+    fn running_unit_work_counts_as_cedegrid() {
+        let mut principals = vec![
+            PrincipalUsage {
+                uid: Some(2000),
+                is_owner: true,
+                cpu_millicores: 3000,
+                ..PrincipalUsage::default()
+            },
+            PrincipalUsage {
+                uid: Some(2002),
+                cpu_millicores: 800,
+                ..PrincipalUsage::default()
+            },
+            PrincipalUsage {
+                uid: Some(2003),
+                cpu_millicores: 800,
+                cedegrid_cpu: Some(crate::model::CedeGridWork {
+                    arrival_unix_ms: Some(5),
+                    protected_arrival_unix_ms: Some(5),
+                }),
+                ..PrincipalUsage::default()
+            },
+        ];
+        count_unit_work(
+            &mut principals,
+            &BTreeMap::from([
+                (2000, 3000),
+                (2002, 900),
+                (2003, 700),
+                (2004, 1500),
+                (2005, 2),
+            ]),
+            Some(2000),
+        );
+        assert_eq!(principals[0].cedegrid_cpu, None);
+        assert_eq!(principals[1].cpu_millicores, 900);
+        assert_eq!(
+            principals[1].cedegrid_cpu,
+            Some(crate::model::CedeGridWork::default())
+        );
+        assert_eq!(principals[2].cpu_millicores, 800);
+        assert_eq!(principals[2].cedegrid_cpu.unwrap().arrival_unix_ms, Some(5));
+        assert_eq!(principals.len(), 4);
+        assert_eq!(principals[3].uid, Some(2004));
+        assert_eq!(principals[3].cpu_millicores, 1500);
+        assert!(principals[3].cedegrid_cpu.is_some());
     }
 }
