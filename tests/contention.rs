@@ -6056,6 +6056,67 @@ mod gpu_demand {
             }
         }
 
+        /// Beside a protected first-comer, an admit immediately task already placed on the device
+        /// keeps the device's memory in the admit immediately budget while the hold is only for
+        /// one more beyond it, so its own authorization fits; once it is listed, the device is
+        /// closed to a further one (006 FR-013, FR-028).
+        #[test]
+        fn a_placed_admit_immediately_task_keeps_its_device_in_the_budget() {
+            let config = mode_config(ContentionMode::Performance);
+            let vram = |decision: &Decision| {
+                decision
+                    .admit_immediately_budget
+                    .as_ref()
+                    .and_then(|budget| budget.gpu_memory_mib.get(GPU).copied())
+            };
+            let mut engine = PolicyEngine::new();
+            let peer = |snap: &mut Snapshot| peer_runs_cedegrid(snap, 0, true);
+            for i in 0..60u64 {
+                let mut snap = sliced(None, 990, i + 1, 0, 1);
+                peer(&mut snap);
+                engine
+                    .evaluate(&config, &snap, &PolicyInput::default(), i * INTERVAL)
+                    .unwrap();
+            }
+            let mut placed = job(None);
+            placed.phase = AllocationPhase::Pending;
+            placed.observed = None;
+            let input = PolicyInput {
+                allocations: vec![placed],
+                arrivals: BTreeMap::from([("job".into(), 1_000)]),
+                ..PolicyInput::default()
+            };
+            let mut snap = sliced(None, 990, 61, 0, 1);
+            peer(&mut snap);
+            let decision = engine
+                .evaluate(&config, &snap, &input, 60 * INTERVAL)
+                .unwrap();
+            let status = &decision.resources[&ResourceKey::GpuCompute(GPU.into())];
+            assert!(status.admission_own_new, "{status:?}");
+            assert!(
+                vram(&decision).unwrap_or(0) > 0,
+                "{:?}",
+                decision.admit_immediately_budget
+            );
+            // Listed and running at 1:1: one more would take the first-comer below its share.
+            let running = PolicyInput {
+                allocations: vec![job(None)],
+                arrivals: BTreeMap::from([("job".into(), 1_000)]),
+                ..PolicyInput::default()
+            };
+            let mut last = None;
+            for i in 61..67u64 {
+                let mut snap = sliced(Some(495), 495, i + 1, 1, 1);
+                peer(&mut snap);
+                last = Some(
+                    engine
+                        .evaluate(&config, &snap, &running, i * INTERVAL)
+                        .unwrap(),
+                );
+            }
+            assert_eq!(vram(&last.unwrap()), Some(0));
+        }
+
         /// With the own task listed on the device, the hold is for a further one, not for work
         /// already placed: nothing is own new work's then (FR-028).
         #[test]
