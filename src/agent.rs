@@ -3275,6 +3275,26 @@ mod pacing_tests {
         assert!(!room_opened(false, false, 1500, 1000));
     }
 
+    /// Where CPU admission is plain, a Performance node fills its free places at every
+    /// heartbeat: the growth cooldown that lets the other modes measure each step does not
+    /// apply. In the batch gate it held the last task of each wave 3 s (006 SC-004).
+    #[test]
+    fn plain_admission_fills_without_the_growth_cooldown() {
+        use super::service::{LaunchPacing, launch_slots, pacing_may_grow};
+        let pacing = |may_grow| {
+            launch_slots(LaunchPacing {
+                max_workers: 16,
+                active: 4,
+                admitted: 4,
+                may_grow,
+                fill: true,
+            })
+        };
+        assert_eq!(pacing(pacing_may_grow(false, true)), 12);
+        assert_eq!(pacing(pacing_may_grow(false, false)), 0);
+        assert_eq!(pacing(pacing_may_grow(true, false)), 12);
+    }
+
     /// Admission that reopens after a hold, a cooldown say, brings the heartbeat forward too:
     /// in the batch gate the next wave otherwise waited up to 2 s more for the interval
     /// (006 SC-004).

@@ -256,6 +256,13 @@ pub(super) fn heartbeat_due(since_last: Duration, interval: Duration, prompt: bo
     since_last >= interval || (prompt && since_last >= PROMPT_HEARTBEAT_GAP)
 }
 
+/// Whether launch pacing may grow parallelism now: after the CPU and RAM cooldown since the
+/// last growth, or at once where CPU admission is plain, as plain Linux starts work without
+/// pacing it (006 SC-004).
+pub(super) fn pacing_may_grow(cooled_down: bool, plain_cpu: bool) -> bool {
+    cooled_down || plain_cpu
+}
+
 /// Whether admission reopened this interval after a hold (006 SC-004).
 pub(super) fn admission_reopened(was_open: bool, open: bool) -> bool {
     open && !was_open
@@ -2048,7 +2055,10 @@ impl AgentLoop<'_> {
         })
         .max()
         .unwrap_or(0);
-        let may_grow = self.last_growth.elapsed() >= Duration::from_millis(grow_after_ms);
+        let may_grow = pacing_may_grow(
+            self.last_growth.elapsed() >= Duration::from_millis(grow_after_ms),
+            decision.cpu_plain_admission,
+        );
         let admission_safe = decision.expansion_allowed || decision.cpu_ram_expansion_allowed;
         let fill = decision
             .resources
