@@ -4701,7 +4701,41 @@ mod tests {
         assert_eq!(fields.start_ticks, 98765);
         assert_eq!(fields.rss_pages, 512);
         assert_eq!(fields.parent, 1);
+        assert!(!fields.kernel);
         assert!(processes::parse_stat("4242 (truncated").is_none());
+        // Field 9 holds the flags; PF_KTHREAD marks a kernel thread.
+        let kthread = "37 (kworker/3:1) I 2 0 0 0 -1 69238880 0 0 0 0 0 9 0 0 20 0 1 0 412 0 0 \
+                       18446744073709551615 0 0 0 0 0 0 0 2147483647 0 0 0 0 17 3 0 0 0 0 0";
+        assert!(processes::parse_stat(kthread).unwrap().kernel);
+    }
+
+    /// Kernel threads are read once every few samples, their CPU carried between reads and
+    /// computed over the whole span at the next read; every other process is read each time
+    /// (SC-014).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn kernel_threads_are_read_every_few_samples() {
+        let every = processes::KERNEL_READ_EVERY;
+        assert!(every > 1);
+        // Each kernel thread is due once in every `every` samples, and the reads spread over
+        // the samples by PID.
+        for pid in [2, 37, 1001] {
+            let due = (0..u64::from(every) * 3)
+                .filter(|round| processes::kernel_read_due(*round, pid))
+                .count();
+            assert_eq!(due, 3, "{pid}");
+        }
+        let per_round: Vec<usize> = (0..every)
+            .map(|round| {
+                (0..400u32)
+                    .filter(|pid| processes::kernel_read_due(u64::from(round), *pid))
+                    .count()
+            })
+            .collect();
+        assert!(
+            per_round.iter().all(|n| *n == 400 / every as usize),
+            "{per_round:?}"
+        );
     }
 
     /// A supervisor's marker comes only from its own command line, in its place after the spec

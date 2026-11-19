@@ -15,6 +15,22 @@ pub(super) struct StatFields {
     pub(super) rss_pages: u64,
     /// The parent PID.
     pub(super) parent: u32,
+    /// A kernel thread (`PF_KTHREAD` in the flags).
+    pub(super) kernel: bool,
+}
+
+/// `PF_KTHREAD` in a `stat` line's flags.
+const PF_KTHREAD: u64 = 0x0020_0000;
+
+/// Kernel threads are read once every this many samples, about a third of the host's processes
+/// skipped most of the time; their CPU is carried between reads and counted over the whole span
+/// at the next one (SC-014). They are never CedeGrid work and belong to accounts below
+/// `uid_min`, whose usage is background.
+pub(super) const KERNEL_READ_EVERY: u32 = 4;
+
+/// Whether a kernel thread is read in sample `round`; the reads spread over the samples by PID.
+pub(super) fn kernel_read_due(round: u64, pid: u32) -> bool {
+    round % u64::from(KERNEL_READ_EVERY) == u64::from(pid % KERNEL_READ_EVERY)
 }
 
 /// Splits after the last `)`, so a command holding spaces or parentheses cannot shift fields.
@@ -28,6 +44,7 @@ pub(super) fn parse_stat(line: &str) -> Option<StatFields> {
         start_ticks: field(22)?,
         rss_pages: field(24)?,
         parent: u32::try_from(field(4)?).ok()?,
+        kernel: field(9)? & PF_KTHREAD != 0,
     })
 }
 
@@ -82,13 +99,16 @@ fn status_uid(pid: u32) -> Option<u32> {
 }
 
 pub(super) struct ProcessTable {
-    /// Each process's start ticks and CPU ticks at the last sample.
-    previous: BTreeMap<u32, (u64, u64)>,
+    /// Each process's start ticks and CPU ticks at its last read, and the global ticks then.
+    previous: BTreeMap<u32, (u64, u64, u64)>,
+    /// Kernel threads' last samples, carried between their reads.
+    kernel: BTreeMap<u32, ProcessSample>,
+    /// Samples taken, for the kernel threads' turns.
+    round: u64,
     /// Real user IDs, read once per PID and start time.
     uids: BTreeMap<(u32, u64), Option<u32>>,
     /// CedeGrid supervisors' markers, read once per PID and start time (006 FR-001).
     markers: BTreeMap<(u32, u64), Option<crate::execution_model::WorkMarker>>,
-    last_total: Option<u64>,
     /// Whether the last sample listed an MPS control daemon or server, by command name, as
     /// sysinfo's process names gave it.
     pub(super) mps: bool,
@@ -108,9 +128,10 @@ impl ProcessTable {
         };
         Some(Self {
             previous: BTreeMap::new(),
+            kernel: BTreeMap::new(),
+            round: 0,
             uids: BTreeMap::new(),
             markers: BTreeMap::new(),
-            last_total: None,
             mps: false,
             clock_hz: u64::try_from(hz).ok().filter(|hz| *hz > 0)?,
             page_bytes: u64::try_from(page).ok().filter(|page| *page > 0)?,
@@ -124,7 +145,6 @@ impl ProcessTable {
     /// keeps its state, the MPS flag included, so the next sample's CPU spans the gap.
     pub(super) fn sample(&mut self) -> Option<Vec<ProcessSample>> {
         let (total, cpus, boot) = global_ticks()?;
-        let delta_total = self.last_total.map(|last| total.saturating_sub(last));
         let entries = std::fs::read_dir("/proc").ok()?;
         let mut next = BTreeMap::new();
         let mut samples = Vec::new();
@@ -140,6 +160,15 @@ impl ProcessTable {
             else {
                 continue;
             };
+            // A kernel thread between its reads keeps its last sample and its last read.
+            if let Some(sample) = self.kernel.get(&pid)
+                && !kernel_read_due(self.round, pid)
+                && let Some(previous) = self.previous.get(&pid)
+            {
+                next.insert(pid, *previous);
+                samples.push(sample.clone());
+                continue;
+            }
             let line = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
                 Ok(line) => line,
                 // Out of descriptors: the rest of the table would read as gone.
@@ -157,13 +186,15 @@ impl ProcessTable {
                 .and_then(|(_, rest)| rest.rsplit_once(')'))
                 .map(|(command, _)| command);
             mps |= command.is_some_and(is_mps_process);
-            let cpu = match (self.previous.get(&pid), delta_total) {
-                (Some((start, ticks)), Some(delta)) if *start == fields.start_ticks => {
-                    cpu_millicores(fields.cpu_ticks.saturating_sub(*ticks), delta, cpus)
-                }
+            let cpu = match self.previous.get(&pid) {
+                Some((start, ticks, at)) if *start == fields.start_ticks => cpu_millicores(
+                    fields.cpu_ticks.saturating_sub(*ticks),
+                    total.saturating_sub(*at),
+                    cpus,
+                ),
                 _ => 0,
             };
-            next.insert(pid, (fields.start_ticks, fields.cpu_ticks));
+            next.insert(pid, (fields.start_ticks, fields.cpu_ticks, total));
             let key = (pid, fields.start_ticks);
             let uid = match self.uids.get(&key) {
                 Some(uid) => *uid,
@@ -190,7 +221,7 @@ impl ProcessTable {
                 }
                 _ => None,
             };
-            samples.push(ProcessSample {
+            let sample = ProcessSample {
                 pid,
                 uid,
                 cpu_millicores: cpu,
@@ -198,14 +229,21 @@ impl ProcessTable {
                 start_time: boot.saturating_add(fields.start_ticks / self.clock_hz),
                 parent: Some(fields.parent),
                 marker,
-            });
+            };
+            if fields.kernel {
+                self.kernel.insert(pid, sample.clone());
+            } else {
+                self.kernel.remove(&pid);
+            }
+            samples.push(sample);
         }
+        self.kernel.retain(|pid, _| next.contains_key(pid));
+        self.round = self.round.wrapping_add(1);
         self.uids
-            .retain(|(pid, start), _| next.get(pid).is_some_and(|(s, _)| s == start));
+            .retain(|(pid, start), _| next.get(pid).is_some_and(|(s, _, _)| s == start));
         self.markers
-            .retain(|(pid, start), _| next.get(pid).is_some_and(|(s, _)| s == start));
+            .retain(|(pid, start), _| next.get(pid).is_some_and(|(s, _, _)| s == start));
         self.previous = next;
-        self.last_total = Some(total);
         self.mps = mps;
         Some(samples)
     }
