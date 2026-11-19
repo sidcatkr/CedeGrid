@@ -3857,7 +3857,7 @@ fn other_causes_still_refuse_the_first_authorization() {
     assert!(!old.contention.unwrap().resources[&ResourceKey::Cpu].admission_own_new);
 }
 
-/// The GPU is never exempt: a GPU reservation stays refused while its device is
+/// GPU memory is never exempt: a GPU reservation stays refused while the device's memory is
 /// closed, whatever the flag says (FR-028).
 #[test]
 fn a_closed_gpu_device_still_refuses_the_first_authorization() {
@@ -3885,6 +3885,52 @@ fn a_closed_gpu_device_still_refuses_the_first_authorization() {
         300,
     );
     assert!(result.is_err() || !matches!(result, Ok(Response::Lease { .. })));
+}
+
+/// 006: GPU compute held only by own work already placed there (the time-slice hold that
+/// counts this reservation) counts as open at the first authorization, so a placed GPU task
+/// is not refused by its own count; without the flag, or with the device's memory closed, it
+/// is still refused.
+#[test]
+fn a_gpu_compute_hold_from_own_placed_work_authorizes_the_placed_task() {
+    use cedegrid::contention::{Admission, ResourceKey};
+    let authorized = |change: &dyn Fn(&mut NodeReport)| {
+        let d = dir();
+        let mut c = Coordinator::open(config(d.path())).unwrap();
+        wide_pool(&mut c, 100);
+        submit_tasks(&mut c, "job", 0, vec![gpu_task("gpu", "GPU-a", 500)], 100);
+        let offered = report_reply(&mut c, &negotiated(100, &["GPU-a"]), 100).assignments;
+        assert_eq!(offered.len(), 1);
+        let mut held = negotiated(200, &["GPU-a"]);
+        change(&mut held);
+        report_reply(&mut c, &held, 200);
+        let a = &offered[0];
+        matches!(
+            c.handle_at(
+                &node(),
+                Request::Prepared {
+                    assignment_id: a.request.assignment_id.clone(),
+                    generation: a.generation,
+                    coordinator_epoch: a.coordinator_epoch,
+                    record: prepared(a),
+                },
+                300,
+            ),
+            Ok(Response::Lease { .. })
+        )
+    };
+    let time_slice = |r: &mut NodeReport, own: bool| {
+        let state = resource(r, ResourceKey::GpuCompute("GPU-a".into()));
+        state.admission = Admission::held("gpu_time_slice_admission_held");
+        state.admission_own_new = own;
+    };
+    assert!(authorized(&|r| time_slice(r, true)));
+    assert!(!authorized(&|r| time_slice(r, false)));
+    assert!(!authorized(&|r| {
+        time_slice(r, true);
+        resource(r, ResourceKey::GpuMemory("GPU-a".into())).admission =
+            Admission::held("admission_cooling_down");
+    }));
 }
 
 /// Without `contention/1`, placement keeps the 0.2 fields.

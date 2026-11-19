@@ -2475,8 +2475,10 @@ fn placement(
 /// [`placement`] for the first authorization of a reservation already placed: a CPU
 /// or RAM resource closed only by the node's own allocations without a first
 /// measurement, or the cooldown only they restarted, counts as open, so a burst's
-/// own launches do not refuse the rest of it (FR-028). Every other cause, a GPU
-/// resource, a report without the cause, and the budget still apply.
+/// own launches do not refuse the rest of it (FR-028). So does GPU compute held only by
+/// own work already placed there, the time-slice hold that counts this reservation (006);
+/// placement still puts at most one new GPU task on a device per pass. Every other cause,
+/// GPU memory, a report without the cause, and the budget still apply.
 fn authorization_placement(
     report: &NodeReport,
     request: &crate::execution_model::LaunchRequest,
@@ -2485,7 +2487,15 @@ fn authorization_placement(
     use crate::contention::{Admission, ResourceKey};
     let mut report = report.clone();
     if let Some(contention) = report.contention.as_mut() {
-        for key in [ResourceKey::Cpu, ResourceKey::Ram] {
+        let devices = request
+            .resources
+            .gpu_memory_mib
+            .keys()
+            .map(|uuid| ResourceKey::GpuCompute(uuid.clone()));
+        for key in [ResourceKey::Cpu, ResourceKey::Ram]
+            .into_iter()
+            .chain(devices)
+        {
             if let Some(state) = contention.resources.get_mut(&key)
                 && state.admission_own_new
             {
