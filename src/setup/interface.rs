@@ -8,6 +8,7 @@ fn written(pick: Pick) -> String {
         Pick::Number(value) => value.to_string(),
         Pick::Role(role) => format!("\"{}\"", role.name()),
         Pick::Inherit => "(removed)".into(),
+        Pick::Flag(on) => on.to_string(),
     }
 }
 
@@ -162,6 +163,9 @@ impl State {
             .unwrap_or_else(|| base.clone());
         for field in node_fields() {
             values.insert(field, field.current(&preview));
+        }
+        if let Some(on) = preselected_priority(&target, &flags) {
+            values.insert(Field::PlainPriority, Pick::Flag(on));
         }
         Self {
             acknowledged: flags.acknowledge.clone(),
@@ -546,6 +550,15 @@ mod screen {
                                 format!(" · {} MiB on {uuid}", group(config.vram_floor_mib(*total)))
                             })
                             .unwrap_or_else(|| " · no GPU on this host".into()),
+                        // Priority says when this host cannot apply it (006 FR-025).
+                        (Field::PlainPriority, Some(host)) if pick == Pick::Flag(true) => {
+                            match host.plain_priority {
+                                PlainPriorityHost::Permitted(weight) => {
+                                    format!(" · weight {weight} on this host")
+                                }
+                                _ => " · no effect on this host".into(),
+                            }
+                        }
                         _ => String::new(),
                     };
                     let label = format!("{:<label_width$}", field.label());

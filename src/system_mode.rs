@@ -132,6 +132,51 @@ pub fn raise_wanted(
         })
 }
 
+/// What this host offers for priority over plain users (006 FR-025, FR-029).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PlainPriorityHost {
+    /// System mode permits it, at this account slice CPU weight.
+    Permitted(u64),
+    /// No System mode here, so no account slice can be raised.
+    Rootless,
+    /// The administrator policy leaves `modes.plain_priority` off.
+    NotPermitted,
+    /// The administrator policy cannot be read, which permits nothing.
+    Unreadable(String),
+}
+
+/// What this host offers for priority over plain users. The policy is read only where System
+/// mode is installed.
+pub fn plain_priority_host(
+    installed: bool,
+    policy: impl FnOnce() -> anyhow::Result<crate::broker::admin_policy::AdminPolicy>,
+) -> PlainPriorityHost {
+    if !installed {
+        return PlainPriorityHost::Rootless;
+    }
+    match policy() {
+        Ok(policy) if policy.plain_priority.value => {
+            PlainPriorityHost::Permitted(policy.plain_priority_cpu_weight.value)
+        }
+        Ok(_) => PlainPriorityHost::NotPermitted,
+        Err(error) => PlainPriorityHost::Unreadable(format!("{error:#}")),
+    }
+}
+
+/// What this host offers now; System mode counts as installed where its policy file exists.
+#[cfg(unix)]
+pub fn plain_priority_host_now() -> PlainPriorityHost {
+    let installed = Path::new(crate::broker::admin_policy::POLICY_DIR)
+        .join(crate::broker::admin_policy::POLICY_FILE)
+        .exists();
+    plain_priority_host(installed, crate::broker::admin_policy::load)
+}
+
+#[cfg(not(unix))]
+pub fn plain_priority_host_now() -> PlainPriorityHost {
+    PlainPriorityHost::Rootless
+}
+
 /// One condition an unprotected grant lacks: its code, what is missing and how to
 /// fix it. `doctor` lists them as bullets; a refusal joins them into one line.
 #[derive(Clone, Debug, PartialEq, Eq)]

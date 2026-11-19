@@ -1208,8 +1208,9 @@ mod setup_terminal {
     // Cancel, then Review and write.
     const DEFAULT_MODE: usize = 1;
     const MAX_MODE: usize = 6;
-    const RAM_FLOOR: usize = 7;
-    const CPU_NEUTRAL_MARGIN: usize = 10;
+    const PLAIN_PRIORITY: usize = 7;
+    const RAM_FLOOR: usize = 8;
+    const CPU_NEUTRAL_MARGIN: usize = 11;
     const UP: &[u8] = b"\x1b[A";
     const DOWN: &[u8] = b"\x1b[B";
 
@@ -1555,13 +1556,31 @@ mod setup_terminal {
         );
     }
 
-    /// SC-011: the interface and the flags write byte-identical files.
+    /// SC-011: the interface and the flags write byte-identical files. On a terminal, priority
+    /// over plain users starts on Yes where the file does not set it (006 FR-025).
     #[test]
     fn the_interface_and_flags_write_identical_files() {
         let start = "# Operator notes stay.\nconfig_version = 1\nnode_id = \"node-a\"\n\n[ram]\nreserve_mib = 8192 # fixed part\n";
         type Steps = fn(&mut Pty);
-        let cases: [(&str, Option<&str>, Steps, &[&str]); 4] = [
-            ("defaults", None, |pty| write_from(pty, 0), &[]),
+        let cases: [(&str, Option<&str>, Steps, &[&str]); 5] = [
+            (
+                "defaults",
+                None,
+                |pty| write_from(pty, 0),
+                &["--priority-over-plain"],
+            ),
+            (
+                "priority declined",
+                None,
+                |pty| {
+                    // Options: Yes (preselected), No.
+                    open(pty, PLAIN_PRIORITY);
+                    pty.key(DOWN);
+                    pty.key(b"\r");
+                    write_from(pty, PLAIN_PRIORITY);
+                },
+                &["--no-priority-over-plain"],
+            ),
             (
                 "performance cap",
                 Some(start),
@@ -1573,7 +1592,7 @@ mod setup_terminal {
                     pty.key(b"\r");
                     write_from(pty, MAX_MODE);
                 },
-                &["--max-mode", "performance"],
+                &["--max-mode", "performance", "--priority-over-plain"],
             ),
             (
                 "floor change",
@@ -1585,7 +1604,7 @@ mod setup_terminal {
                     pty.key(b"\r");
                     write_from(pty, RAM_FLOOR);
                 },
-                &["--ram-floor-mib", "16384"],
+                &["--ram-floor-mib", "16384", "--priority-over-plain"],
             ),
             (
                 "margin change",
@@ -1597,7 +1616,7 @@ mod setup_terminal {
                     pty.key(b"\r");
                     write_from(pty, CPU_NEUTRAL_MARGIN);
                 },
-                &["--margin", "cpu.neutral=7"],
+                &["--margin", "cpu.neutral=7", "--priority-over-plain"],
             ),
         ];
         for (name, initial, steps, flags) in cases {

@@ -641,6 +641,10 @@ pub struct ContentionConfig {
     /// Never start own GPU work on a device with external contexts, in any mode
     /// (FR-064).
     pub never_share_occupied_gpus: bool,
+    /// The user's choice of priority over users who run no CedeGrid work (006 FR-025): own
+    /// Performance and Aggressive work asks for a raised account slice weight in System mode,
+    /// where the administrator policy permits it. Off unless chosen in setup.
+    pub priority_over_plain: bool,
     pub cpu: ResourceContentionConfig,
     pub ram: ResourceContentionConfig,
     pub gpu_compute: ResourceContentionConfig,
@@ -662,6 +666,7 @@ impl Default for ContentionConfig {
             principal_window_intervals: 4,
             principal_leave_s: 60,
             never_share_occupied_gpus: false,
+            priority_over_plain: false,
             cpu: Default::default(),
             ram: Default::default(),
             gpu_compute: Default::default(),
@@ -1416,6 +1421,7 @@ pub const KEY_CLASSES: &[(&str, KeyClass)] = {
         ("contention.max_mode", Bounded),
         ("contention.neutral_memory_policy", Safe),
         ("contention.never_share_occupied_gpus", Safe),
+        ("contention.priority_over_plain", Safe),
         ("contention.principal_leave_s", Bounded),
         // Users not joined yet count toward the unattributed principal, which contends.
         ("contention.principal_window_intervals", Safe),

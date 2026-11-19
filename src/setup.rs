@@ -158,6 +158,13 @@ pub struct SetupArgs {
     /// Turn that allowance off; no confirmation.
     #[arg(long)]
     pub disallow_unprotected: bool,
+    /// Give own CPU work priority over users who run no CedeGrid work, where System mode
+    /// permits it (006 FR-025).
+    #[arg(long, conflicts_with = "no_priority_over_plain")]
+    pub priority_over_plain: bool,
+    /// Share the CPU equally with users who run no CedeGrid work.
+    #[arg(long)]
+    pub no_priority_over_plain: bool,
 }
 
 /// What an operator chose. Unset fields keep the current configuration.
@@ -177,6 +184,8 @@ pub struct Choices {
     pub sets: BTreeMap<(ResourceKind, String), String>,
     pub acknowledge: BTreeSet<String>,
     pub connection: BTreeMap<ConnectionKey, String>,
+    /// Priority over users who run no CedeGrid work (006 FR-025).
+    pub priority_over_plain: Option<bool>,
 }
 
 /// Client and coordinator settings setup manages.
@@ -335,6 +344,9 @@ impl Choices {
             choices.margins.insert((kind, mode), percent);
         }
         choices.guaranteed_hint_deadline_s = args.guaranteed_hint_deadline_s;
+        if args.priority_over_plain || args.no_priority_over_plain {
+            choices.priority_over_plain = Some(args.priority_over_plain);
+        }
         for pair in &args.sets {
             let (key, literal) = split_pair(pair, "--set", "RESOURCE.KEY=VALUE")?;
             let (resource, key) = key
@@ -390,6 +402,14 @@ impl Choices {
                 self.guaranteed_hint_deadline_s.is_some(),
             ),
             ("--set", !self.sets.is_empty()),
+            (
+                if self.priority_over_plain == Some(false) {
+                    "--no-priority-over-plain"
+                } else {
+                    "--priority-over-plain"
+                },
+                self.priority_over_plain.is_some(),
+            ),
         ]
         .into_iter()
         .filter(|(_, set)| *set)
@@ -405,6 +425,7 @@ pub struct Host {
     pub physical_cores: Option<u32>,
     pub ram_mib: u64,
     pub gpus: Vec<(String, u64)>,
+    pub plain_priority: PlainPriorityHost,
 }
 
 impl Host {
@@ -418,6 +439,7 @@ impl Host {
                 .iter()
                 .map(|gpu| (gpu.uuid.clone(), gpu.total_memory_mib))
                 .collect(),
+            plain_priority: PlainPriorityHost::Rootless,
         }
     }
 
@@ -425,7 +447,10 @@ impl Host {
     pub fn sample(config: &Config) -> Option<Self> {
         let mut collector = crate::telemetry::Collector::for_config(config).ok()?;
         let snapshot = collector.sample().ok()?;
-        Some(Self::from_snapshot(&snapshot))
+        Some(Self {
+            plain_priority: crate::system_mode::plain_priority_host_now(),
+            ..Self::from_snapshot(&snapshot)
+        })
     }
 
     fn gpu_totals(&self) -> Vec<u64> {
@@ -441,6 +466,7 @@ fn caution_needed(config: &Config, host: Option<&Host>) -> Vec<CautionDetail> {
 }
 
 use crate::explain::group;
+use crate::system_mode::PlainPriorityHost;
 
 /// The configuration file and what it holds now.
 #[derive(Debug, Clone)]
@@ -809,6 +835,17 @@ fn edit_node(
             )?,
             None => remove(document, &["contention"], "max_mode", changes)?,
         }
+    }
+    if let Some(on) = choices.priority_over_plain
+        && on != contention.priority_over_plain
+    {
+        set(
+            document,
+            &["contention"],
+            "priority_over_plain",
+            on.into(),
+            changes,
+        )?;
     }
     if let Some(seconds) = choices.guaranteed_hint_deadline_s
         && seconds != contention.guaranteed_hint_deadline_s
@@ -1382,6 +1419,7 @@ pub enum Field {
     DefaultMode,
     Mode(ResourceKind),
     MaxMode,
+    PlainPriority,
     RamFloor,
     GpuFloor,
     Margin(ResourceKind, ContentionMode),
@@ -1398,13 +1436,19 @@ pub enum Pick {
     /// Follow the default mode, or no explicit cap.
     Inherit,
     Number(u64),
+    Flag(bool),
 }
 
 /// The node fields in interface order.
 pub fn node_fields() -> Vec<Field> {
     let mut fields = vec![Field::Role, Field::DefaultMode];
     fields.extend(ResourceKind::ALL.map(Field::Mode));
-    fields.extend([Field::MaxMode, Field::RamFloor, Field::GpuFloor]);
+    fields.extend([
+        Field::MaxMode,
+        Field::PlainPriority,
+        Field::RamFloor,
+        Field::GpuFloor,
+    ]);
     for kind in ResourceKind::ALL {
         for mode in ContentionMode::MARGINED {
             // Memory keeps only the floor under Neutral and Performance.
@@ -1429,6 +1473,7 @@ impl Field {
             Field::DefaultMode => "contention.default_mode".into(),
             Field::Mode(kind) => format!("contention.{}.mode", kind.name()),
             Field::MaxMode => "contention.max_mode".into(),
+            Field::PlainPriority => "contention.priority_over_plain".into(),
             Field::RamFloor => "ram.reserve_mib".into(),
             Field::GpuFloor => "gpu.reserve_vram_mib".into(),
             Field::Margin(kind, mode) => format!(
@@ -1450,6 +1495,7 @@ impl Field {
             Field::DefaultMode => "Default mode".into(),
             Field::Mode(kind) => format!("{} mode", resource_label(kind)),
             Field::MaxMode => "Node cap".into(),
+            Field::PlainPriority => "Priority over plain users".into(),
             Field::RamFloor => "RAM floor".into(),
             Field::GpuFloor => "GPU memory floor".into(),
             Field::Margin(kind, mode) => {
@@ -1467,6 +1513,9 @@ impl Field {
         match self {
             Field::DefaultMode => Some("Applies to each resource without a mode of its own."),
             Field::MaxMode => Some("The highest mode a job may request on this node."),
+            Field::PlainPriority => {
+                Some("Above users who run no CedeGrid work, never above other CedeGrid users.")
+            }
             _ => None,
         }
     }
@@ -1482,6 +1531,7 @@ impl Field {
                 .mode
                 .map_or(Pick::Inherit, Pick::Mode),
             Field::MaxMode => contention.max_mode.map_or(Pick::Inherit, Pick::Mode),
+            Field::PlainPriority => Pick::Flag(contention.priority_over_plain),
             Field::RamFloor => Pick::Number(config.ram.reserve_mib),
             Field::GpuFloor => Pick::Number(config.gpu.reserve_vram_mib),
             Field::Margin(kind, mode) => {
@@ -1542,6 +1592,7 @@ impl Field {
                     )
                     .collect()
             }
+            Field::PlainPriority => vec![Pick::Flag(true), Pick::Flag(false)],
             Field::RamFloor => {
                 numbers(vec![512, 768, 1024, 2048, 4096, 8192, 16_384, 32_768], true)
             }
@@ -1590,6 +1641,11 @@ impl Field {
                 choices.modes.insert(kind, mode);
             }
             Field::MaxMode => choices.max_mode = Some(mode),
+            Field::PlainPriority => {
+                if let Pick::Flag(on) = pick {
+                    choices.priority_over_plain = Some(on);
+                }
+            }
             Field::RamFloor => choices.ram_floor_mib = number,
             Field::GpuFloor => choices.gpu_floor_mib = number,
             Field::Margin(kind, margin) => {
@@ -1632,6 +1688,7 @@ impl Field {
                 )
             }
             (_, Pick::Inherit) => "no explicit cap".into(),
+            (_, Pick::Flag(on)) => if on { "yes" } else { "no" }.into(),
             (Field::RamFloor | Field::GpuFloor | Field::NoiseTolerance, Pick::Number(value)) => {
                 format!("{} MiB", group(value))
             }
@@ -1822,8 +1879,50 @@ pub fn consequence(field: Field, pick: Pick, config: &Config, host: Option<&Host
         (Field::AttributionTolerance, Pick::Number(points)) => format!(
             "per-process GPU samples within {points} points of device use count as measured"
         ),
+        (Field::PlainPriority, Pick::Flag(false)) => {
+            "own CPU work shares the CPU equally with every user".into()
+        }
+        (Field::PlainPriority, Pick::Flag(true)) => match host.map(|host| &host.plain_priority) {
+            Some(PlainPriorityHost::Permitted(weight)) => format!(
+                "own CPU work at weight {weight} against 100 for users without CedeGrid work, \
+                 never above another CedeGrid user"
+            ),
+            Some(PlainPriorityHost::Rootless) => {
+                "no effect until System mode is installed; CedeGrid runs rootless here".into()
+            }
+            Some(PlainPriorityHost::NotPermitted) => {
+                "no effect: this host's System mode policy does not permit it \
+                 (modes.plain_priority)"
+                    .into()
+            }
+            Some(PlainPriorityHost::Unreadable(reason)) => {
+                format!("no effect: this host's System mode policy cannot be read ({reason})")
+            }
+            None => {
+                "own CPU work above users without CedeGrid work where System mode permits it".into()
+            }
+        },
         _ => String::new(),
     }
+}
+
+/// On a terminal, Yes for priority over plain users where neither the file nor a flag sets it
+/// (006 FR-025). An unattended setup leaves it off.
+pub fn preselected_priority(target: &Target, flags: &Choices) -> Option<bool> {
+    if flags.priority_over_plain.is_some() {
+        return None;
+    }
+    let set = target
+        .original
+        .as_deref()
+        .and_then(|text| text.parse::<DocumentMut>().ok())
+        .is_some_and(|document| {
+            document
+                .get("contention")
+                .and_then(|contention| contention.get("priority_over_plain"))
+                .is_some()
+        });
+    (!set).then_some(true)
 }
 
 /// Why each caution option is marked, restated on the confirmation screen
@@ -1870,6 +1969,20 @@ pub fn host_lines(config: &Config, host: Option<&Host>) -> Vec<String> {
                 group(config.vram_floor_mib(*total))
             ));
         }
+    }
+    // Shown only where chosen, with what this host makes of it (006 FR-025).
+    if config.contention.priority_over_plain {
+        lines.push(format!(
+            "{:<12} {:<12} {}",
+            "Priority",
+            "over plain",
+            capitalize(&consequence(
+                Field::PlainPriority,
+                Pick::Flag(true),
+                config,
+                host
+            ))
+        ));
     }
     lines
 }
@@ -2122,6 +2235,7 @@ mod tests {
             physical_cores: Some(16),
             ram_mib: 262_144,
             gpus: vec![("GPU-a".into(), 24_576)],
+            plain_priority: PlainPriorityHost::Permitted(200),
         }
     }
 
@@ -2368,5 +2482,142 @@ mod tests {
                 assert!(result.is_ok(), "{field:?} {pick:?}: {:?}", result.err());
             }
         }
+    }
+
+    /// The flags set the choice for an unattended setup; without either it stays unset, so a
+    /// new file leaves it off (006 FR-025).
+    #[test]
+    fn priority_over_plain_flags_set_the_choice() {
+        let on = SetupArgs {
+            priority_over_plain: true,
+            ..SetupArgs::default()
+        };
+        let off = SetupArgs {
+            no_priority_over_plain: true,
+            ..SetupArgs::default()
+        };
+        assert_eq!(
+            Choices::from_args(&on).unwrap().priority_over_plain,
+            Some(true)
+        );
+        assert_eq!(
+            Choices::from_args(&off).unwrap().priority_over_plain,
+            Some(false)
+        );
+        assert_eq!(
+            Choices::from_args(&SetupArgs::default())
+                .unwrap()
+                .priority_over_plain,
+            None
+        );
+        let (_dir, plain) = target("config_version = 1\n");
+        let unattended = plan(&plain.path, &Choices::default(), None).unwrap();
+        assert!(!unattended.config.unwrap().contention.priority_over_plain);
+    }
+
+    /// The choice is written under `[contention]` and running setup again changes it.
+    #[test]
+    fn priority_over_plain_is_written_and_changed_again() {
+        let (_dir, plain) = target("config_version = 1\n");
+        let choices = Choices {
+            priority_over_plain: Some(true),
+            ..Choices::default()
+        };
+        let on = plan(&plain.path, &choices, None).unwrap();
+        assert!(on.config.as_ref().unwrap().contention.priority_over_plain);
+        assert_eq!(
+            on.changes.get("contention.priority_over_plain"),
+            Some(&serde_json::Value::Bool(true))
+        );
+        std::fs::write(&plain.path, &on.text).unwrap();
+        let again = locate(&plain.path).unwrap();
+        let choices = Choices {
+            priority_over_plain: Some(false),
+            ..Choices::default()
+        };
+        let off = plan(&again.path, &choices, None).unwrap();
+        assert!(!off.config.unwrap().contention.priority_over_plain);
+        // Off on a file that never set it changes nothing.
+        let (_dir, unset) = target("config_version = 1\n");
+        let unchanged = plan(&unset.path, &choices, None).unwrap();
+        assert!(!unchanged.changed());
+    }
+
+    /// On a terminal Yes is preselected where neither the file nor a flag sets the choice;
+    /// a file's own value and a flag are kept.
+    #[test]
+    fn priority_over_plain_is_preselected_only_where_unset() {
+        let (_dir, fresh) = target("config_version = 1\n");
+        assert_eq!(
+            preselected_priority(&fresh, &Choices::default()),
+            Some(true)
+        );
+        let (_dir, no_file) = {
+            let dir = tempfile::tempdir().unwrap();
+            let target = locate(&dir.path().join("node.toml")).unwrap();
+            (dir, target)
+        };
+        assert_eq!(
+            preselected_priority(&no_file, &Choices::default()),
+            Some(true)
+        );
+        let (_dir, chosen) =
+            target("config_version = 1\n[contention]\npriority_over_plain = false\n");
+        assert_eq!(preselected_priority(&chosen, &Choices::default()), None);
+        let flagged = Choices {
+            priority_over_plain: Some(false),
+            ..Choices::default()
+        };
+        assert_eq!(preselected_priority(&fresh, &flagged), None);
+    }
+
+    /// The field offers Yes first and says what this host can apply (006 FR-025).
+    #[test]
+    fn priority_over_plain_field_says_what_the_host_applies() {
+        let config = Config::default();
+        let field = Field::PlainPriority;
+        assert_eq!(field.key(), "contention.priority_over_plain");
+        assert_eq!(
+            field.options(&config, true),
+            [Pick::Flag(true), Pick::Flag(false)]
+        );
+        assert_eq!(field.current(&config), Pick::Flag(false));
+        assert_eq!(field.show(Pick::Flag(true), &config), "yes");
+        assert_eq!(field.show(Pick::Flag(false), &config), "no");
+        let mut choices = Choices::default();
+        field.apply(&mut choices, Pick::Flag(true));
+        assert_eq!(choices.priority_over_plain, Some(true));
+        let line = |state: PlainPriorityHost, pick: bool| {
+            let host = Host {
+                plain_priority: state,
+                ..host()
+            };
+            consequence(field, Pick::Flag(pick), &config, Some(&host))
+        };
+        assert_eq!(
+            line(PlainPriorityHost::Permitted(250), true),
+            "own CPU work at weight 250 against 100 for users without CedeGrid work, \
+             never above another CedeGrid user"
+        );
+        assert_eq!(
+            line(PlainPriorityHost::Rootless, true),
+            "no effect until System mode is installed; CedeGrid runs rootless here"
+        );
+        assert_eq!(
+            line(PlainPriorityHost::NotPermitted, true),
+            "no effect: this host's System mode policy does not permit it (modes.plain_priority)"
+        );
+        assert_eq!(
+            line(PlainPriorityHost::Unreadable("bad file".into()), true),
+            "no effect: this host's System mode policy cannot be read (bad file)"
+        );
+        assert_eq!(
+            line(PlainPriorityHost::Permitted(250), false),
+            "own CPU work shares the CPU equally with every user"
+        );
+        assert_eq!(
+            consequence(field, Pick::Flag(true), &config, None),
+            "own CPU work above users without CedeGrid work where System mode permits it"
+        );
     }
 }

@@ -125,16 +125,16 @@ this thread's.
   priority rule names two exceptions, priority over plain users (install option, both the
   administrator's permission and the user's choice) and unprotected; Principle V lets the broker
   set the account slice weight for either.
-- [ ] T071 [US6] Test first, then `modes.plain_priority` (bool, default false) and
+- [x] T071 [US6] Test first, then `modes.plain_priority` (bool, default false) and
   `modes.plain_priority_cpu_weight` (101 to 10000, default 200) in
   `src/broker/admin_policy.rs`, `docs/system-mode.md` and
   `specs/005-system-mode/contracts/admin-policy.md`.
-- [ ] T072 [US6] Test first, then the broker's `raise` request with a `level` (`plain` or
+- [x] T072 [US6] Test first, then the broker's `raise` request with a `level` (`plain` or
   `unprotected`, default `unprotected` for compatibility) in `src/broker/request.rs`,
   `src/broker/systemd.rs` and `src/broker/server.rs`: the level's policy key and weight, one lease
   per caller at the higher level asked, and every end of FR-027. Container fixture in
   `tests/system_mode.rs`.
-- [ ] T073 [US6] Test first, then the user's choice `contention.priority_over_plain` (bool,
+- [x] T073 [US6] Test first, then the user's choice `contention.priority_over_plain` (bool,
   default false) in `src/config.rs`, validated once, and the setup question with Yes preselected
   and `--priority-over-plain` / `--no-priority-over-plain` in `src/setup.rs` and
   `src/setup/interface.rs`; setup says when the host cannot apply it.

@@ -415,6 +415,32 @@ fn the_raise_weight_is_the_administrators_and_bounded() {
     }
 }
 
+/// 006 FR-025: what setup says this host offers for priority over plain users. Without System
+/// mode the policy is not read; a policy that cannot be read permits nothing.
+#[test]
+fn the_host_offers_priority_over_plain_users_where_the_policy_permits_it() {
+    use cedegrid::system_mode::{PlainPriorityHost, plain_priority_host};
+    assert_eq!(
+        plain_priority_host(true, || AdminPolicy::parse(
+            "[modes]\nplain_priority = true\nplain_priority_cpu_weight = 300\n",
+            1000
+        )),
+        PlainPriorityHost::Permitted(300)
+    );
+    assert_eq!(
+        plain_priority_host(true, || AdminPolicy::parse("", 1000)),
+        PlainPriorityHost::NotPermitted
+    );
+    assert_eq!(
+        plain_priority_host(false, || panic!("read without System mode")),
+        PlainPriorityHost::Rootless
+    );
+    match plain_priority_host(true, || Err(anyhow::anyhow!("not owned by root"))) {
+        PlainPriorityHost::Unreadable(reason) => assert!(reason.contains("not owned by root")),
+        other => panic!("{other:?}"),
+    }
+}
+
 /// 006 FR-024: priority over plain users needs the administrator's key, off by default, and its
 /// weight is the administrator's, 200 by default, between 101 and 10000.
 #[test]
