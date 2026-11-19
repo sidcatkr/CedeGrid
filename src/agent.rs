@@ -3303,6 +3303,12 @@ mod pacing_tests {
         };
         assert_eq!(pacing(active_worker_count(slots, 0)), 1);
         assert_eq!(pacing(4), 0);
+        // Launches still preparing are offers the coordinator has not seen start, and it takes
+        // them off the reported slots itself: the report counts running slots only, or a
+        // fourth task waits for the next interval's heartbeat (3.4 s in the batch gate).
+        let wave = [(false, true); 4];
+        assert_eq!(pacing(active_worker_count(wave, 0)), 4);
+        assert_eq!(pacing(active_worker_count(wave, 0)).saturating_sub(3), 1);
     }
 
     /// A released run's failure report checks its turn before the attempt pin: a failure with

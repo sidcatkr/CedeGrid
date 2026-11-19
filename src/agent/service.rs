@@ -2029,10 +2029,15 @@ impl AgentLoop<'_> {
             .get(&crate::contention::ResourceKey::Cpu)
             .and_then(|s| s.effective_mode)
             >= Some(crate::contention::ContentionMode::Performance);
+        // Launches still preparing are offers the coordinator has not seen start, and it takes
+        // those off the reported slots itself; counting them here too held a task back until the
+        // next interval's heartbeat (006 SC-004).
+        let running_workers =
+            active_worker_count(self.slots.values().map(|s| (s.reported, s.exited)), 0);
         let launch_slots = if admission_safe && self.stopping.is_none() && !self.spool_full {
             let paced = launch_slots(LaunchPacing {
                 max_workers: agent.max_workers,
-                active: active_workers,
+                active: running_workers,
                 admitted: self.admitted_parallelism,
                 may_grow,
                 fill,
