@@ -934,3 +934,78 @@ fn a_named_plain_user_on_a_saturated_cpu_sets_the_flag_promptly() {
         assert!(run[6..].iter().all(|on| *on), "{mode:?}: {run:?}");
     }
 }
+
+/// SC-002: eight 500 m tasks on an idle four-CPU scope, each using about 1000 m. Plain Linux
+/// starts all eight; Performance admits against their requests, not the usage above them, so
+/// the three still waiting fit beside the five running (006 FR-007, SC-002).
+#[test]
+fn performance_admits_by_requests_where_tasks_use_more() {
+    for mode in [ContentionMode::Performance, ContentionMode::Aggressive] {
+        let mut engine = PolicyEngine::new();
+        let mut last = None;
+        for i in 0..10u64 {
+            let (mut snapshot, mut input) = reading_beside(0, 50, 0, Some(true), None);
+            let job = input.allocations[0].clone();
+            input.allocations = (0..5)
+                .map(|k| Allocation {
+                    id: format!("job-{k}"),
+                    requested: Resources {
+                        cpu_millicores: 500,
+                        ..job.requested.clone()
+                    },
+                    observed: Some(Resources {
+                        cpu_millicores: 790,
+                        ram_mib: 256,
+                        gpu_memory_mib: BTreeMap::new(),
+                    }),
+                    ..job.clone()
+                })
+                .collect();
+            input.arrivals = (0..5).map(|k| (format!("job-{k}"), OWN_ARRIVAL)).collect();
+            snapshot.managed_cpu_lower_millicores = Some(3950);
+            snapshot.cpu_busy_millicores = Some(4000);
+            snapshot.kernel.as_mut().unwrap().cpu.busy_millicores = Some(4000);
+            snapshot.observed_at_unix_ms = 100 + i * 500;
+            snapshot.kernel.as_mut().unwrap().monotonic_elapsed_ms = 500 + i * 500;
+            last = Some(
+                engine
+                    .evaluate(&config(mode), &snapshot, &input, i * 500)
+                    .unwrap(),
+            );
+        }
+        let last = last.unwrap();
+        // 4000 m less the five requests of 500 m: room for the other three.
+        assert!(
+            last.admission_headroom.cpu_millicores >= 1500,
+            "{mode:?}: {:?}",
+            last.admission_headroom
+        );
+        assert!(
+            cedegrid::policy::schedulable_budget(&last).cpu_millicores >= 4000,
+            "{mode:?}"
+        );
+    }
+    // Beside a first-comer the hold still charges own usage as before: the 1000 m job,
+    // requested at 500 m, leaves 1000 m of the 2000 m share.
+    let (mut snapshot, mut input) = reading_beside(2000, 50, 0, Some(true), FIRST);
+    input.allocations[0].requested.cpu_millicores = 500;
+    let mut engine = PolicyEngine::new();
+    let mut held = None;
+    for i in 0..10u64 {
+        snapshot.observed_at_unix_ms = 100 + i * 500;
+        snapshot.kernel.as_mut().unwrap().monotonic_elapsed_ms = 500 + i * 500;
+        held = Some(
+            engine
+                .evaluate(
+                    &config(ContentionMode::Performance),
+                    &snapshot,
+                    &input,
+                    i * 500,
+                )
+                .unwrap(),
+        );
+    }
+    let held = held.unwrap();
+    assert_eq!(held.managed_budget.cpu_millicores, 2000);
+    assert_eq!(held.admission_headroom.cpu_millicores, 1000);
+}

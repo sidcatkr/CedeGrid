@@ -104,6 +104,9 @@ impl<'a> Interval<'a> {
                                 let usage = if alone { mean(values) } else { p95(values) };
                                 self.cpu_credit +=
                                     i128::from(charge.cpu_millicores) - i128::from(usage);
+                                self.cpu_credit_requests += i128::from(
+                                    allocation.requested.cpu_millicores.saturating_sub(usage),
+                                );
                                 charge.cpu_millicores = usage;
                             }
                         }
@@ -170,6 +173,11 @@ impl<'a> Interval<'a> {
                     )));
                 }
             }
+            self.charged_cpu_requests = self.charged_cpu_requests.saturating_add(
+                charge
+                    .cpu_millicores
+                    .min(allocation.requested.cpu_millicores),
+            );
             self.charged.add_checked(&charge)?;
             self.charges.insert(allocation.id.clone(), charge);
         }
@@ -1116,6 +1124,7 @@ impl<'a> Interval<'a> {
         if streak >= crate::policy::BESIDE_PLAIN_INTERVALS {
             self.next.beside_plain_ms = Some(self.now);
         }
+        self.cpu_plain_admission = open;
         self.cpu_beside_plain = open
             && self.next.beside_plain_ms.is_some_and(|at| {
                 self.now.saturating_sub(at) <= crate::policy::BESIDE_PLAIN_HOLD_MS

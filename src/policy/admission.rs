@@ -434,6 +434,14 @@ impl Interval<'_> {
         // Recommendations are not release confirmation: subtract ALL allocations,
         // including existing draining work and everything just recommended for drain.
         headroom.subtract_saturating(&self.charged);
+        // Where CPU admission is as plain Linux would start work, own work counts at its
+        // requests: usage above them takes no room from tasks still to start (006 SC-002).
+        if self.cpu_plain_admission {
+            headroom.cpu_millicores = self
+                .budget
+                .cpu_millicores
+                .saturating_sub(self.charged_cpu_requests);
+        }
         // Paused own tasks have the first claim on the room below the CPU target: new work is not
         // admitted into what they would take back (FR-028, FR-089).
         let paused: u64 = self
