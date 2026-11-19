@@ -1575,13 +1575,7 @@ impl AgentLoop<'_> {
         let mark = self.cost.charge("policy", mark);
         decision.observe_only = false;
         let charge = admission_charge(&allocations, decision.cpu_plain_admission);
-        bound_by_envelope(
-            &mut decision,
-            &agent.capacity,
-            agent.max_workers,
-            &charge,
-            next_task_cpu(&allocations),
-        );
+        bound_by_envelope(&mut decision, &agent.capacity, agent.max_workers, &charge);
         self.cost.charge("decision", mark);
         self.note_ram_views(&snapshot, &allocations, &decision);
         Ok((snapshot, allocations, decision))
@@ -3366,23 +3360,18 @@ pub(super) fn block_admission_beyond_envelope(
 /// Bounds the decision's budget and headroom by the operator's envelope. While a plain user
 /// competes for the CPU in Performance or Aggressive (`cpu_beside_plain`), the CPU part is the
 /// envelope's CPU times the task limit instead, as plain Linux starts every task and the kernel
-/// gives more threads more CPU (006 FR-007a). Elsewhere where CPU admission is plain, it is the
-/// envelope's CPU plus `next_cpu`, the one own task more the policy admits so no CPU sits idle
-/// while the next task starts (006 SC-004).
+/// gives more threads more CPU (006 FR-007a).
 pub(super) fn bound_by_envelope(
     decision: &mut crate::model::Decision,
     capacity: &Resources,
     max_workers: usize,
     charge: &Resources,
-    next_cpu: u64,
 ) {
     let mut envelope = capacity.clone();
     if decision.cpu_beside_plain {
         envelope.cpu_millicores = capacity
             .cpu_millicores
             .saturating_mul(u64::try_from(max_workers.max(1)).unwrap_or(u64::MAX));
-    } else if decision.cpu_plain_admission {
-        envelope.cpu_millicores = capacity.cpu_millicores.saturating_add(next_cpu);
     }
     decision.managed_budget = minimum(&decision.managed_budget, &envelope);
     if decision.cpu_beside_plain {
@@ -3457,22 +3446,6 @@ pub(super) fn admission_charge(
         });
     }
     used
-}
-
-/// The next own task's CPU as the policy takes it where admission is plain: as large as the
-/// largest own task running or waiting (006 SC-004).
-pub(super) fn next_task_cpu(allocations: &[crate::model::Allocation]) -> u64 {
-    allocations
-        .iter()
-        .filter(|allocation| {
-            matches!(
-                allocation.phase,
-                crate::model::AllocationPhase::Running | crate::model::AllocationPhase::Pending
-            )
-        })
-        .map(|allocation| allocation.requested.cpu_millicores)
-        .max()
-        .unwrap_or(0)
 }
 
 pub(super) fn allocation_charge(allocations: &[crate::model::Allocation]) -> Resources {
@@ -3553,7 +3526,7 @@ mod beside_plain_tests {
             "cpu_beside_plain": true, "expansion_allowed": true, "would_drain": [], "reasons": [],
         }))
         .unwrap();
-        bound_by_envelope(&mut decision, &capacity, 8, &charge, 0);
+        bound_by_envelope(&mut decision, &capacity, 8, &charge);
         assert_eq!(decision.managed_budget.cpu_millicores, 32_000);
         assert_eq!(decision.admission_headroom.cpu_millicores, 28_000);
         assert_eq!(decision.managed_budget.ram_mib, 8192);
@@ -3561,7 +3534,7 @@ mod beside_plain_tests {
         decision.managed_budget = resources(4000);
         decision.admission_headroom = resources(0);
         let over = resources(8000);
-        bound_by_envelope(&mut decision, &capacity, 8, &over, 0);
+        bound_by_envelope(&mut decision, &capacity, 8, &over);
         assert_eq!(decision.managed_budget.cpu_millicores, 4000);
         assert_eq!(decision.admission_headroom.cpu_millicores, 0);
     }
@@ -3604,76 +3577,12 @@ mod beside_plain_tests {
             let charge = admission_charge(&allocations, plain);
             // RAM keeps the larger of request and usage either way.
             assert_eq!(charge.ram_mib, 1000);
-            bound_by_envelope(&mut decision, &capacity, 8, &charge, 0);
+            bound_by_envelope(&mut decision, &capacity, 8, &charge);
             assert_eq!(
                 decision.admission_headroom.cpu_millicores, headroom,
                 "plain {plain}"
             );
         }
-    }
-
-    /// 006 SC-004: where CPU admission is plain, the envelope lets the policy's one own task
-    /// more through, as large as the largest own task running or waiting; elsewhere the CPU
-    /// stays within the envelope.
-    #[test]
-    fn plain_admission_keeps_one_task_beyond_the_envelope() {
-        use super::{admission_charge, next_task_cpu};
-        use crate::model::{Allocation, AllocationPhase};
-        let task = |i: usize, phase| Allocation {
-            id: format!("a{i}"),
-            class: crate::execution_model::AllocationClass::Opportunistic,
-            phase,
-            requested: Resources {
-                cpu_millicores: 1000,
-                ram_mib: 100,
-                gpu_memory_mib: Default::default(),
-            },
-            observed: None,
-            observed_upper: None,
-            observed_window_cpu: None,
-            usage_unknown: None,
-            modes: Default::default(),
-        };
-        let capacity = resources(4000);
-        for (running, plain, budget, headroom) in [
-            (4, true, 5000, 1000),
-            (5, true, 5000, 0),
-            (4, false, 4000, 0),
-        ] {
-            let allocations: Vec<Allocation> = (0..running)
-                .map(|i| task(i, AllocationPhase::Running))
-                .collect();
-            let mut decision: Decision = serde_json::from_value(serde_json::json!({
-                "schema_version": 1, "node_id": "n", "observe_only": false,
-                "managed_budget": resources(5000), "admission_headroom": resources(5000),
-                "cpu_plain_admission": plain,
-                "expansion_allowed": true, "would_drain": [], "reasons": [],
-            }))
-            .unwrap();
-            let charge = admission_charge(&allocations, plain);
-            bound_by_envelope(
-                &mut decision,
-                &capacity,
-                8,
-                &charge,
-                next_task_cpu(&allocations),
-            );
-            assert_eq!(
-                decision.managed_budget.cpu_millicores, budget,
-                "{running} plain {plain}"
-            );
-            assert_eq!(
-                decision.admission_headroom.cpu_millicores, headroom,
-                "{running} plain {plain}"
-            );
-        }
-        let mut draining = task(0, AllocationPhase::Draining);
-        draining.requested.cpu_millicores = 3000;
-        assert_eq!(next_task_cpu(std::slice::from_ref(&draining)), 0);
-        assert_eq!(
-            next_task_cpu(&[draining, task(1, AllocationPhase::Pending)]),
-            1000
-        );
     }
 
     /// In Performance and Aggressive, CPU started beside a plain user that later left blocks no
