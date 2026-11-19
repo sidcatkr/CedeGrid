@@ -328,14 +328,16 @@ fn codes(decision: &Decision) -> Vec<String> {
 
 /// Beside an account that does not run CedeGrid, Performance and Aggressive start new work as
 /// plain Linux would: up to the scope's capacity less the reserve, with no margin, no deduction
-/// of the other's usage and CedeGrid's own CPU left in (006 FR-007, SC-002).
+/// of the other's usage and CedeGrid's own CPU left in, and one task more so no CPU waits on a
+/// handoff: here 4000 m and the 1000 m job's size (006 FR-007, SC-002, SC-004).
 #[test]
 fn beside_a_plain_principal_performance_admits_up_to_capacity() {
     for mode in [ContentionMode::Performance, ContentionMode::Aggressive] {
         for other in [500, 2000, 2900] {
             let decision = decide(mode, other, None);
             assert_eq!(
-                decision.managed_budget.cpu_millicores, 4000,
+                decision.managed_budget.cpu_millicores,
+                4000 + 1000,
                 "{mode:?} beside {other} m"
             );
             assert!(
@@ -358,7 +360,7 @@ fn beside_cedegrid_work_that_arrived_later_performance_admits_as_plain() {
         protected_arrival_unix_ms: Some(OWN_ARRIVAL + 1),
     });
     let decision = decide(ContentionMode::Performance, 2000, later);
-    assert_eq!(decision.managed_budget.cpu_millicores, 4000);
+    assert_eq!(decision.managed_budget.cpu_millicores, 4000 + 1000);
     let row = &decision.resources[&ResourceKey::Cpu].principals[0];
     assert!(row.cedegrid && !row.first_comer && !row.held_for, "{row:?}");
     assert_eq!(
@@ -648,10 +650,11 @@ fn a_first_comer_busy_outside_the_scope_does_not_hold_it() {
             .evaluate(&config(ContentionMode::Performance), &snapshot, &input, 0)
             .unwrap()
     };
+    // The whole 1000 m scope, and one more 500 m task for the handoff.
     let outside = scoped(0);
     assert_eq!(
         outside.managed_budget.cpu_millicores,
-        1000,
+        1000 + 500,
         "{:?}",
         outside.resources[&ResourceKey::Cpu]
     );
@@ -1169,4 +1172,66 @@ fn a_plain_user_on_a_whole_cpu_sets_the_flag_at_once() {
     };
     assert_eq!(first_on(1550), Some(4), "a whole CPU or more: at once");
     assert_eq!(first_on(600), Some(6), "less: after the streak");
+}
+
+/// SC-004: sixteen 1000 m tasks on a four-CPU scope with no other user. Where admission is
+/// plain, one task more than the scope holds may start, so no CPU sits idle while the next task
+/// starts after one ends; plain Linux keeps every CPU busy the whole time. Memory admission and
+/// Neutral are unchanged, and beside a first-comer nothing extra starts (006 FR-007, SC-004).
+#[test]
+fn plain_admission_starts_one_task_beyond_the_scope() {
+    let headroom = |mode: ContentionMode, running: usize, work: Option<CedeGridWork>| {
+        let other = if work.is_some() { 1000 } else { 0 };
+        let mut engine = PolicyEngine::new();
+        let mut last = None;
+        for i in 0..6u64 {
+            let (mut snapshot, mut input) = reading_beside(other, 50, 0, Some(true), work);
+            let job = input.allocations[0].clone();
+            input.allocations = (0..running)
+                .map(|k| Allocation {
+                    id: format!("job-{k}"),
+                    observed: Some(Resources {
+                        cpu_millicores: (3950 - other) / running as u64,
+                        ram_mib: 256,
+                        gpu_memory_mib: BTreeMap::new(),
+                    }),
+                    ..job.clone()
+                })
+                .collect();
+            input.arrivals = (0..running)
+                .map(|k| (format!("job-{k}"), OWN_ARRIVAL))
+                .collect();
+            snapshot.managed_cpu_lower_millicores = Some(3950 - other);
+            snapshot.cpu_busy_millicores = Some(4000);
+            snapshot.kernel.as_mut().unwrap().cpu.busy_millicores = Some(4000);
+            snapshot.observed_at_unix_ms = 100 + i * 500;
+            snapshot.kernel.as_mut().unwrap().monotonic_elapsed_ms = 500 + i * 500;
+            last = Some(
+                engine
+                    .evaluate(&config(mode), &snapshot, &input, i * 500)
+                    .unwrap(),
+            );
+        }
+        let last = last.unwrap();
+        (
+            last.admission_headroom.cpu_millicores,
+            last.admission_headroom.ram_mib,
+        )
+    };
+    for mode in [ContentionMode::Performance, ContentionMode::Aggressive] {
+        let (cpu, ram) = headroom(mode, 4, None);
+        assert_eq!(cpu, 1000, "{mode:?}: one more 1000 m task fits");
+        assert!(ram > 0, "{mode:?}");
+        assert_eq!(headroom(mode, 5, None).0, 0, "{mode:?}: and only one");
+    }
+    assert_eq!(
+        headroom(ContentionMode::Neutral, 4, None).0,
+        0,
+        "Neutral unchanged"
+    );
+    assert_eq!(
+        headroom(ContentionMode::Performance, 3, FIRST).0,
+        0,
+        "nothing extra beside a first-comer"
+    );
 }

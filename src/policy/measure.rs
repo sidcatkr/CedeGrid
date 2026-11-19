@@ -1424,6 +1424,21 @@ impl<'a> Interval<'a> {
                 }
             }
         }
+        // Where CPU admission is plain, one own task more than the scope holds may start, so no
+        // CPU sits idle while the next task starts after one ends, as plain Linux keeps every
+        // CPU busy. The next task is taken as large as the largest own task now; memory
+        // admission and its floors are unchanged (006 SC-004).
+        if self.cpu_plain_admission && !self.cpu_unknown && !self.cpu_held {
+            let next = self
+                .input
+                .allocations
+                .iter()
+                .filter(|a| matches!(a.phase, AllocationPhase::Running | AllocationPhase::Pending))
+                .map(|a| a.requested.cpu_millicores)
+                .max()
+                .unwrap_or(0);
+            self.budget.cpu_millicores = self.budget.cpu_millicores.saturating_add(next);
+        }
         for (key, floor) in [
             (ResourceKey::Cpu, self.cpu_reserve),
             (ResourceKey::Ram, self.ram_reserve),
