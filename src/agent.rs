@@ -3322,6 +3322,87 @@ mod pacing_tests {
         assert!(!released_since(&now, &seen));
     }
 
+    /// A supervisor's Prepared event wakes the agent to ask for the launch's authorization at
+    /// once, and its Finished event to run the next interval early; no other event wakes it
+    /// (006 SC-004: each handoff waited for the next interval twice).
+    #[test]
+    fn only_prepared_and_finished_events_wake_the_agent() {
+        use super::Event;
+        use super::launch::{Wake, wake_for};
+        use crate::execution_model::{AllocationClass, ExecutionPhase, ExecutionRecord};
+        use crate::model::Resources;
+        use std::collections::BTreeMap;
+        let record = ExecutionRecord {
+            task_id: "t".into(),
+            assignment_id: "a".into(),
+            generation: 1,
+            class: AllocationClass::Opportunistic,
+            phase: ExecutionPhase::Prepared,
+            resources: Resources::default(),
+            identity: None,
+            backend: "rootless".into(),
+            evidence: vec![],
+            detail: String::new(),
+            modes: BTreeMap::new(),
+        };
+        assert_eq!(
+            wake_for(&Event::Prepared {
+                record: record.clone()
+            }),
+            Some(Wake::Prepared)
+        );
+        let outcome = crate::supervision::ExecutionOutcome {
+            record,
+            exit_code: Some(0),
+            termination_signal: None,
+            yielded: false,
+            process_handle: "pidfd".into(),
+            drain_started_ms: None,
+            termination_started_ms: None,
+            termination_deadline_ms: None,
+            process_exit_ms: 1,
+            release_confirmed_ms: Some(2),
+            leaf_oom_kills: None,
+            log_bytes_dropped: 0,
+            log_capture_error: None,
+            single_process_violated: 0,
+            members_ended: 0,
+        };
+        assert_eq!(wake_for(&Event::Finished { outcome }), Some(Wake::Finished));
+        assert_eq!(wake_for(&Event::Failed { detail: "x".into() }), None);
+        assert_eq!(
+            wake_for(&Event::Readiness {
+                hint_ready: true,
+                observes_drain: false
+            }),
+            None
+        );
+    }
+
+    /// After a task ends, the next interval runs early, but no sooner than half an interval
+    /// after the last sample, so the CPU reading still spans a usable window; never later than
+    /// the regular wake.
+    #[test]
+    fn an_early_interval_waits_half_an_interval_after_the_last_sample() {
+        use super::service::early_wake;
+        let start = Instant::now();
+        let interval = Duration::from_millis(500);
+        let regular = start + interval;
+        // Just after the sample: wait until half an interval has passed.
+        assert_eq!(
+            early_wake(start, interval, start + Duration::from_millis(10), regular),
+            start + Duration::from_millis(250)
+        );
+        // Later than that: at once.
+        let now = start + Duration::from_millis(300);
+        assert_eq!(early_wake(start, interval, now, regular), now);
+        // Never after the regular wake.
+        assert_eq!(
+            early_wake(start, interval, start, start + Duration::from_millis(100)),
+            start + Duration::from_millis(100)
+        );
+    }
+
     /// A slot whose supervisor exited runs nothing, so it frees its worker place at once, before
     /// its release is reported. A Performance node that just filled to its admitted
     /// parallelism then takes the replacement at the next heartbeat, not after its growth

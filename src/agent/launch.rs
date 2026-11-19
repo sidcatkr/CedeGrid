@@ -188,6 +188,32 @@ async fn download_inputs(
     Ok(files)
 }
 
+/// What a supervisor's event wakes the agent for between intervals (006 SC-004).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Wake {
+    /// The launch reached its barrier: ask for its authorization now.
+    Prepared,
+    /// The task ended: run the next interval early, to report it and take the next task.
+    Finished,
+}
+
+/// The wake an event calls for, if any.
+pub(super) fn wake_for(event: &Event) -> Option<Wake> {
+    match event {
+        Event::Prepared { .. } => Some(Wake::Prepared),
+        Event::Finished { .. } => Some(Wake::Finished),
+        _ => None,
+    }
+}
+
+/// The agent loop's wakes, which a supervisor's event reader signals.
+#[derive(Clone, Default)]
+pub(super) struct Wakes {
+    pub(super) prepared: std::sync::Arc<tokio::sync::Notify>,
+    pub(super) finished: std::sync::Arc<tokio::sync::Notify>,
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn start_assignment(
     config: &Config,
     agent: &AgentConfig,
@@ -196,6 +222,7 @@ pub(super) async fn start_assignment(
     executable: &Path,
     client: &NodeClient,
     arrival_unix_ms: u64,
+    wakes: Wakes,
 ) -> Result<ChildSlot> {
     validate_replay_launch(config, &assignment.request)?;
     ensure!(
@@ -419,8 +446,15 @@ pub(super) async fn start_assignment(
             let event = line
                 .map_err(|e| e.to_string())
                 .and_then(|l| serde_json::from_str(&l).map_err(|e| e.to_string()));
+            let wake = event.as_ref().ok().and_then(wake_for);
             if tx.send(event).is_err() {
                 break;
+            }
+            // After the send, so the woken loop finds the event.
+            match wake {
+                Some(Wake::Prepared) => wakes.prepared.notify_one(),
+                Some(Wake::Finished) => wakes.finished.notify_one(),
+                None => {}
             }
         }
     });

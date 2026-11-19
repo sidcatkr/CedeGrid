@@ -64,6 +64,18 @@ pub(super) fn released_since(seen: &BTreeSet<String>, now: &BTreeSet<String>) ->
     now.difference(seen).next().is_some()
 }
 
+/// When the interval after a task's end runs: at once, but no sooner than half an interval after
+/// the last sample, so the CPU reading still spans a usable window, and never after the regular
+/// wake (006 SC-004).
+pub(super) fn early_wake(
+    sampled_at: Instant,
+    interval: Duration,
+    now: Instant,
+    regular: Instant,
+) -> Instant {
+    (sampled_at + interval / 2).max(now).min(regular)
+}
+
 /// Waiting lease requests, longest waiting first.
 pub(super) fn lease_order(waiting: &mut [(Instant, String)]) {
     waiting.sort();
@@ -540,8 +552,9 @@ struct AgentLoop<'a> {
     last_open: bool,
     /// Shared with the wait for work, which brings the next heartbeat forward (006 SC-001).
     work: std::sync::Arc<WorkWatch>,
-    /// Signalled when a launch finishes preparing, so its authorization is asked at once.
-    launched: std::sync::Arc<tokio::sync::Notify>,
+    /// Signalled when a launch is spawned or reaches its barrier, so its authorization is asked
+    /// at once, and when a task ends, so the next interval runs early (006 SC-004).
+    wakes: super::launch::Wakes,
     /// Allocations the journal recorded as released at the last look.
     released: BTreeSet<String>,
     /// Whether the descriptor limit holds launch slots back, as last reported.
@@ -2530,7 +2543,8 @@ impl AgentLoop<'_> {
                     // write at once (research R19).
                     let runtime = tokio::runtime::Handle::current();
                     let gate = self.launch_gate.clone();
-                    let launched = std::sync::Arc::clone(&self.launched);
+                    let wakes = self.wakes.clone();
+                    let launched = std::sync::Arc::clone(&wakes.prepared);
                     let handle = tokio::task::spawn_blocking(move || {
                         let prepared = runtime.block_on(async move {
                             let _permit = gate.acquire().await?;
@@ -2548,6 +2562,7 @@ impl AgentLoop<'_> {
                                 &task_executable,
                                 &task_client,
                                 arrival,
+                                wakes,
                             )
                             .await
                         });
@@ -2946,7 +2961,7 @@ pub async fn run(
         last_room: (0, false),
         last_open: true,
         work: std::sync::Arc::clone(&work),
-        launched: std::sync::Arc::new(tokio::sync::Notify::new()),
+        wakes: super::launch::Wakes::default(),
         released: BTreeSet::new(),
         descriptor_limited: false,
         floor_warnings: BTreeSet::new(),
@@ -3097,10 +3112,29 @@ pub async fn run(
             }
             Err(error) => return Err(error),
         }
-        let launched = std::sync::Arc::clone(&state.launched);
+        let launched = std::sync::Arc::clone(&state.wakes.prepared);
+        let finished = std::sync::Arc::clone(&state.wakes.finished);
+        // Set when a task ended: the next interval runs then, before the regular wake.
+        let mut early: Option<Instant> = None;
         loop {
+            let wake = early.unwrap_or(next_observation);
             tokio::select! {
-                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(next_observation)) => break,
+                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {
+                    // An early interval restarts the cadence from itself, so the next one is a
+                    // whole interval later and its CPU reading spans a usable window.
+                    if early.is_some() {
+                        next_observation = wake + observation_interval;
+                    }
+                    break;
+                }
+                _ = finished.notified(), if early.is_none() && state.stopping.is_none() => {
+                    early = Some(early_wake(
+                        state.sampled_at,
+                        observation_interval,
+                        Instant::now(),
+                        next_observation,
+                    ));
+                }
                 _ = &mut stop_signal, if state.stopping.is_none() => {
                     state.stopping = Some(Instant::now());
                     state.leave_supervisors = true;
@@ -3110,7 +3144,8 @@ pub async fn run(
                     state.reload_config()?;
                     break;
                 }
-                _ = launched.notified(), if !state.preparations.is_empty() && state.stopping.is_none() => {
+                _ = launched.notified(), if (!state.preparations.is_empty() || !state.slots.is_empty())
+                    && state.stopping.is_none() => {
                     if let Err(error) = state.launch_pass().await {
                         // The next interval does the same work, with its own handling.
                         emit(&serde_json::json!({
