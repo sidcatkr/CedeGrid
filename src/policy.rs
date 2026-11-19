@@ -534,6 +534,9 @@ struct Interval<'a> {
     unknown_charge: Resources,
     /// The part of `unknown_charge` from allocations never measured yet.
     unknown_new: Resources,
+    /// The part of `unknown_charge` from measured allocations whose process is gone, as when a
+    /// task ends: Performance and Aggressive hold no admission for it (006 FR-007).
+    unknown_ended: Resources,
     unknown_allocations: BTreeSet<String>,
     first_observed_gpus: BTreeSet<String>,
     cpu_credit: i128,
@@ -686,6 +689,7 @@ impl<'a> Interval<'a> {
             charges: BTreeMap::new(),
             unknown_charge: Resources::default(),
             unknown_new: Resources::default(),
+            unknown_ended: Resources::default(),
             unknown_allocations: BTreeSet::new(),
             first_observed_gpus: BTreeSet::new(),
             cpu_credit: 0,

@@ -1038,3 +1038,74 @@ fn the_decision_says_when_cpu_admission_is_plain() {
     assert!(!plain(ContentionMode::Neutral, None));
     assert!(!plain(ContentionMode::YieldFirst, None));
 }
+
+/// Own tasks ending: for one interval the agent still lists a task whose process is gone, its
+/// usage unknown, and then none. In Performance and Aggressive, with nobody held for, that
+/// neither holds CPU or RAM admission as unknown nor starts a cooldown: plain Linux would start
+/// the next tasks at once. Neutral keeps its hold (006 FR-007).
+#[test]
+fn own_tasks_ending_hold_no_admission_in_performance() {
+    let codes = |mode: ContentionMode| {
+        let mut engine = PolicyEngine::new();
+        let mut seen = Vec::new();
+        for i in 0..16u64 {
+            let (mut snapshot, mut input) = reading_beside(0, 50, 0, Some(true), None);
+            let job = input.allocations[0].clone();
+            // Three tasks run until interval 7; at 8 one is still listed with unknown usage.
+            let (n, unknown) = match i {
+                0..8 => (3, false),
+                8 => (1, true),
+                _ => (0, false),
+            };
+            input.allocations = (0..n)
+                .map(|k| Allocation {
+                    id: format!("job-{k}"),
+                    observed: (!unknown).then(|| job.observed.clone()).flatten(),
+                    // The check that names a task whose process is gone (FR-018).
+                    usage_unknown: unknown.then(|| "not_alive".to_string()),
+                    ..job.clone()
+                })
+                .collect();
+            input.arrivals = (0..n).map(|k| (format!("job-{k}"), OWN_ARRIVAL)).collect();
+            let own = if unknown { 0 } else { 1000 * n as u64 };
+            let busy = own + 50 + if unknown { 1000 } else { 0 };
+            snapshot.managed_cpu_lower_millicores = Some(own);
+            snapshot.cpu_busy_millicores = Some(busy);
+            snapshot.kernel.as_mut().unwrap().cpu.busy_millicores = Some(busy);
+            snapshot.observed_at_unix_ms = 100 + i * 500;
+            snapshot.kernel.as_mut().unwrap().monotonic_elapsed_ms = 500 + i * 500;
+            let decision = engine
+                .evaluate(&config(mode), &snapshot, &input, i * 500)
+                .unwrap();
+            if i >= 4 {
+                for key in [ResourceKey::Cpu, ResourceKey::Ram] {
+                    if let Some(code) = decision.resources[&key]
+                        .admission
+                        .as_ref()
+                        .and_then(|a| a.code())
+                    {
+                        seen.push((i, key.clone(), code.to_string()));
+                    }
+                }
+            }
+        }
+        seen
+    };
+    for mode in [ContentionMode::Performance, ContentionMode::Aggressive] {
+        let seen = codes(mode);
+        assert!(
+            !seen
+                .iter()
+                .any(|(_, _, code)| code == "admission_measurement_unknown"
+                    || code == "admission_cooling_down"),
+            "{mode:?}: {seen:?}"
+        );
+    }
+    let neutral = codes(ContentionMode::Neutral);
+    assert!(
+        neutral
+            .iter()
+            .any(|(_, _, code)| code == "admission_measurement_unknown"),
+        "Neutral keeps the unknown hold: {neutral:?}"
+    );
+}
