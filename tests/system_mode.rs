@@ -376,6 +376,35 @@ fn the_raise_weight_is_the_administrators_and_bounded() {
     }
 }
 
+/// 006 FR-024: priority over plain users needs the administrator's key, off by default, and its
+/// weight is the administrator's, 200 by default, between 101 and 10000.
+#[test]
+fn priority_over_plain_users_is_the_administrators_to_permit() {
+    let policy = AdminPolicy::parse("", 1000).unwrap();
+    assert!(!policy.plain_priority.value);
+    assert_eq!(policy.plain_priority_cpu_weight.value, 200);
+    let policy = AdminPolicy::parse(
+        "[modes]\nplain_priority = true\nplain_priority_cpu_weight = 300\n",
+        1000,
+    )
+    .unwrap();
+    assert!(policy.plain_priority.value);
+    assert_eq!(policy.plain_priority_cpu_weight.value, 300);
+    for key in ["modes.plain_priority", "modes.plain_priority_cpu_weight"] {
+        assert!(policy.entries().iter().any(|(k, _, _)| *k == key), "{key}");
+    }
+    for weight in [0, 100, 10_001] {
+        assert!(
+            AdminPolicy::parse(
+                &format!("[modes]\nplain_priority_cpu_weight = {weight}\n"),
+                1000
+            )
+            .is_err(),
+            "{weight}"
+        );
+    }
+}
+
 #[test]
 fn policy_file_values_and_sources() {
     let policy = AdminPolicy::parse(
@@ -386,6 +415,8 @@ policy_version = 1
 allowed = ["yield_first", "neutral", "aggressive"]
 unprotected = true
 unprotected_cpu_weight = 800
+plain_priority = true
+plain_priority_cpu_weight = 250
 
 [limits]
 tasks_per_user = 8

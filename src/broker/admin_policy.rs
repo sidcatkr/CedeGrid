@@ -43,6 +43,8 @@ struct ModesSection {
     allowed: Option<Vec<ModeName>>,
     unprotected: Option<bool>,
     unprotected_cpu_weight: Option<u64>,
+    plain_priority: Option<bool>,
+    plain_priority_cpu_weight: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -111,6 +113,11 @@ impl<T> Setting<T> {
 /// default of 100 (006 FR-016).
 pub const DEFAULT_UNPROTECTED_CPU_WEIGHT: u64 = 400;
 
+/// The account slice's CPU weight under priority over plain users when the policy names none:
+/// twice the default of 100, so own work gets about two thirds of a CPU contended by one plain
+/// account (006 FR-024).
+pub const DEFAULT_PLAIN_PRIORITY_CPU_WEIGHT: u64 = 200;
+
 /// The effective administrator policy.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AdminPolicy {
@@ -120,6 +127,10 @@ pub struct AdminPolicy {
     pub unprotected: Setting<bool>,
     /// The CPU weight the broker gives an unprotected caller's account slice (006 FR-016).
     pub unprotected_cpu_weight: Setting<u64>,
+    /// Whether members may ask for priority over plain users (006 FR-024); off by default.
+    pub plain_priority: Setting<bool>,
+    /// The CPU weight the broker gives the account slice under it (006 FR-024).
+    pub plain_priority_cpu_weight: Setting<u64>,
     pub tasks_per_user: Setting<u32>,
     pub tasks_max: Setting<u32>,
     /// `LimitNOFILE=`; `None` keeps systemd's default.
@@ -212,11 +223,22 @@ impl AdminPolicy {
             (101..=10_000).contains(&unprotected_cpu_weight.value),
             "modes.unprotected_cpu_weight must be between 101 and 10000"
         );
+        let plain_priority = Setting::pick(file.modes.plain_priority, false);
+        let plain_priority_cpu_weight = Setting::pick(
+            file.modes.plain_priority_cpu_weight,
+            DEFAULT_PLAIN_PRIORITY_CPU_WEIGHT,
+        );
+        ensure!(
+            (101..=10_000).contains(&plain_priority_cpu_weight.value),
+            "modes.plain_priority_cpu_weight must be between 101 and 10000"
+        );
         Ok(Self {
             policy_version,
             allowed_modes,
             unprotected,
             unprotected_cpu_weight,
+            plain_priority,
+            plain_priority_cpu_weight,
             tasks_per_user,
             tasks_max,
             open_files,
@@ -259,6 +281,16 @@ impl AdminPolicy {
                 "modes.unprotected_cpu_weight",
                 self.unprotected_cpu_weight.value.to_string(),
                 self.unprotected_cpu_weight.source,
+            ),
+            (
+                "modes.plain_priority",
+                self.plain_priority.value.to_string(),
+                self.plain_priority.source,
+            ),
+            (
+                "modes.plain_priority_cpu_weight",
+                self.plain_priority_cpu_weight.value.to_string(),
+                self.plain_priority_cpu_weight.source,
             ),
             (
                 "limits.tasks_per_user",

@@ -59,6 +59,8 @@ policy_version = 1
 allowed = ["yield_first", "neutral", "performance"]
 unprotected = false
 unprotected_cpu_weight = 400
+plain_priority = false
+plain_priority_cpu_weight = 200
 
 [limits]
 tasks_per_user = 64
@@ -80,6 +82,8 @@ ordinary_slice = "auto"
 |---|---|---|
 | `modes.allowed` | all modes except `aggressive` | modes a member may run; checked by the broker and by the agent |
 | `modes.unprotected` | `false` | whether a member may request unprotected for a run; checked by the agent in the unit, separately from `modes.allowed` |
+| `modes.plain_priority` | `false` | whether members may choose priority over plain users in `cedegrid setup`; each member's own choice is needed too |
+| `modes.plain_priority_cpu_weight` | 200 | the `CPUWeight=` (101 to 10000) the broker gives a member's account slice under priority over plain users, while the member's Performance or Aggressive work runs and every competing CedeGrid member runs at that weight or more; it ends as the unprotected raise does |
 | `modes.unprotected_cpu_weight` | 400 | the `CPUWeight=` (101 to 10000) the broker gives an unprotected member's account slice while the run is active, where the host splits CPU by account and the member's ordinary unit sits in that slice; never set over a weight the broker did not set; reset when the run ends, after 30 s without renewal, within 5 s of this key turning off or the member leaving the group, when the units stop, and when the broker stops or restarts |
 | `limits.tasks_per_user` | 64 | CedeGrid tasks one user may run at once |
 | `limits.tasks_max` | 4096 | `TasksMax=` on each unit |
