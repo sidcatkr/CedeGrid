@@ -35,6 +35,39 @@ class CompletionTest(unittest.TestCase):
                          {'completion_s': [], 'mean_s': None, 'makespan_s': None})
 
 
+class ServiceTicksTest(unittest.TestCase):
+    """CedeGrid's own CPU in a run: the agent and its supervisors, from the run's binary."""
+
+    def proc(self, directory, pid, exe, utime, stime, start, comm='cedegrid'):
+        entry = Path(directory) / str(pid)
+        entry.mkdir()
+        (entry / 'exe').symlink_to(exe)
+        rest = ['S', '1', '1', '1', '0', '-1', '0', '0', '0', '0', '0', str(utime), str(stime),
+                '0', '0', '20', '0', '1', '0', str(start)]
+        (entry / 'stat').write_text(f'{pid} ({comm}) ' + ' '.join(rest) + ' 0 0\n')
+
+    def test_counts_only_the_binarys_processes_and_skips_the_coordinator(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / 'cedegrid'
+            binary.write_text('')
+            proc = Path(directory) / 'proc'
+            proc.mkdir()
+            self.proc(proc, 10, binary, 70, 30, 500)
+            self.proc(proc, 11, binary, 5, 5, 600, comm='cedegrid sup')
+            self.proc(proc, 12, binary, 900, 100, 400)
+            self.proc(proc, 13, Path(directory) / 'python', 400, 0, 700, comm='python')
+            (proc / 'self').mkdir()
+            ticks = gates.service_ticks(binary, skip={12}, root=proc)
+            self.assertEqual(ticks, {(10, 500): 100, (11, 600): 10})
+
+    def test_the_runs_cpu_is_each_processs_growth_from_the_start(self):
+        start = {(10, 500): 100}
+        later = {(10, 500): 150, (11, 600): 30}
+        self.assertEqual(gates.ticks_since(start, [start, later]), 80)
+        self.assertEqual(gates.ticks_since(start, [later, {(10, 500): 120}]), 80)
+
+
 class EndedTest(unittest.TestCase):
     def test_a_task_ends_with_a_result_or_when_its_process_is_gone(self):
         import json, os, tempfile

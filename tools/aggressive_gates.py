@@ -275,6 +275,35 @@ def ended(path):
     return not Path(f'/proc/{json.loads(pid_file.read_text())["pid"]}').exists()
 
 
+def service_ticks(binary, skip=(), root=Path('/proc')):
+    """CPU ticks so far of each process of the run's `binary` but `skip`: the agent and its
+    supervisors, without the coordinator, which runs outside the scope. Keyed by (pid, start
+    ticks), so a reused PID is another process. Reads only."""
+    target = Path(binary).resolve()
+    ticks = {}
+    for entry in Path(root).iterdir():
+        if not entry.name.isdigit() or int(entry.name) in skip:
+            continue
+        try:
+            if Path(os.readlink(entry / 'exe')).resolve() != target:
+                continue
+            fields = (entry / 'stat').read_text().rsplit(')', 1)[1].split()
+        except OSError:
+            continue
+        ticks[(int(entry.name), int(fields[19]))] = int(fields[11]) + int(fields[12])
+    return ticks
+
+
+def ticks_since(start, samples):
+    """The ticks these processes used after `start`: each one's largest sample less its ticks at
+    the start, all of them for one that started later."""
+    last = {}
+    for sample in samples:
+        for key, value in sample.items():
+            last[key] = max(last.get(key, 0), value)
+    return sum(max(0, value - start.get(key, 0)) for key, value in last.items())
+
+
 def completion(own, submitted):
     """Each finished task's completion, in seconds after submission: the mean and the last."""
     times = sorted(round(o['finished'] - submitted, 2) for o in own if 'finished' in o)
@@ -477,6 +506,10 @@ def main():
                 os.sched_setaffinity(child.pid, cpus)
                 plain.append(child)
         samples = []
+        # CedeGrid's own CPU on the scope, the overhead SC-001 allows for.
+        coordinator = {cluster.services['coordinator'].child.pid} if cluster else set()
+        service = [service_ticks(cluster.binary, coordinator)] if cluster else []
+        service_start = service[0] if service else {}
         # Fixed work runs until every task has finished, within a bound.
         until = submitted + 600 if a.shape in FIXED_SHAPES else end + 3
         while time.time() < until:
@@ -486,6 +519,8 @@ def main():
                 states = [t['status'] for j in cluster.jobs for t in cluster.client.status(j).get('tasks', [])]
                 samples.append([round(time.time() - submitted, 2),
                                 states.count('assigned') + states.count('completed'), running])
+                service = [{**service[0], **{k: max(v, service[0].get(k, 0)) for k, v in
+                                             service_ticks(cluster.binary, coordinator).items()}}]
             elif plain:
                 samples.append([round(time.time() - submitted, 2), len(plain), running])
             if a.shape in FIXED_SHAPES and all(ended(p) for p in paths):
@@ -499,6 +534,10 @@ def main():
         span = (max(o['finished'] for o in own) - submitted) if a.shape in FIXED_SHAPES and own else a.window
         report['own'] = {'started': len(started), 'units': sum(o['units'] for o in own),
                          'cpu_millicores': round(1000 * sum(o['cpu_seconds'] for o in own) / max(span, 1))}
+        if cluster:
+            hz = os.sysconf('SC_CLK_TCK')
+            report['cedegrid_cpu_millicores'] = round(
+                1000 * ticks_since(service_start, service) / hz / max(span, 1))
         if a.shape == 'batch':
             report['own'].update(completion(own, submitted))
         if a.shape == 'vram':
