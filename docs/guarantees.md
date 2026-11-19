@@ -367,7 +367,9 @@ Performance or Aggressive work there. Beside plain principals and CedeGrid work 
 later, Performance and Aggressive start new work as plain Linux would: up to the capacity less
 the operator reserve, within the envelope and the ancestor quota, with no margin, no deduction
 of others' usage and CedeGrid's own CPU left in, and on GPU compute without the time-slice
-admission hold; VRAM headroom and the memory floors still apply (`admitted_as_plain`). Beside
+admission hold; VRAM headroom and the memory floors still apply (`admitted_as_plain`). On CPU
+one own task more may start, as large as the largest own task running or waiting, so no CPU
+sits idle while the next task starts after one ends; plain Linux keeps every CPU busy then. Beside
 a first-comer, admission holds as below, counting only first-comers: new own work starts only
 within the larger of the fair share and capacity minus their observed usage minus the margin,
 and nothing new starts while their activity is of unknown amount (`held_for_first_comer`).
