@@ -171,7 +171,7 @@ class Cluster:
     """A coordinator and an agent for one run; the agent on `cpus`, everything else outside."""
 
     def __init__(self, repo, out, cpus, mode, workers, lifetime, gpu_uuid=None, gpu_mib=2048,
-                 gpu_reserve_mib=None, ram_mib=None, agent_outside=False):
+                 gpu_reserve_mib=None, ram_mib=None):
         from anchor_validation import deployment
         from runtime_config import atomic_runtime_config, read_runtime_config
         from validation_runtime import OwnedProcess
@@ -206,9 +206,6 @@ class Cluster:
         agent.update(max_workers=workers, capacity={'cpu_millicores': len(self.cpus) * 1000,
                      'ram_mib': ram_mib or max(4096, workers * 1024 * 2),
                      'gpu_memory_mib': {gpu_uuid: gpu_mib} if gpu_uuid else {}})
-        if agent_outside:
-            # Diagnostic: tasks still get the scope through the agent's affinity setting.
-            agent['cpu_affinity'] = list(self.cpus)
         atomic_runtime_config(self.out / 'agent.toml', agent, 'agent')
         self.services = {'coordinator': OwnedProcess(
             [str(self.binary), 'coordinator', '--deployment', str(self.out / 'coordinator.toml')],
@@ -231,14 +228,16 @@ class Cluster:
             if time.monotonic() > deadline:
                 raise TimeoutError('agent did not register')
             time.sleep(.2)
-        if agent_outside:
-            # Diagnostic: every thread of the agent this harness started moves off the scope;
-            # threads it starts later inherit that, and its tasks are pinned to the scope.
-            pid = self.services['agent'].child.pid
-            for tid in os.listdir(f'/proc/{pid}/task'):
-                os.sched_setaffinity(int(tid), outside)
+        self.outside = outside
         self.client.put_pool(self.run_id, [self.node_id], max_workers=workers, min_workers=0,
                              allocation_class='opportunistic')
+
+    def move_agent_outside(self):
+        """Diagnostic: moves every thread of the agent this harness started off the scope, once
+        its tasks run; their supervisors and tasks stay on it."""
+        pid = self.services['agent'].child.pid
+        for tid in os.listdir(f'/proc/{pid}/task'):
+            os.sched_setaffinity(int(tid), self.outside)
 
     def check(self):
         for name, child in self.services.items():
@@ -470,8 +469,7 @@ def main():
             total_ram = os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES') // 2**20
             cluster = Cluster(repo, out, cpus, mode, tasks, lifetime, gpu, gpu_mib,
                               1024 if a.shape == 'vram' else None,
-                              total_ram if a.shape == 'ram' else None,
-                              agent_outside=a.agent_outside)
+                              total_ram if a.shape == 'ram' else None)
             if a.arm == 'unprotected' and allow(cluster.binary, out / 'node.toml') != 0:
                 raise RuntimeError('the allowance was not set')
             time.sleep(3)
@@ -545,8 +543,13 @@ def main():
         service_start = service[0] if service else {}
         # Fixed work runs until every task has finished, within a bound.
         until = submitted + 600 if a.shape in FIXED_SHAPES else end + 3
+        moved = False
         while time.time() < until:
             running = sum(1 for p in paths if Path(f'{p}.pid').exists() and not p.exists())
+            if cluster and a.agent_outside and not moved and running == len(paths):
+                cluster.move_agent_outside()
+                moved = True
+                report['agent_moved_s'] = round(time.time() - submitted, 2)
             if cluster:
                 cluster.check()
                 states = [t['status'] for j in cluster.jobs for t in cluster.client.status(j).get('tasks', [])]
