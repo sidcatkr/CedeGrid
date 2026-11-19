@@ -17,7 +17,9 @@ thresholds.
 usefully where other people's processes already run and it is unclear how much to take. Own work
 should run at the highest possible performance, efficiently. The modes set how much own work
 gives back: Performance, the default, carries this purpose, and Yield First and Neutral give
-back more.
+back more. Performance's goal is to do better for own work than the same work started on plain
+Linux, not only to match it: no gate shape may fall behind plain Linux (SC-018), and the gain
+gates measure the gain ([006](../006-performance-first/spec.md) SC-004, SC-005).
 
 ## Clarifications
 
@@ -968,6 +970,13 @@ back more.
   is admitted. E8 in Tracked: own 11959-12057 units/s (former cap 10559-11573), the other user
   5977-6114 req/s (former cap 5884-6018), own more than 2% below its target in at most 4 of 100
   intervals, the error's p95 64-112 m (user, 2026-11-17).
+
+### Session 2026-11-19
+
+- Q: Is Performance's goal to match plain Linux or to beat it? → A: To beat it. In the default
+  mode own work must do better than the same work started on plain Linux; matching it in a shape
+  is the floor (SC-018), and the gain gates measure the gain (006 SC-004, SC-005) (user,
+  2026-11-19).
 
 ### Session 2026-11-18
 
@@ -2236,7 +2245,10 @@ node reports with the expected per-resource values at each step.
     there whether or not the amounts can be read. An own task placed on the device but not yet
     listed there counts toward m as one context, and an open GPU compute admission is room for
     one more own process: the coordinator places at most one new GPU task on each device per
-    heartbeat, and the next report counts it (FR-028).
+    heartbeat, and the next report counts it (FR-028). Where the node reports plain admission on
+    the device (`plain_admission`: Performance or Aggressive with no account whose CedeGrid work
+    came first there, [006](../006-performance-first/spec.md) FR-007), the rule does not apply,
+    and one heartbeat places every task the device's memory budget holds.
   - `observe`, `status` and the decision say, per resource, that whole-task holds apply and which
     tasks are held.
 - **FR-090**: On GPU compute, in Yield First and Neutral, own work that arrived on a device before
@@ -2602,7 +2614,9 @@ to validate on real hardware**; see Provisional thresholds for the rationale.
 - **SC-018**: In Performance, against the baseline (the same own work started without CedeGrid
   in the same place): in each gate shape, in Tracked and in Full, at least 3 repeats with
   CedeGrid and 3 without, own work's throughput with CedeGrid is at least its throughput without
-  less the spread, the spread being the larger of the two sets' max − min. At a floor breach no
+  less the spread, the spread being the larger of the two sets' max − min. This is the floor;
+  the gain over the baseline that Performance must show is measured by 006's gain gates
+  (SC-004, SC-005). At a floor breach no
   own task is hinted, drained or sent TERM.
 - **SC-019**: In the same runs, the other user's rate with CedeGrid is at least its rate without
   less the spread, and its p99 at most its p99 without plus the spread. A gain beyond the spread

@@ -3588,6 +3588,7 @@ fn negotiated(now: u64, gpus: &[&str]) -> NodeReport {
         cause_summary: BTreeMap::new(),
         cedegrid: None,
         held_back: None,
+        plain_admission: false,
     };
     let mut r = report(now);
     r.features = COORDINATOR_FEATURES.map(String::from).to_vec();
@@ -3659,6 +3660,33 @@ fn a_heartbeat_places_one_new_gpu_task_per_device() {
     let mut r = negotiated(200, &["GPU-a", "GPU-b"]);
     r.launch_slots = 4;
     assert!(placed(&report_reply(&mut c, &r, 200)).contains(&"a2".to_string()));
+}
+
+/// Where the node reports plain admission on a device, in Performance or Aggressive with no
+/// account whose CedeGrid work came first there, the time-slice rule does not apply: one pass
+/// places every task the device's memory budget holds, and no more (006 FR-007).
+#[test]
+fn a_heartbeat_places_every_task_a_plain_device_holds() {
+    use cedegrid::contention::ResourceKey;
+    let d = dir();
+    let mut c = Coordinator::open(config(d.path())).unwrap();
+    wide_pool(&mut c, 100);
+    submit_tasks(
+        &mut c,
+        "job",
+        0,
+        vec![
+            gpu_task("a1", "GPU-a", 400),
+            gpu_task("a2", "GPU-a", 400),
+            gpu_task("a3", "GPU-a", 400),
+        ],
+        100,
+    );
+    let mut r = negotiated(100, &["GPU-a"]);
+    r.launch_slots = 4;
+    resource(&mut r, ResourceKey::GpuCompute("GPU-a".into())).plain_admission = true;
+    // The device's 1000 MiB budget holds two tasks of 400 MiB, not three.
+    assert_eq!(placed(&report_reply(&mut c, &r, 100)), ["a1", "a2"]);
 }
 
 /// With `contention/1`, every requested resource must be open: CPU, RAM, and

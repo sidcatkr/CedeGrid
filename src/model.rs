@@ -715,6 +715,12 @@ pub struct ResourceStatus {
     /// (FR-021, Q22).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_slice: Option<TimeSliceRecord>,
+    /// Admission on a compute resource is as plain Linux would start work: Performance or
+    /// Aggressive with no account whose CedeGrid work came first there (006 FR-007). On a GPU
+    /// the time-slice admission rule then does not apply, so more than one new task may be
+    /// placed on the device at once, within its memory.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub plain_admission: bool,
     /// Own work's arrival on a compute resource, while it is known (006 FR-021).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub own_arrival_unix_ms: Option<u64>,

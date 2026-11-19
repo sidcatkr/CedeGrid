@@ -117,6 +117,7 @@ pub fn node_contention_report(
                     cause_summary,
                     cedegrid: status.cedegrid,
                     held_back: status.held_back.clone(),
+                    plain_admission: status.plain_admission,
                 },
             ))
         })

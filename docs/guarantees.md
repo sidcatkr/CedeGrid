@@ -126,7 +126,10 @@ larger of its average and its most within the sample age: beside one saturating 
 own process is the fair share, and no second one is admitted. While the amounts go unmeasured
 for the sample age, every counted principal is slice-bound. Yield First and Neutral count every
 principal; Performance and Aggressive count only accounts whose CedeGrid work on the device
-arrived first, as below, and beside the others admit as plain Linux would.
+arrived first, as below, and beside the others admit as plain Linux would. One heartbeat places
+at most one new GPU task on a device, since an open admission is room for one more own process
+by this rule; where the node reports plain admission on the device, the rule does not apply and
+the device's memory budget alone bounds what one heartbeat places.
 Performance and Aggressive hold no task: own work keeps the driver's slices, as beside the same
 work started by hand. The counts are the
 processes sampled busy within the counting window, and own work's processes also from the
@@ -345,7 +348,9 @@ the node cap, decides how that job gives back: a job in Performance or Aggressiv
 for another principal, for unknown activity or at a floor breach, whatever the node's mode, and
 only the operator's envelope steps it, on memory and GPU memory only. The node's other jobs then give what its target needs as
 far as they can, so another workload can get less than the node's mode promises; this is a known
-limitation of per-job modes. Performance
+limitation of per-job modes. Performance, the default, is held to doing better for own work
+than the same work started on plain Linux: no gate shape may fall behind it (SC-018), and the
+gain gates measure the gain (006 SC-004, SC-005). Performance
 takes no step on running work for another principal, for own usage above its admission target
 or for activity of unknown amount, and only the operator's envelope still steps it, on memory
 and GPU memory only: own CPU above the envelope's CPU takes no yield, cap or drain, as plain
@@ -533,7 +538,8 @@ saturated CPU: a named account at the contention floor on a CPU full in this int
 while own work holds more than half of it; usage no account accounts for only on the saturation
 Performance judges, after the principal window, and not within two monitor intervals after an
 own task stops, when it is that task's last usage. The
-flag sets after three intervals in a row of such contention and holds 10 s after it ends.
+flag sets after three intervals in a row of such contention, or at once for a named account
+taking at least a whole CPU of a full one, and holds 10 s after it ends.
 Performance and Aggressive release no CPU reservation that was admitted, and own charges over
 the CPU budget restart no cooldown: new work waits through the headroom until they fit, and
 work already placed is still authorized. Guaranteed work is

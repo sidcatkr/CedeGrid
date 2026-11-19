@@ -1475,7 +1475,9 @@ impl Coordinator {
         };
         // A negotiated report's open GPU compute admission is room for one more own process on
         // the device, by the node's time-slice rule, so this pass places at most one new GPU task
-        // on each device; the next report counts it (FR-022, FR-028, FR-089).
+        // on each device; the next report counts it (FR-022, FR-028, FR-089). Where admission on
+        // the device is plain, that rule does not apply and the device's memory alone bounds
+        // the pass (006 FR-007).
         let mut gpu_placed: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         let mut stmt=tx.prepare("SELECT t.task_id,t.generation,s.request_json,j.pool_id FROM tasks t JOIN task_specs s USING(task_id) JOIN jobs j USING(job_id) WHERE t.status='queued' AND j.cancelled=0 AND NOT EXISTS(SELECT 1 FROM upgrade_task_holds h WHERE h.task_id=t.task_id) ORDER BY j.priority DESC,s.sequence ASC")?;
         let queued = stmt
@@ -1534,12 +1536,14 @@ impl Coordinator {
             if held > 0 {
                 continue;
             }
-            if report.contention.is_some()
-                && request
-                    .resources
-                    .gpu_memory_mib
-                    .keys()
-                    .any(|uuid| gpu_placed.contains(uuid))
+            if let Some(contention) = &report.contention
+                && request.resources.gpu_memory_mib.keys().any(|uuid| {
+                    gpu_placed.contains(uuid)
+                        && !contention
+                            .resources
+                            .get(&crate::contention::ResourceKey::GpuCompute(uuid.clone()))
+                            .is_some_and(|state| state.plain_admission)
+                })
             {
                 continue;
             }

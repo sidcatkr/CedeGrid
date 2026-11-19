@@ -1123,21 +1123,30 @@ impl<'a> Interval<'a> {
             && self.next.cpu_unattributed_intervals
                 >= self.config.contention.principal_window_intervals
             && self.cpu_unattributed >= floor.max(self.cpu_bound);
-        let plain_contends = unattributed
-            || saturated_now
-                && self.snapshot.principals.iter().flatten().any(|p| {
-                    !p.is_owner
-                        && in_scope(p.cpu_millicores) >= floor
-                        && match p.uid {
-                            None => true,
-                            Some(uid) => {
-                                uid >= uid_min
-                                    && standings.as_ref().is_some_and(|s| {
-                                        s.get(&uid).is_none_or(|s| s.work.is_none())
-                                    })
-                            }
+        // The most a named plain account uses of a CPU full this interval, when one reaches the
+        // contention floor.
+        let named_plain = self
+            .snapshot
+            .principals
+            .iter()
+            .flatten()
+            .filter(|_| saturated_now)
+            .filter(|p| {
+                !p.is_owner
+                    && match p.uid {
+                        None => true,
+                        Some(uid) => {
+                            uid >= uid_min
+                                && standings
+                                    .as_ref()
+                                    .is_some_and(|s| s.get(&uid).is_none_or(|s| s.work.is_none()))
                         }
-                });
+                    }
+            })
+            .map(|p| in_scope(p.cpu_millicores))
+            .filter(|usage| *usage >= floor)
+            .max();
+        let plain_contends = unattributed || named_plain.is_some();
         // The flag needs a plain principal's contention for a few intervals in a row and holds
         // a while after it ends, so one reading does not swing admission either way.
         let open = view.mode >= ContentionMode::Performance && held.is_none();
@@ -1147,10 +1156,17 @@ impl<'a> Interval<'a> {
             0
         };
         self.next.beside_plain_streak = streak;
-        if streak >= crate::policy::BESIDE_PLAIN_INTERVALS {
+        // A named account taking at least a whole CPU of a full one is plainly competing: the
+        // flag rises on that first reading.
+        let whole_cpu = named_plain.is_some_and(|usage| usage >= crate::policy::ONE_CPU_MILLICORES);
+        if streak >= crate::policy::BESIDE_PLAIN_INTERVALS || open && whole_cpu {
             self.next.beside_plain_ms = Some(self.now);
         }
         self.cpu_plain_admission = open;
+        self.statuses
+            .entry(ResourceKey::Cpu)
+            .or_default()
+            .plain_admission = open;
         self.cpu_beside_plain = open
             && self.next.beside_plain_ms.is_some_and(|at| {
                 self.now.saturating_sub(at) <= crate::policy::BESIDE_PLAIN_HOLD_MS
@@ -1555,6 +1571,13 @@ impl<'a> Interval<'a> {
                 slice.as_ref(),
                 bound || next_held == Some(true),
             );
+            // No account whose CedeGrid work came first is on the device: the time-slice
+            // admission rule does not apply in Performance and Aggressive (006 FR-007).
+            self.statuses
+                .entry(ResourceKey::GpuCompute(gpu.uuid.clone()))
+                .or_default()
+                .plain_admission = mode >= ContentionMode::Performance
+                && known.is_some_and(|standings| !standings.values().any(|s| s.first_comer));
             time_slice = slice;
             if let Some(demand) = self.next.gpu_demand.get_mut(&gpu.uuid) {
                 match gpu.time_sliced {
