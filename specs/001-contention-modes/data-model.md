@@ -336,9 +336,8 @@ charges-exceed-budget check.
 `ResourceStatus.admission_own_new` and `ResourceContentionReport.admission_own_new` (bool, default
 false, skipped when false; item 026) mark a CPU or RAM resource whose admission is closed only by
 the node's own never-measured new allocations or the cooldown only they restarted.
-`ResourceContentionReport.plain` (bool, default false, skipped when false; 006 SC-002) marks CPU
-admitted as plain Linux would admit it, in Performance or Aggressive with no first-comer: the
-coordinator then charges the node's own reservations at their CPU requests, as the policy does.
+`ResourceContentionReport.plain_admission` on CPU (006 SC-002) also tells the coordinator to
+charge the node's own reservations at their CPU requests, as the policy does.
 `PolicyState` keeps, per resource, whether its last stability reset had only that cause, and the
 last target share computed with the external usage beside it, carried through held intervals.
 `own_only` (default false, skipped when false) marks an interval whose inventory lists only own

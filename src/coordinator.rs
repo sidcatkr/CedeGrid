@@ -1485,7 +1485,7 @@ impl Coordinator {
             contention
                 .resources
                 .get(&crate::contention::ResourceKey::Cpu)
-                .is_some_and(|cpu| cpu.plain)
+                .is_some_and(|cpu| cpu.plain_admission)
         });
         let mut charge = Resources::default();
         let mut active=self.store.connection.prepare("SELECT resources_json,observed_json FROM reservations WHERE node_id=?1 AND phase!='released'")?;

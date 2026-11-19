@@ -3587,7 +3587,6 @@ fn negotiated(now: u64, gpus: &[&str]) -> NodeReport {
         mode: ContentionMode::Neutral,
         admission: Admission::Open,
         admission_own_new: false,
-        plain: false,
         own: None,
         external: None,
         target_share: None,
@@ -5214,7 +5213,7 @@ fn plain_cpu_admission_charges_reservations_at_their_requests() {
         let mut running = negotiated(101, &[]);
         running.managed_budget = r.managed_budget.clone();
         running.launch_slots = 8;
-        resource(&mut running, ResourceKey::Cpu).plain = plain;
+        resource(&mut running, ResourceKey::Cpu).plain_admission = plain;
         for a in &reply.assignments {
             authorize(&mut c, a, 101);
             let mut observed = a.request.resources.clone();

@@ -1326,7 +1326,7 @@
                   "ceiling": 25,
                   "contention": 50
                 },
-                "plain": true
+                "plain_admission": true
               }
             },
             "exceptions": [],
