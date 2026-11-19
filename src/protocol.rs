@@ -216,6 +216,10 @@ pub struct ResourceContentionReport {
     /// first measurement yet, or by the cooldown only they restarted (FR-028).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub admission_own_new: bool,
+    /// Admission starts work as plain Linux would and charges own work at its requests, not at
+    /// usage above them; the coordinator's charge counts it the same way (006 SC-002).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub plain: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub own: Option<(u64, u64)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -3587,6 +3587,7 @@ fn negotiated(now: u64, gpus: &[&str]) -> NodeReport {
         mode: ContentionMode::Neutral,
         admission: Admission::Open,
         admission_own_new: false,
+        plain: false,
         own: None,
         external: None,
         target_share: None,
@@ -5135,4 +5136,78 @@ fn a_wait_for_work_ends_on_a_move_or_its_deadline() {
         assert!(started.elapsed() < Duration::from_secs(1));
         assert_eq!(waiting.load(Ordering::SeqCst), MAX_WORK_WAITERS);
     });
+}
+
+/// 006 SC-002: where a node admits CPU as plain Linux does, its own work counts at its CPU
+/// requests, and so it does in the coordinator's charge: usage above the requests does not keep
+/// tasks plain Linux would start off the node. Elsewhere the larger of the two still counts.
+#[test]
+fn plain_cpu_admission_charges_reservations_at_their_requests() {
+    use cedegrid::contention::ResourceKey;
+    for (plain, more) in [(false, 0), (true, 3)] {
+        let d = dir();
+        let mut c = Coordinator::open(config(d.path())).unwrap();
+        let mut pool = pool();
+        pool.max_workers = 8;
+        c.handle_at(&Principal::Operator, Request::PutPool { pool }, 100)
+            .unwrap();
+        let tasks = (0..8)
+            .map(|i| {
+                let mut t = task(&format!("t{i}"));
+                t.resources.cpu_millicores = 500;
+                t
+            })
+            .collect();
+        c.handle_at(
+            &Principal::Operator,
+            Request::Submit {
+                job: JobSpec {
+                    job_id: "job".into(),
+                    pool_id: "pool".into(),
+                    priority: 0,
+                    tasks,
+                },
+            },
+            100,
+        )
+        .unwrap();
+        let mut r = negotiated(100, &[]);
+        r.managed_budget.cpu_millicores = 4000;
+        r.managed_budget.ram_mib = 8000;
+        r.launch_slots = 5;
+        let Response::Heartbeat { reply } = c
+            .handle_at(&node(), Request::Heartbeat { report: r.clone() }, 100)
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(reply.assignments.len(), 5);
+        // The five run, each using 800 m beside its 500 m request.
+        let mut running = negotiated(101, &[]);
+        running.managed_budget = r.managed_budget.clone();
+        running.launch_slots = 8;
+        resource(&mut running, ResourceKey::Cpu).plain = plain;
+        for a in &reply.assignments {
+            authorize(&mut c, a, 101);
+            let mut observed = a.request.resources.clone();
+            observed.cpu_millicores = 800;
+            running.allocations.push(AllocationReport {
+                assignment_id: a.request.assignment_id.clone(),
+                generation: a.generation,
+                phase: RemotePhase::Running,
+                observed: Some(observed),
+                detail: "running".into(),
+                yield_cause: None,
+                hint_ready: None,
+                observes_drain: None,
+            });
+        }
+        let Response::Heartbeat { reply } = c
+            .handle_at(&node(), Request::Heartbeat { report: running }, 101)
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(reply.assignments.len(), more, "plain {plain}");
+    }
 }

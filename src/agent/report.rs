@@ -114,6 +114,8 @@ pub fn node_contention_report(
                     mode: status.effective_mode.or(status.mode)?,
                     admission: status.admission.clone()?,
                     admission_own_new: status.admission_own_new,
+                    plain: *key == crate::contention::ResourceKey::Cpu
+                        && decision.cpu_plain_admission,
                     own: status.own,
                     external: status.external,
                     target_share: status.target_share,

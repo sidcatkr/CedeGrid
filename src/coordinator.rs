@@ -1478,16 +1478,28 @@ impl Coordinator {
                     .any(|control| control == "storage.durable_local")))
     }
 
-    fn node_charge(&self, node_id: &str) -> Result<Resources> {
+    /// The node's unreleased reservations, each at the larger of its request and its usage;
+    /// CPU at the request where the node reports plain CPU admission (006 SC-002).
+    fn node_charge(&self, report: &NodeReport) -> Result<Resources> {
+        let plain_cpu = report.contention.as_ref().is_some_and(|contention| {
+            contention
+                .resources
+                .get(&crate::contention::ResourceKey::Cpu)
+                .is_some_and(|cpu| cpu.plain)
+        });
         let mut charge = Resources::default();
         let mut active=self.store.connection.prepare("SELECT resources_json,observed_json FROM reservations WHERE node_id=?1 AND phase!='released'")?;
-        for row in active.query_map([node_id], |r| {
+        for row in active.query_map([&report.node_id], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
         })? {
             let (r, o) = row?;
             let r: Resources = serde_json::from_str(&r)?;
             let o: Option<Resources> = o.map(|o| serde_json::from_str(&o)).transpose()?;
-            charge.add_checked(&Resources::charge(&r, o.as_ref()))?;
+            let mut one = Resources::charge(&r, o.as_ref());
+            if plain_cpu {
+                one.cpu_millicores = r.cpu_millicores;
+            }
+            charge.add_checked(&one)?;
         }
         Ok(charge)
     }
@@ -1514,7 +1526,7 @@ impl Coordinator {
             |r| r.get(0),
         )?;
         let worker_limit = report.contention.as_ref().and_then(|c| c.max_workers);
-        let mut charge = self.node_charge(&report.node_id)?;
+        let mut charge = self.node_charge(report)?;
         let mut preemption = PreemptionPass {
             projected: charge.clone(),
             ..PreemptionPass::default()
@@ -1996,7 +2008,7 @@ impl Coordinator {
             // This request is already reserved. Never add it twice and never drop
             // uncertain siblings. A deficit on an unrelated UUID cannot authorize
             // this UUID, nor block independently qualified CPU/other-GPU capacity.
-            let charge = self.node_charge(&report.node_id)?;
+            let charge = self.node_charge(&report)?;
             match authorization_placement(&report, &request, &charge) {
                 Placement::Fits => {}
                 Placement::Closed => bail!(

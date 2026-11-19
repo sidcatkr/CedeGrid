@@ -1275,6 +1275,66 @@
           "sample_age_ms": 40
         }
       }
+    },
+    {
+      "id": "NEG-06",
+      "description": "Performance with no first-comer admits CPU as plain Linux: the report marks it plain, and the coordinator charges the node's own reservations at their CPU requests (006 SC-002).",
+      "request": {
+        "op": "heartbeat",
+        "report": {
+          "node_id": "node",
+          "boot_id": "boot",
+          "observed_at_unix_ms": 1,
+          "managed_budget": {
+            "cpu_millicores": 2000,
+            "ram_mib": 1000,
+            "gpu_memory_mib": {}
+          },
+          "expansion_allowed": true,
+          "gpu_expansion_allowed": false,
+          "gpu_guaranteed_allowed": true,
+          "launch_slots": 2,
+          "available_controls": [],
+          "allocations": [
+            {
+              "assignment_id": "a",
+              "generation": 1,
+              "phase": "running",
+              "observed": {
+                "cpu_millicores": 100,
+                "ram_mib": 100,
+                "gpu_memory_mib": {}
+              },
+              "detail": "",
+              "hint_ready": true,
+              "observes_drain": true
+            }
+          ],
+          "features": [
+            "api/1",
+            "contention/1"
+          ],
+          "contention": {
+            "resources": {
+              "cpu": {
+                "mode": "performance",
+                "admission": {
+                  "state": "open"
+                },
+                "held_back": {
+                  "margin": 100,
+                  "ceiling": 25,
+                  "contention": 50
+                },
+                "plain": true
+              }
+            },
+            "exceptions": [],
+            "max_mode": "neutral",
+            "max_workers": 4
+          }
+        }
+      }
     }
   ],
   "job_contention_cases": [
