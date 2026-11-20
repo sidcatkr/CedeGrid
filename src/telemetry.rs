@@ -1559,6 +1559,25 @@ mod tests {
         assert!(!single_pss_applies(1, true, Some(10)));
     }
 
+    /// A task's affinity comes from the affinity call, as `/proc/<pid>/status` lists it, without
+    /// reading the running task's status file (006: that read cost a running task about 1% of its
+    /// instructions per cycle).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_tasks_affinity_matches_its_status_without_reading_it() {
+        let status = std::fs::read_to_string("/proc/self/status").unwrap();
+        let listed = crate::kernel::parse_cpu_list(
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
+                .unwrap()
+                .trim(),
+        )
+        .unwrap();
+        assert_eq!(task_affinity(std::process::id()), Some(listed));
+        assert_eq!(task_affinity(u32::MAX), None);
+    }
+
     /// The per-task read diagnostic is off unless one of its known words is set; unknown words
     /// are ignored.
     #[test]

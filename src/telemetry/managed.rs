@@ -1797,17 +1797,36 @@ fn process_scope_matches(pid: u32, snapshot: &Snapshot, scoped: bool) -> bool {
     else {
         return false;
     };
-    let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) else {
-        return false;
-    };
-    let Some(list) = status
-        .lines()
-        .find_map(|s| s.strip_prefix("Cpus_allowed_list:"))
-    else {
-        return false;
-    };
-    crate::kernel::parse_cpu_list(list.trim())
-        .is_ok_and(|ids| ids.iter().all(|id| allowed.contains(id)))
+    task_affinity(pid).is_some_and(|ids| ids.iter().all(|id| allowed.contains(id)))
+}
+
+/// A process's CPU affinity from the affinity call. Reading a running task's
+/// `/proc/<pid>/status` every interval cost it about 1% of its instructions per cycle in the F2c
+/// gate; the call reads only the task's CPU mask (006). `None` when it cannot be read.
+#[cfg(target_os = "linux")]
+pub(super) fn task_affinity(pid: u32) -> Option<Vec<u32>> {
+    // Room for 8192 CPUs; a larger host's mask does not fit, and the call then fails closed.
+    let mut mask = vec![0u64; 128];
+    let bytes = mask.len() * std::mem::size_of::<u64>();
+    let pid = libc::pid_t::try_from(pid).ok()?;
+    // SAFETY: the buffer holds `bytes` writable bytes, and the call only reads a mask.
+    let written =
+        unsafe { libc::syscall(libc::SYS_sched_getaffinity, pid, bytes, mask.as_mut_ptr()) };
+    if written <= 0 {
+        return None;
+    }
+    let words = usize::try_from(written).ok()? / std::mem::size_of::<u64>();
+    Some(
+        mask.iter()
+            .take(words)
+            .enumerate()
+            .flat_map(|(word, bits)| {
+                (0..64u32)
+                    .filter(move |bit| bits & (1u64 << bit) != 0)
+                    .map(move |bit| u32::try_from(word).unwrap_or(u32::MAX) * 64 + bit)
+            })
+            .collect(),
+    )
 }
 
 #[cfg(not(target_os = "linux"))]

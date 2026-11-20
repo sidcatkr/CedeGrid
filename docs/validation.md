@@ -465,11 +465,13 @@ difference rather than placement. The diagnostic arms are labeled and are no gat
 | Diagnostic, two runs per arm: hardware counters on the task PIDs (user mode) | `fd11f37`, `3e2d270` | instructions per cycle 3.537 with the agent moved off, 3.500 with the agent off the scope by config and 3.499–3.500 with the PSS diagnostic, at 4.67–4.68 GHz in each; cache, LLC, L1 data and TLB misses near zero and equal |
 | Diagnostic, one run per arm: frequency, migrations and interrupts on the scope | `fd11f37`, `3e2d270` | the scope's CPUs averaged 4,634–4,698 MHz in every arm; tasks migrated 4.4 times a second under Performance, 0.17 with the agent off the scope either way, none by hand; timer, function-call and TLB interrupts were the same in every arm |
 
-So the tasks lose about 1% of their instructions per cycle while the agent samples its running
-tasks, wherever the agent runs; the process scan, the interval length, PSS, CPU frequency and
-interrupts do not explain it. With the agent on the scope its activity also makes the kernel
-migrate tasks. Reading own tasks' usage from their cgroup or supervisor accounting instead of
-their `/proc` files is the open follow-up.
+| Diagnostic: each per-task read skipped in turn | `248a496` | tasks' own units per CPU-second: by hand 6,127–6,150; Performance 6,065–6,073; the affinity recheck skipped 6,140–6,148; the RSS read carried 6,068–6,081; the /proc tick counters instead of the CPU clock 6,074–6,081 |
+
+So the tasks lost about 1% of their instructions per cycle to one read: the agent rechecked each
+running task's CPU affinity by reading its `/proc/<pid>/status` every interval. The process scan,
+the interval length, PSS, the RSS read, the CPU clock, CPU frequency and interrupts did not
+explain it. The agent now reads the affinity with the affinity call instead (`sched_getaffinity`),
+which reads only the task's CPU mask.
 
 ## Rules for validation runs
 
