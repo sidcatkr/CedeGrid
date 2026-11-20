@@ -505,6 +505,17 @@ only because the affinity call is the cheaper read. The harness now gives each h
 padding argument of random length, 0 to 1023 characters, recorded as `layout_pads` in the report,
 so each arm spreads over both speeds.
 
+### Reruns with padded tasks at `2d576a8`
+
+On 2026-11-20 at 16:00–16:29 the CPU shapes ran again with each hashing task padded by a random
+length, three runs per arm, interleaved.
+
+| Run | Requirement | Result | Verdict |
+|---|---|---|---|
+| F2c on CPU | SC-001 | own 883,814–901,749 units against 882,681–912,105 by hand (−1.1%, +1.8%, −1.4%); per CPU-second 6,116–6,138 against 6,103–6,141; own CPU 2,409–2,448 m against 2,400–2,491 m, CedeGrid's own 8 m | fail in two runs by 1.1% and 1.4%: the same work per CPU-second, and own CPU that moves by ±2% run to run in both arms with the split beside the second account |
+| Own work first on CPU | SC-001 | own 1,400,719–1,403,444 against 1,438,011–1,444,994 (−2.9%, −2.5%, −2.8%); own CPU 3,987–3,997 m against 4,071–4,080 m; per CPU-second 5,848–5,858 against 5,874–5,915. Four tasks ran at 0.7 s and the other four 1.3 s after the second account arrived, and those four ran at 5,649–5,795 per CPU-second beside its loops | fail: about 2% from the start and the reaction to the second account, the rest from where the late four ran |
+| Batch: sixteen own tasks of 1000 m on an idle scope | SC-004 | mean 38.9–39.1 s against 57.7–60.8 s by hand (−33% to −36%); total 63.3–64.0 s against 61.2–62.0 s (+2.4%, +4.6%, +2.5%) | pass |
+
 ## Rules for validation runs
 
 - Report these statuses separately:
