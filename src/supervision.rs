@@ -695,49 +695,6 @@ pub fn process_identity(pid: u32, assignment: &str, generation: u64) -> Result<P
 
 /// Apply only the calling process/thread's placement. No host cpuset hierarchy
 /// or other process is modified. A requested unsupported control is an error.
-/// The CPUs the agent's own threads use under a task CPU scope: the permitted CPUs outside it,
-/// so its sampling and bookkeeping stay off its tasks' CPUs, or `None` where there are none or
-/// the scope is not permitted (006 SC-001).
-pub fn agent_cpus(scope: &[u32], permitted: &[u32]) -> Option<Vec<u32>> {
-    if !scope.iter().all(|cpu| permitted.contains(cpu)) {
-        return None;
-    }
-    let mut spare: Vec<u32> = permitted
-        .iter()
-        .filter(|cpu| !scope.contains(cpu))
-        .copied()
-        .collect();
-    spare.sort_unstable();
-    spare.dedup();
-    (!spare.is_empty()).then_some(spare)
-}
-
-/// The calling thread's CPU affinity.
-pub fn current_cpu_affinity() -> Result<Vec<u32>> {
-    #[cfg(target_os = "linux")]
-    {
-        read_cpu_affinity(0)
-    }
-    #[cfg(not(target_os = "linux"))]
-    bail!("exact CPU affinity control is unsupported on this platform")
-}
-
-/// A CPU set for `cpus`, built before a fork so the child only makes the system call.
-#[cfg(target_os = "linux")]
-pub fn cpu_set_of(cpus: &[u32]) -> Result<libc::cpu_set_t> {
-    // SAFETY: an all-zero cpu_set_t is the empty set.
-    let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
-    for id in cpus {
-        ensure!(
-            (*id as usize) < libc::CPU_SETSIZE as usize,
-            "CPU affinity exceeds supported native mask"
-        );
-        // SAFETY: the ID is within the set's size.
-        unsafe { libc::CPU_SET(*id as usize, &mut set) };
-    }
-    Ok(set)
-}
-
 pub fn apply_current_cpu_affinity(cpus: &[u32]) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
@@ -812,16 +769,6 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         std::fs::create_dir(&path).unwrap();
         assert!(ExecutionOutcome::read(&path).is_err());
-    }
-
-    /// With a task CPU scope, the agent's own threads run on the permitted CPUs outside it,
-    /// where there are any; otherwise on the scope, as before (006 SC-001).
-    #[test]
-    fn the_agent_runs_off_its_tasks_cpus_where_others_are_permitted() {
-        assert_eq!(agent_cpus(&[0, 2], &[0, 1, 2, 3]), Some(vec![1, 3]));
-        assert_eq!(agent_cpus(&[2, 0], &[3, 2, 1, 0]), Some(vec![1, 3]));
-        assert_eq!(agent_cpus(&[0, 1], &[0, 1]), None);
-        assert_eq!(agent_cpus(&[0, 1], &[0]), None);
     }
 
     /// Setting affinity acts on the calling thread only: another thread's mask is

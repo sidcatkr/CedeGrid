@@ -1108,8 +1108,6 @@ pub struct KernelCollector {
     /// The delegated root's CPU time read beside each of those samples (FR-073).
     delegated_history: std::collections::VecDeque<Option<u64>>,
     cpu_window_span: Option<(CpuAccountingWindow, u64)>,
-    /// The tasks' CPUs where the agent runs off them; `None` observes the agent's own affinity.
-    cpu_scope: Option<Vec<u32>>,
     fixture: bool,
     /// The monotonic clock; tests replace it.
     clock: fn() -> Instant,
@@ -1158,16 +1156,9 @@ impl KernelCollector {
             cpu_read_history: std::collections::VecDeque::new(),
             delegated_history: std::collections::VecDeque::new(),
             cpu_window_span: None,
-            cpu_scope: None,
             fixture: false,
             clock: Instant::now,
         }
-    }
-
-    /// Observes the tasks' CPUs `cpus` instead of this process's own affinity, for an agent
-    /// that runs off its tasks' CPUs (006 SC-001).
-    pub fn set_cpu_scope(&mut self, cpus: Option<Vec<u32>>) {
-        self.cpu_scope = cpus;
     }
 
     /// Portable fixture inspection does not assert native Linux validation.
@@ -1298,11 +1289,7 @@ impl KernelCollector {
                 &error,
             )),
         }
-        result.cpu = inspect_cpu(
-            &self.roots,
-            result.hierarchy.as_ref(),
-            self.cpu_scope.as_deref(),
-        );
+        result.cpu = inspect_cpu(&self.roots, result.hierarchy.as_ref());
         let cpu_read_started = (self.clock)();
         let cpu_stat = read_text(&self.roots.proc.join("stat"));
         let cpu_read_ended = (self.clock)();
@@ -1736,30 +1723,19 @@ fn words(value: String) -> Vec<String> {
     value.split_whitespace().map(str::to_string).collect()
 }
 
-fn inspect_cpu(
-    roots: &ProbeRoots,
-    hierarchy: Option<&CgroupHierarchy>,
-    scope: Option<&[u32]>,
-) -> CpuTopology {
+fn inspect_cpu(roots: &ProbeRoots, hierarchy: Option<&CgroupHierarchy>) -> CpuTopology {
     // /proc/self/status exposes the actual task affinity without a fixed-size
-    // cpu_set_t that would truncate large systems. No set-affinity call occurs. An agent that
-    // runs off its tasks' CPUs observes theirs instead.
-    let allowed_cpu_ids = match scope {
-        Some(cpus) => {
-            let mut cpus = cpus.to_vec();
-            cpus.sort_unstable();
-            cpus.dedup();
-            Some(cpus)
-        }
-        None => read_text(&roots.proc.join("self/status"))
-            .ok()
-            .and_then(|status| {
-                status
-                    .lines()
-                    .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
-                    .and_then(|value| parse_cpu_list(value).ok())
-            }),
-    };
+    // cpu_set_t that would truncate large systems. No set-affinity call occurs.
+    let status = read_text(&roots.proc.join("self/status"));
+    let allowed_cpu_ids = status
+        .as_ref()
+        .ok()
+        .and_then(|status| {
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
+        })
+        .and_then(|value| parse_cpu_list(value).ok());
     let effective_cgroup_cpu_ids = hierarchy
         .and_then(|hierarchy| hierarchy.ancestors.first())
         .and_then(|level| level.cpuset_effective.clone());
@@ -1878,39 +1854,6 @@ mod cpu_alignment_tests {
         assert_eq!(snapshot.cpu.busy_interval_ms, Some(550));
         assert_eq!(snapshot.cpu.busy_status, CpuUsageStatus::Available);
         assert!(collector.cpu_accounting_window().is_some());
-    }
-
-    /// With a task CPU scope set, observation uses it instead of the observer's own affinity,
-    /// so an agent that runs off its tasks' CPUs still observes theirs; offline CPUs are left
-    /// out either way (006 SC-001).
-    #[test]
-    fn a_task_cpu_scope_replaces_the_observers_own_affinity() {
-        let temp = tempfile::tempdir().unwrap();
-        let base = temp.path().canonicalize().unwrap();
-        let (proc, sys) = (base.join("proc"), base.join("sys"));
-        let write = |dir: &Path, name: &str, text: &str| {
-            fs::create_dir_all(dir).unwrap();
-            fs::write(dir.join(name), text).unwrap();
-        };
-        write(
-            &proc.join("self"),
-            "status",
-            "Name:\tfixture\nCpus_allowed_list:\t1,3\n",
-        );
-        write(&proc.join("sys/kernel"), "osrelease", "6.6.fixture");
-        write(&sys.join("devices/system/cpu"), "online", "0-2\n");
-        write(&proc, "stat", "cpu0 100 0 0 1000 0 0 0 0\n");
-        let roots = || ProbeRoots {
-            proc: proc.clone(),
-            sys: sys.clone(),
-        };
-        let mut own = KernelCollector::inspect_at(KernelConfig::default(), roots());
-        assert_eq!(own.sample().cpu.effective_cpu_ids, Some(vec![1]));
-        let mut scoped = KernelCollector::inspect_at(KernelConfig::default(), roots());
-        scoped.set_cpu_scope(Some(vec![0, 2, 3]));
-        let cpu = scoped.sample().cpu;
-        assert_eq!(cpu.allowed_cpu_ids, Some(vec![0, 2, 3]));
-        assert_eq!(cpu.effective_cpu_ids, Some(vec![0, 2]));
     }
 
     /// Two CPUs at 100 ticks a second, CPU 0 busy half of every 500 ms interval and CPU 1 idle,

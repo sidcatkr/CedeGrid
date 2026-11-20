@@ -2793,34 +2793,14 @@ pub async fn run(
             .any(|c| matches!(c, std::path::Component::ParentDir)),
         "parent traversal in state directory is refused"
     );
-    // With a task CPU scope, the agent's own threads run on the permitted CPUs outside it where
-    // there are any, so its sampling stays off its tasks' CPUs; each supervisor is started on
-    // the scope (006 SC-001). Threads started later inherit this from the main thread.
-    let agent_off_scope = match &agent.cpu_affinity {
-        Some(cpus) => {
-            #[cfg(target_os = "linux")]
-            ensure!(
-                unsafe { libc::syscall(libc::SYS_gettid) } == i64::from(std::process::id()),
-                "configured affinity requires agent main-thread service entrypoint"
-            );
-            let permitted = supervision::current_cpu_affinity()?;
-            ensure!(
-                cpus.iter().all(|cpu| permitted.contains(cpu)),
-                "CPU affinity is empty or outside the caller's permitted set"
-            );
-            match supervision::agent_cpus(cpus, &permitted) {
-                Some(own) => {
-                    supervision::apply_current_cpu_affinity(&own)?;
-                    true
-                }
-                None => {
-                    supervision::apply_current_cpu_affinity(cpus)?;
-                    false
-                }
-            }
-        }
-        None => false,
-    };
+    if let Some(cpus) = &agent.cpu_affinity {
+        #[cfg(target_os = "linux")]
+        ensure!(
+            unsafe { libc::syscall(libc::SYS_gettid) } == i64::from(std::process::id()),
+            "configured affinity requires agent main-thread service entrypoint"
+        );
+        supervision::apply_current_cpu_affinity(cpus)?;
+    }
     ensure!(
         agent.max_transfer_bytes_per_second > 0,
         "transfer rate must be positive"
@@ -2912,11 +2892,6 @@ pub async fn run(
     collector
         .collector
         .read_gpus(!agent.capacity.gpu_memory_mib.is_empty());
-    if agent_off_scope {
-        collector
-            .collector
-            .set_cpu_scope(agent.cpu_affinity.clone());
-    }
     let policy = PolicyEngine::new();
     let mut refusals: BTreeMap<String, (Assignment, String)> = BTreeMap::new();
     for item in fs::read_dir(config.state_dir.join("refusals"))? {
