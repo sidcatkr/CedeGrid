@@ -444,9 +444,9 @@ arms.
 | The same | SC-003 | `9032af2` | own work held to one task, 68,893–69,263 multiplies; the first-comer 145,897–146,319 against 121,561–122,863 beside the same work by hand | pass |
 | The same with admit immediately | SC-003 | `9032af2` | own work started nothing: while the placed task held the device, the admit immediately budget left the device out, and the authorization against it was refused | fail; fixed in 001's `5382bf9`, rerun at `fd11f37` below |
 | CedeGrid against CedeGrid, own work first | SC-003 | `9032af2` | own 143,263–144,095 beside the second account's CedeGrid against 143,512–144,088 beside its task by hand; its task 62,931–63,036 against 63,764–63,845 | pass |
-| F2c on CPU, plain arm forked on the scope | SC-001 | `2c32860` | own 894,837–921,870 against 914,583–936,747 (−4.5%, −1.0%, −1.8%); own CPU 2,473–2,532 m against 2,478–2,542 m, about equal; 1.2% to 1.8% less work per CPU-second | fail |
+| F2c on CPU, plain arm forked on the scope | SC-001 | `2c32860` | own 894,837–921,870 against 914,583–936,747 (−4.5%, −1.0%, −1.8%); own CPU 2,473–2,532 m against 2,478–2,542 m, about equal; 1.2% to 1.8% less work per CPU-second, from the hashing loop's memory layout (next subsection) | fail |
 | Own work first on CPU, plain arm forked on the scope | SC-001 | `2c32860` | own 1,401,267–1,416,316 against 1,447,394–1,471,538 (−4.7%, −2.1%, −3.6%) | fail |
-| Diagnostic: F2c with the agent moved off the scope once its eight tasks ran, beside the same arms | SC-001 | `66a5f31` | by hand 910,059–933,078 units at 368.6–369.1 per CPU-millisecond; under CedeGrid with the agent on the scope 858,713–901,945 (−0.9% to −8.0%) at 362.0–364.7; with the agent off it 913,730–917,708 (+0.4%, −1.6%, +0.8%) at 368.1–368.6. The agent's own CPU was 9–12 m either way | diagnostic: the agent's presence on the tasks' CPUs costs 1% to 2% of their work per CPU-second |
+| Diagnostic: F2c with the agent moved off the scope once its eight tasks ran, beside the same arms | SC-001 | `66a5f31` | by hand 910,059–933,078 units at 368.6–369.1 per CPU-millisecond; under CedeGrid with the agent on the scope 858,713–901,945 (−0.9% to −8.0%) at 362.0–364.7; with the agent off it 913,730–917,708 (+0.4%, −1.6%, +0.8%) at 368.1–368.6. The agent's own CPU was 9–12 m either way | diagnostic: read at first as the agent's cost on the tasks' CPUs; the per-CPU-second difference was the hashing loop's memory layout (next subsection) |
 | Steps on running own work over all runs above | SC-002 | all five | no cap, pause or drain fell on own work | pass |
 
 ### Reruns at `fd11f37` and `82f311b`
@@ -463,7 +463,7 @@ theirs; those are left out, and the driver now refuses a name used before.
 | The same with the second account in Neutral | SC-003 | `fd11f37` | admit immediately started both own tasks at 3.5–3.7 s; own work 90,242–90,727, the first-comer 123,985–124,841 | pass |
 | Batch: sixteen own tasks of 1000 m on an idle scope | SC-004 | `9032af2`, `82f311b` | total 61.6 s and 63.7 s at `9032af2`, 63.4 s and 62.5 s at `82f311b` | no change between the two |
 
-### The agent's cost on its tasks' CPUs
+### Work per CPU-second: the agent or the benchmark
 
 On 2026-11-20 a set of F2c runs, three per arm unless noted, looked for why Performance's tasks do
 less work per CPU-second than the same tasks by hand. The tasks' own accounting, units over their
@@ -487,9 +487,23 @@ The affinity read is not the cause. Replacing it changed nothing, and from 08:15
 at the same speed. Across three days of F2c runs by hand ran at 6,103–6,152 units per CPU-second,
 except in two runs beside a sampler that read its threads' `/proc` every 0.5 s (6,081) and in every
 run from 08:15 on 2026-11-20. Performance ran at 6,030–6,094, except in its first three runs on
-2026-11-17 (6,154–6,157) and in the two runs beside the sampler (6,121–6,137). The tasks run at
-one of two speeds about 1.2% apart. Something outside both arms sets which one, and the
-diagnostics above did not find it. `82f311b` stays, since the affinity call is the cheaper read.
+2026-11-17 (6,154–6,157) and in the two runs beside the sampler (6,121–6,137). The tasks ran at
+one of two speeds about 1.2% apart. A host reboot did not change the speed: by hand ran 6,068 and
+6,086 afterwards, and Performance 6,072 and 6,077. Hardware counters on the tasks over three
+pairs gave 3.499–3.501 instructions per cycle in both arms, with equal branch misses, machine
+clears, assists, stalls and store-buffer stalls.
+
+The two speeds come from the hashing loop's memory layout. Run alone on one CPU for 4 s, with only
+the length of its output path changed in steps of 4 characters from 0 to 64, twice, the loop ran at
+6,221–6,224 or at 6,286–6,292 units per CPU-second, never between. Eight lengths gave the fast
+speed both times, five the slow speed both times, and four one of each. A task's arguments and
+environment set its layout, and they differ between the arms: CedeGrid passes its worker
+environment, and the output path holds the run's name. The eight tasks of a run share one
+length, so a run's tasks mostly landed on one speed together, and a series' name length moved
+both arms. The per-CPU-second gap was this artifact, not CedeGrid's agent, and `82f311b` stays
+only because the affinity call is the cheaper read. The harness now gives each hashing task a
+padding argument of random length, 0 to 1023 characters, recorded as `layout_pads` in the report,
+so each arm spreads over both speeds.
 
 ## Rules for validation runs
 
@@ -517,6 +531,10 @@ diagnostics above did not find it. `82f311b` stays, since the affinity call is t
   - node rejoin ≤ 90 s
 - Report detection, drain, termination and release separately. Insufficient samples are
   inconclusive. Higher CPU utilization alone is not a speedup.
+- A process's work per CPU-second can sit on one of two levels about 1% apart by its memory
+  layout alone, which its argument and environment lengths move. Compare arms only over tasks
+  whose layouts were spread: `tools/aggressive_gates.py` pads each hashing task's arguments by a
+  random length and records the lengths as `layout_pads`.
 - Diagnostic arms are labeled as such and are never a gate's result. `tools/aggressive_gates.py`
   offers `--agent-outside`, `--monitor-ms`, `--diagnostic-scan-every` and
   `--diagnostic-single-pss-every` and `--diagnostic-task-reads`. The last three set

@@ -81,6 +81,22 @@ class EndedTest(unittest.TestCase):
             self.assertTrue(gates.ended(path))
 
 
+class LayoutPadsTest(unittest.TestCase):
+    def test_each_task_gets_its_own_length_within_the_range(self):
+        import random
+        pads = gates.layout_pads(400, random.Random(7))
+        self.assertEqual(len(pads), 400)
+        self.assertTrue(all(0 <= pad < 1024 for pad in pads))
+        # Spread over the range, not one length for every task.
+        self.assertGreater(len(set(pads)), 200)
+        self.assertLess(min(pads), 64)
+        self.assertGreater(max(pads), 960)
+
+    def test_only_the_hashing_shapes_are_padded(self):
+        self.assertEqual(gates.HASH_SHAPES, {'fill', 'f2c', 'first', 'batch'})
+        self.assertFalse(gates.HASH_SHAPES & gates.GPU_SHAPES)
+
+
 class PlainLauncherTest(unittest.TestCase):
     """The plain arm starts its tasks from one process already on the scope, as a user's shell or
     taskset there would, so the kernel places them as it places CedeGrid's forked tasks."""

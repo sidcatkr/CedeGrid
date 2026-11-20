@@ -27,12 +27,14 @@ Arms: alone (the second account's load with no own work), plain (own tasks start
 scope without CedeGrid, the harm baseline; --plain-tasks sets how many), performance, admit
 (Performance with admit immediately), aggressive (protected) and unprotected (Aggressive with the
 host's allowance turned on through setup on a terminal, and both SDK fields set). For f2c and gpu the harness writes schedule.json, from which the
-operator starts the second account's load at its epoch, then report.json. It acts only on
-processes it starts, and prints one summary line."""
+operator starts the second account's load at its epoch, then report.json. Each hashing task gets a
+padding argument of random length (layout_pads), so neither arm sits on one of the loop's two
+layout-set speeds. It acts only on processes it starts, and prints one summary line."""
 import argparse
 import json
 import os
 import pty
+import random
 import select
 import subprocess
 import sys
@@ -115,6 +117,8 @@ RAM_TASK_MIB = 4096
 # Fixed-work shapes run until every task finished or was killed.
 FIXED_SHAPES = {'batch', 'vram', 'ram'}
 GPU_SHAPES = {'gpu', 'first-gpu', 'vram', 'cg-later-gpu', 'cg-first-gpu'}
+# Shapes whose tasks run the hashing loop or the batch's fixed hashing work.
+HASH_SHAPES = {'fill', 'f2c', 'first', 'batch'}
 # Shapes with the second account's load, started by the operator from schedule.json.
 PEER_SHAPES = {'f2c', 'gpu', 'first', 'first-gpu', 'cg-later-gpu', 'cg-first-gpu'}
 # Own work arrives first; the second account 20 s later.
@@ -412,6 +416,14 @@ for child in children:
 '''
 
 
+def layout_pads(count, rng=random):
+    """Padding lengths, 0 to 1023 characters, for `count` hashing tasks. The hashing loop runs at
+    one of two speeds about 1% apart, set by its memory layout, which the lengths of its arguments
+    and environment move; CedeGrid's tasks and the plain arm's differ in both. A padding argument
+    of random length per task spreads both arms over both speeds instead of fixing each on one."""
+    return [rng.randrange(1024) for _ in range(count)]
+
+
 def plain_launcher(python, cpus, argvs):
     """The argv of one launcher that starts `argvs` from the scope `cpus`."""
     return [python, '-c', PLAIN_LAUNCHER, json.dumps(list(cpus)), json.dumps(argvs)]
@@ -527,15 +539,20 @@ def main():
             atomic_json(out / 'schedule.json', schedule)
             report.update(peer_arm=a.peer_arm, peer_mode=a.peer_mode)
         paths = [out / f'own-{i}.json' for i in range(tasks)]
+        pads = layout_pads(len(paths)) if a.shape in HASH_SHAPES else [None] * len(paths)
+        if a.shape in HASH_SHAPES:
+            report['layout_pads'] = pads
 
-        def argv(path):
+        def argv(path, pad):
             if a.shape == 'batch':
-                return [a.python, '-c', CPU_WORK, str(BATCH_UNITS), str(path)]
+                return [a.python, '-c', CPU_WORK, str(BATCH_UNITS), str(path), 'x' * pad]
             if a.shape == 'vram':
                 return [a.python, '-c', VRAM_LOOP, str(a.window), str(VRAM_TASK_MIB), str(path)]
             if a.shape == 'ram':
                 return [a.python, '-c', RAM_LOOP, str(a.window), str(RAM_TASK_MIB), str(path)]
-            return [a.python, '-c', GPU_LOOP if gpu else CPU_LOOP, str(end), str(path)]
+            if gpu:
+                return [a.python, '-c', GPU_LOOP, str(end), str(path)]
+            return [a.python, '-c', CPU_LOOP, str(end), str(path), 'x' * pad]
         while time.time() < start:
             if cluster:
                 cluster.check()
@@ -551,11 +568,11 @@ def main():
             if a.arm == 'admit':
                 extra = dict(admit_immediately=True, confirm_admit_immediately=True)
             vram = VRAM_TASK_MIB if a.shape == 'vram' else 512
-            for i, path in enumerate(paths):
+            for i, (path, pad) in enumerate(zip(paths, pads)):
                 task_id = f'{cluster.run_id}.{i}'
                 ram = RAM_TASK_MIB + 256 if a.shape == 'ram' else 1024 if gpu else 256
-                task = command_task(task_id, argv(path), str(repo), env=cluster.worker_env, cpu_millicores=millicores,
-                                    ram_mib=ram, gpu_vram_mib={gpu: vram} if gpu else {},
+                task = command_task(task_id, argv(path, pad), str(repo), env=cluster.worker_env,
+                                    cpu_millicores=millicores, ram_mib=ram, gpu_vram_mib={gpu: vram} if gpu else {},
                                     allocation_class='opportunistic', single_process=True, no_escape=True,
                                     replay_safe=True, max_attempts=1, **extra)
                 cluster.client.submit(task_id, cluster.run_id, [task])
@@ -564,8 +581,8 @@ def main():
             # The baseline: the same work started by hand where CedeGrid would run it, from a
             # process already on the scope. Its own session, so cleanup reaches every task.
             plain.append(subprocess.Popen(
-                plain_launcher(a.python, cpus, [argv(path) for path in paths]), cwd=str(repo),
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                plain_launcher(a.python, cpus, [argv(path, pad) for path, pad in zip(paths, pads)]),
+                cwd=str(repo), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True))
         samples = []
         # CedeGrid's own CPU on the scope, the overhead SC-001 allows for.
