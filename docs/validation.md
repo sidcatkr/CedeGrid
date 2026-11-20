@@ -449,6 +449,28 @@ arms.
 | Diagnostic: F2c with the agent moved off the scope once its eight tasks ran, beside the same arms | SC-001 | `66a5f31` | by hand 910,059–933,078 units at 368.6–369.1 per CPU-millisecond; under CedeGrid with the agent on the scope 858,713–901,945 (−0.9% to −8.0%) at 362.0–364.7; with the agent off it 913,730–917,708 (+0.4%, −1.6%, +0.8%) at 368.1–368.6. The agent's own CPU was 9–12 m either way | diagnostic: the agent's presence on the tasks' CPUs costs 1% to 2% of their work per CPU-second |
 | Steps on running own work over all runs above | SC-002 | all five | no cap, pause or drain fell on own work | pass |
 
+### The agent's cost on its tasks' CPUs
+
+On 2026-11-20 a set of F2c runs, three per arm unless noted, looked for why Performance's tasks do
+less work per CPU-second than the same tasks by hand. The tasks' own accounting, units over their
+own process CPU time, is uniform across the eight tasks of a run, so the loss is a per-task speed
+difference rather than placement. The diagnostic arms are labeled and are no gate's result.
+
+| Run | Commit | Result |
+|---|---|---|
+| Agent off the scope by config (`--agent-scope`, the agent's threads on two other CPUs, supervisors and tasks on the scope) | `3e2d270` | F2c by hand 891,913–933,292 units at 368.1–369.0 per CPU-millisecond; Performance 895,698–904,697 at 364.1–364.7; agent off the scope 887,363–907,656 at 364.5–365.0. Own work first: by hand 1,429,357–1,440,634; Performance 1,403,364–1,405,866 (−1.6% to −2.6%); agent off the scope 1,403,899–1,419,903 (−0.7% to −1.8%). No gain in F2c; reverted in `7d86244` |
+| Diagnostic: monitor interval 1000 ms; process scan once every 8 intervals | `3e2d270` | 870,862–893,995 and 899,453–903,254 units, both at 364.0–364.8 per CPU-millisecond, against 895,692–932,411 by hand at 368.6–369.1 |
+| Diagnostic: the agent moved off the scope once its tasks ran, repeated | `3e2d270` | 887,458–912,282 units at 367.8–367.9 per CPU-millisecond; by hand 368.5–369.0; Performance 364.1–364.7. Moved this way, the agent's observation scope follows its own affinity, so it stops sampling its running tasks |
+| Diagnostic: a single-process run's PSS read once every 10 intervals | `fd11f37` | tasks' own 6,071–6,080 units per CPU-second against 6,073–6,082 under Performance and 6,148–6,150 by hand |
+| Diagnostic, two runs per arm: hardware counters on the task PIDs (user mode) | `fd11f37`, `3e2d270` | instructions per cycle 3.537 with the agent moved off, 3.500 with the agent off the scope by config and 3.499–3.500 with the PSS diagnostic, at 4.67–4.68 GHz in each; cache, LLC, L1 data and TLB misses near zero and equal |
+| Diagnostic, one run per arm: frequency, migrations and interrupts on the scope | `fd11f37`, `3e2d270` | the scope's CPUs averaged 4,634–4,698 MHz in every arm; tasks migrated 4.4 times a second under Performance, 0.17 with the agent off the scope either way, none by hand; timer, function-call and TLB interrupts were the same in every arm |
+
+So the tasks lose about 1% of their instructions per cycle while the agent samples its running
+tasks, wherever the agent runs; the process scan, the interval length, PSS, CPU frequency and
+interrupts do not explain it. With the agent on the scope its activity also makes the kernel
+migrate tasks. Reading own tasks' usage from their cgroup or supervisor accounting instead of
+their `/proc` files is the open follow-up.
+
 ## Rules for validation runs
 
 - Report these statuses separately:
@@ -477,11 +499,13 @@ arms.
   inconclusive. Higher CPU utilization alone is not a speedup.
 - Diagnostic arms are labeled as such and are never a gate's result. `tools/aggressive_gates.py`
   offers `--agent-outside`, `--monitor-ms`, `--diagnostic-scan-every` and
-  `--diagnostic-single-pss-every`. The last two set `CEDEGRID_DIAGNOSTIC_PROCESS_SCAN_EVERY`
-  (the agent scans processes once every that many intervals and carries stale principals between
-  scans) and `CEDEGRID_DIAGNOSTIC_SINGLE_PSS_EVERY` (it reads a single-process run's PSS once every
-  that many intervals and estimates between, as for larger families). Neither is an operator
-  setting, and neither has any effect unless set.
+  `--diagnostic-single-pss-every` and `--diagnostic-task-reads`. The last three set
+  `CEDEGRID_DIAGNOSTIC_PROCESS_SCAN_EVERY` (the agent scans processes once every that many
+  intervals and carries stale principals between scans), `CEDEGRID_DIAGNOSTIC_SINGLE_PSS_EVERY`
+  (it reads a single-process run's PSS once every that many intervals and estimates between, as
+  for larger families) and `CEDEGRID_DIAGNOSTIC_TASK_READS` (comma-separated per-task reads it
+  skips: `affinity`, `rss`, `clock`, or `all` for no per-task usage). None is an operator
+  setting, and none has any effect unless set.
 - Every run manifest records:
   - the exact source and environment
   - seeds and worker counts

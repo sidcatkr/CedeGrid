@@ -1559,6 +1559,22 @@ mod tests {
         assert!(!single_pss_applies(1, true, Some(10)));
     }
 
+    /// The per-task read diagnostic is off unless one of its known words is set; unknown words
+    /// are ignored.
+    #[test]
+    fn the_task_read_diagnostic_takes_only_known_words() {
+        assert_eq!(TaskReadSkips::parse(None), TaskReadSkips::default());
+        assert_eq!(TaskReadSkips::parse(Some("")), TaskReadSkips::default());
+        assert_eq!(
+            TaskReadSkips::parse(Some("bogus")),
+            TaskReadSkips::default()
+        );
+        let all = TaskReadSkips::parse(Some("affinity, rss,clock,all"));
+        assert!(all.affinity && all.rss && all.clock && all.all);
+        let one = TaskReadSkips::parse(Some("rss"));
+        assert!(one.rss && !one.affinity && !one.clock && !one.all);
+    }
+
     fn process(pid: u32, uid: Option<u32>, cpu_millicores: u64, ram_mib: u64) -> ProcessSample {
         ProcessSample {
             pid,

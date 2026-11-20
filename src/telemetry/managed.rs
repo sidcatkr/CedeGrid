@@ -246,6 +246,10 @@ pub struct ManagedCollector {
     /// Diagnostic only: a single-process run's PSS period, from
     /// `CEDEGRID_DIAGNOSTIC_SINGLE_PSS_EVERY`; `None` reads it every interval.
     single_pss_every: Option<u32>,
+    /// Diagnostic only: per-task reads skipped, from `CEDEGRID_DIAGNOSTIC_TASK_READS`.
+    task_reads: TaskReadSkips,
+    /// The first RSS read of each task, carried when the RSS read is skipped.
+    first_rss: std::cell::RefCell<BTreeMap<u32, u64>>,
     family_members: BTreeMap<String, BTreeSet<Member>>,
     /// The runs whose RAM this interval is an estimate between passes.
     ram_estimated: BTreeSet<String>,
@@ -300,6 +304,12 @@ impl ManagedCollector {
                     .ok()
                     .as_deref(),
             ),
+            task_reads: TaskReadSkips::parse(
+                std::env::var("CEDEGRID_DIAGNOSTIC_TASK_READS")
+                    .ok()
+                    .as_deref(),
+            ),
+            first_rss: std::cell::RefCell::new(BTreeMap::new()),
             family_members: BTreeMap::new(),
             ram_estimated: BTreeSet::new(),
             delegated_root: config
@@ -328,7 +338,7 @@ impl ManagedCollector {
             return (None, None);
         };
         #[cfg(target_os = "linux")]
-        if self.precise_cpu {
+        if self.precise_cpu && !self.task_reads.clock {
             if let Some((reading, members)) = leaf_path(record)
                 .and_then(|leaf| leaf_reading(leaf, identity.pid, family, cpus, self.tick_ns))
             {
@@ -376,6 +386,19 @@ impl ManagedCollector {
     }
     /// A process's resident memory in bytes, as `/proc/<pid>/statm` counts it.
     pub(super) fn resident_bytes(&self, pid: u32) -> Option<u64> {
+        // Diagnostic: after the first read, carry it.
+        if self.task_reads.rss
+            && let Some(rss) = self.first_rss.borrow().get(&pid)
+        {
+            return Some(*rss);
+        }
+        let rss = self.read_resident_bytes(pid)?;
+        if self.task_reads.rss {
+            self.first_rss.borrow_mut().insert(pid, rss);
+        }
+        Some(rss)
+    }
+    fn read_resident_bytes(&self, pid: u32) -> Option<u64> {
         #[cfg(target_os = "linux")]
         {
             let statm = std::fs::read_to_string(format!("/proc/{pid}/statm")).ok()?;
@@ -858,7 +881,13 @@ impl ManagedCollector {
                 if !self.handles.alive(id) {
                     return Err("not_alive");
                 }
-                if !process_scope_matches(id.pid, &snapshot, self.scoped_cpu) {
+                // Diagnostic: no per-task usage at all, or no affinity recheck.
+                if self.task_reads.all {
+                    return Err("diagnostic_skipped");
+                }
+                if !self.task_reads.affinity
+                    && !process_scope_matches(id.pid, &snapshot, self.scoped_cpu)
+                {
                     return Err("scope_changed");
                 }
                 let resident = self.resident_bytes(id.pid).ok_or("resident_unreadable")?;
@@ -1653,6 +1682,35 @@ pub(super) fn pss_period(cost: Duration, scope_cpu: Duration) -> u32 {
     u32::try_from(cost.as_nanos().div_ceil(budget))
         .unwrap_or(PSS_PERIOD_MAX)
         .clamp(1, PSS_PERIOD_MAX)
+}
+
+/// Per-task reads a gate's diagnostic skips, from comma-separated words in
+/// `CEDEGRID_DIAGNOSTIC_TASK_READS`: `affinity` (the per-interval affinity recheck), `rss` (statm
+/// after the first read), `clock` (the precise CPU clock, so /proc ticks are read instead) and
+/// `all` (no per-task usage: every allocation unmeasured). Not an operator setting: it exists to
+/// find which read of a running task costs it (006). Unknown words are ignored.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct TaskReadSkips {
+    pub(super) affinity: bool,
+    pub(super) rss: bool,
+    pub(super) clock: bool,
+    pub(super) all: bool,
+}
+
+impl TaskReadSkips {
+    pub(super) fn parse(value: Option<&str>) -> Self {
+        let mut skips = Self::default();
+        for word in value.unwrap_or_default().split(',').map(str::trim) {
+            match word {
+                "affinity" => skips.affinity = true,
+                "rss" => skips.rss = true,
+                "clock" => skips.clock = true,
+                "all" => skips.all = true,
+                _ => {}
+            }
+        }
+        skips
+    }
 }
 
 /// A gate's diagnostic period for a single-process run's PSS: a whole number from 2 to 64 in
