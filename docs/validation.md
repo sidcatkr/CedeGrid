@@ -345,7 +345,7 @@ interleaved. The setup was otherwise as in feature 004's section: own work as th
 on a scope of four physical CPUs, and the second account from its own login. On GPU compute the
 second account's process ran on a CPU outside the scope; in the CedeGrid-against-CedeGrid shapes
 it ran its own CedeGrid on the scope's CPUs. Units are each shape's fixed work: hashes on CPU,
-1024×1024 multiplies on GPU. Dates are UTC.
+1024×1024 multiplies on GPU. Dates and times are UTC.
 
 In the CedeGrid-against-CedeGrid shapes a first run gave the second account's CedeGrid a CPU of
 its own outside the scope; it then charged own work's CPU on the other four CPUs to that one CPU
@@ -442,12 +442,26 @@ arms.
 | More GPU tasks than VRAM | SC-005 | `568f9e0` | CedeGrid ran all six, three at a time; by hand three of six failed to allocate in every run | pass |
 | CedeGrid against CedeGrid, the second account first, own work in Performance | SC-003 | `568f9e0` | own work started nothing in 60 s: the placed task's own count held GPU compute, and its first authorization was refused until the lease ran out | fail; fixed in `3e167c5` |
 | The same | SC-003 | `9032af2` | own work held to one task, 68,893–69,263 multiplies; the first-comer 145,897–146,319 against 121,561–122,863 beside the same work by hand | pass |
-| The same with admit immediately | SC-003 | `9032af2` | own work started nothing: while the placed task held the device, the admit immediately budget left the device out, and the authorization against it was refused | fail; fixed in 001's `5382bf9`, rerun pending |
+| The same with admit immediately | SC-003 | `9032af2` | own work started nothing: while the placed task held the device, the admit immediately budget left the device out, and the authorization against it was refused | fail; fixed in 001's `5382bf9`, rerun at `fd11f37` below |
 | CedeGrid against CedeGrid, own work first | SC-003 | `9032af2` | own 143,263–144,095 beside the second account's CedeGrid against 143,512–144,088 beside its task by hand; its task 62,931–63,036 against 63,764–63,845 | pass |
 | F2c on CPU, plain arm forked on the scope | SC-001 | `2c32860` | own 894,837–921,870 against 914,583–936,747 (−4.5%, −1.0%, −1.8%); own CPU 2,473–2,532 m against 2,478–2,542 m, about equal; 1.2% to 1.8% less work per CPU-second | fail |
 | Own work first on CPU, plain arm forked on the scope | SC-001 | `2c32860` | own 1,401,267–1,416,316 against 1,447,394–1,471,538 (−4.7%, −2.1%, −3.6%) | fail |
 | Diagnostic: F2c with the agent moved off the scope once its eight tasks ran, beside the same arms | SC-001 | `66a5f31` | by hand 910,059–933,078 units at 368.6–369.1 per CPU-millisecond; under CedeGrid with the agent on the scope 858,713–901,945 (−0.9% to −8.0%) at 362.0–364.7; with the agent off it 913,730–917,708 (+0.4%, −1.6%, +0.8%) at 368.1–368.6. The agent's own CPU was 9–12 m either way | diagnostic: the agent's presence on the tasks' CPUs costs 1% to 2% of their work per CPU-second |
 | Steps on running own work over all runs above | SC-002 | all five | no cap, pause or drain fell on own work | pass |
+
+### Reruns at `fd11f37` and `82f311b`
+
+On 2026-11-20 the CedeGrid-against-CedeGrid GPU shape ran again with 001's `5382bf9`, three runs
+per arm, and the batch ran back to back at `9032af2` and `82f311b`, two runs each. Some runs that
+day reused a run name from an earlier day, and the harness read the earlier run's report as
+theirs; those are left out, and the driver now refuses a name used before.
+
+| Run | Requirement | Commit | Result | Verdict |
+|---|---|---|---|---|
+| CedeGrid against CedeGrid, the second account first, own work in Performance | SC-003 | `fd11f37` | own work held to one task, 68,705–69,259 multiplies; the first-comer 145,223–146,130 against 120,655–122,293 beside the same two tasks by hand, where own work ran 92,703–93,734 | pass |
+| The same with admit immediately | SC-003 | `fd11f37` | admit immediately was ignored beside the Performance first-comer, with its caution logged: own work 68,874–69,220, the first-comer 144,750–145,771 | pass |
+| The same with the second account in Neutral | SC-003 | `fd11f37` | admit immediately started both own tasks at 3.5–3.7 s; own work 90,242–90,727, the first-comer 123,985–124,841 | pass |
+| Batch: sixteen own tasks of 1000 m on an idle scope | SC-004 | `9032af2`, `82f311b` | total 61.6 s and 63.7 s at `9032af2`, 63.4 s and 62.5 s at `82f311b` | no change between the two |
 
 ### The agent's cost on its tasks' CPUs
 
@@ -466,12 +480,16 @@ difference rather than placement. The diagnostic arms are labeled and are no gat
 | Diagnostic, one run per arm: frequency, migrations and interrupts on the scope | `fd11f37`, `3e2d270` | the scope's CPUs averaged 4,634–4,698 MHz in every arm; tasks migrated 4.4 times a second under Performance, 0.17 with the agent off the scope either way, none by hand; timer, function-call and TLB interrupts were the same in every arm |
 
 | Diagnostic: each per-task read skipped in turn | `248a496` | tasks' own units per CPU-second: by hand 6,127–6,150; Performance 6,065–6,073; the affinity recheck skipped 6,140–6,148; the RSS read carried 6,068–6,081; the /proc tick counters instead of the CPU clock 6,074–6,081 |
+| The affinity read with `sched_getaffinity` instead of `/proc/<pid>/status`, 07:40–08:07 | `82f311b` | by hand 6,146–6,151; Performance 6,037–6,078 |
+| The same three arms, from 08:15 | `82f311b` | by hand 6,076–6,086 in seven runs, two of them with nothing else running, and 5,964 in one; Performance 6,062–6,082; the affinity recheck skipped 6,053–6,082. In three interleaved rounds own work under Performance was −0.4%, +0.7% and +1.4% against by hand |
 
-So the tasks lost about 1% of their instructions per cycle to one read: the agent rechecked each
-running task's CPU affinity by reading its `/proc/<pid>/status` every interval. The process scan,
-the interval length, PSS, the RSS read, the CPU clock, CPU frequency and interrupts did not
-explain it. The agent now reads the affinity with the affinity call instead (`sched_getaffinity`),
-which reads only the task's CPU mask.
+The affinity read is not the cause. Replacing it changed nothing, and from 08:15 every arm ran
+at the same speed. Across three days of F2c runs by hand ran at 6,103–6,152 units per CPU-second,
+except in two runs beside a sampler that read its threads' `/proc` every 0.5 s (6,081) and in every
+run from 08:15 on 2026-11-20. Performance ran at 6,030–6,094, except in its first three runs on
+2026-11-17 (6,154–6,157) and in the two runs beside the sampler (6,121–6,137). The tasks run at
+one of two speeds about 1.2% apart. Something outside both arms sets which one, and the
+diagnostics above did not find it. `82f311b` stays, since the affinity call is the cheaper read.
 
 ## Rules for validation runs
 

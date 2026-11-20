@@ -1800,9 +1800,8 @@ fn process_scope_matches(pid: u32, snapshot: &Snapshot, scoped: bool) -> bool {
     task_affinity(pid).is_some_and(|ids| ids.iter().all(|id| allowed.contains(id)))
 }
 
-/// A process's CPU affinity from the affinity call. Reading a running task's
-/// `/proc/<pid>/status` every interval cost it about 1% of its instructions per cycle in the F2c
-/// gate; the call reads only the task's CPU mask (006). `None` when it cannot be read.
+/// A process's CPU affinity from the affinity call, which reads only the task's CPU mask rather
+/// than formatting its whole `/proc/<pid>/status`. `None` when it cannot be read.
 #[cfg(target_os = "linux")]
 pub(super) fn task_affinity(pid: u32) -> Option<Vec<u32>> {
     // Room for 8192 CPUs; a larger host's mask does not fit, and the call then fails closed.
