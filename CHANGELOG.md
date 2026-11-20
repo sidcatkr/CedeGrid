@@ -88,8 +88,8 @@
   and `observe` show whether it is chosen, permitted and in force. In System mode, an account
   whose unit runs work counts as CedeGrid even where its processes are hidden.
 - **Waiting for work.** A node with room waits at the coordinator for the next queued task
-  (`await_work/1`), so new work starts within one monitor interval of its submission instead of
-  at the next 2 s heartbeat.
+  (`await_work/1`), and the answer wakes the agent's loop, so new work is placed within half a
+  monitor interval of its submission instead of at the next 2 s heartbeat.
 
 ### Changed
 

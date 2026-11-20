@@ -2097,6 +2097,29 @@ mod await_work_tests {
         assert!(watch.arrived.load(Ordering::SeqCst));
     }
 
+    /// A moved generation also wakes the loop, which would otherwise see it only at its next
+    /// regular interval; the first answer wakes nothing.
+    #[test]
+    fn a_moved_generation_wakes_the_loop() {
+        let woken = |script: Vec<Result<Response>>| {
+            let watch = Arc::new(WorkWatch::default());
+            watch.enabled.store(true, Ordering::SeqCst);
+            watch.wanted.store(true, Ordering::SeqCst);
+            waits(&watch, script, Duration::from_millis(300));
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                tokio::time::timeout(Duration::from_millis(50), watch.arrival.notified())
+                    .await
+                    .is_ok()
+            })
+        };
+        assert!(!woken(vec![generation(5)]));
+        assert!(woken(vec![generation(5), generation(6)]));
+    }
+
     /// Failures back off, and an unchanged answer that came at once (a coordinator at its
     /// waiter cap) is not asked again at once either.
     #[test]

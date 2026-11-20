@@ -64,9 +64,9 @@ pub(super) fn released_since(seen: &BTreeSet<String>, now: &BTreeSet<String>) ->
     now.difference(seen).next().is_some()
 }
 
-/// When the interval after a task's end runs: at once, but no sooner than half an interval after
-/// the last sample, so the CPU reading still spans a usable window, and never after the regular
-/// wake (006 SC-004).
+/// When the interval after a task's end or new work's arrival runs: at once, but no sooner than
+/// half an interval after the last sample, so the CPU reading still spans a usable window, and
+/// never after the regular wake (006 SC-001, SC-004).
 pub(super) fn early_wake(
     sampled_at: Instant,
     interval: Duration,
@@ -3108,7 +3108,9 @@ pub async fn run(
         }
         let launched = std::sync::Arc::clone(&state.wakes.prepared);
         let finished = std::sync::Arc::clone(&state.wakes.finished);
-        // Set when a task ended: the next interval runs then, before the regular wake.
+        let work = std::sync::Arc::clone(&state.work);
+        // Set when a task ended or new work arrived: the next interval runs then, before the
+        // regular wake.
         let mut early: Option<Instant> = None;
         loop {
             let wake = early.unwrap_or(next_observation);
@@ -3128,6 +3130,17 @@ pub async fn run(
                         Instant::now(),
                         next_observation,
                     ));
+                }
+                // A permit left from an arrival an interval already took wakes nothing.
+                _ = work.arrival.notified(), if early.is_none() && state.stopping.is_none() => {
+                    if work.arrived.load(std::sync::atomic::Ordering::SeqCst) {
+                        early = Some(early_wake(
+                            state.sampled_at,
+                            observation_interval,
+                            Instant::now(),
+                            next_observation,
+                        ));
+                    }
                 }
                 _ = &mut stop_signal, if state.stopping.is_none() => {
                     state.stopping = Some(Instant::now());

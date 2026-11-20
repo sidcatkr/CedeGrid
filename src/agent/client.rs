@@ -327,11 +327,14 @@ pub(super) struct WorkWatch {
     pub(super) wanted: std::sync::atomic::AtomicBool,
     /// New work was queued since the loop last looked: its next heartbeat comes early.
     pub(super) arrived: std::sync::atomic::AtomicBool,
+    /// Wakes the loop when `arrived` is set, so the early heartbeat does not wait for the next
+    /// regular interval.
+    pub(super) arrival: tokio::sync::Notify,
 }
 
 /// Waits for new work at the coordinator while the loop wants it, so a node with room hears
 /// of a submission at once instead of at its next heartbeat (006 SC-001). It only marks the
-/// arrival; the loop's heartbeat takes the work, under the usual checks.
+/// arrival and wakes the loop; the loop's heartbeat takes the work, under the usual checks.
 pub(super) async fn await_work<F, Fut>(watch: std::sync::Arc<WorkWatch>, mut ask: F)
 where
     F: FnMut(Request) -> Fut,
@@ -357,6 +360,7 @@ where
                 let unchanged = seen == Some(generation);
                 if seen.is_some() && !unchanged {
                     watch.arrived.store(true, Ordering::SeqCst);
+                    watch.arrival.notify_one();
                 }
                 seen = Some(generation);
                 // An unchanged answer that came at once was not held: ask again later.
