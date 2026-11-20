@@ -916,9 +916,10 @@ A node learned of new work only from its next heartbeat, every 2 s by default, s
 waited 1 s on average and up to 2 s before it was placed. Behind `await_work/1` an agent with
 room for a task keeps one request open at the coordinator, which answers when a task becomes
 queued: a submission, a retry, or a requeue after a release, a lease expiry or a failure. The
-answer wakes the agent's loop, whose next interval runs at once, but no sooner than half an
-interval after its last sample so its CPU readings still span a usable window, and sends its
-heartbeat early; placement goes on as before. The wait
+answer wakes the agent's loop, whose next interval runs once arrivals have paused for 50 ms, so
+a burst of submissions lands in one heartbeat, but no sooner than half an interval after its last
+sample, so its CPU readings still span a usable window. That interval sends its heartbeat early;
+placement goes on as before. The wait
 changes no state. At most 32 nodes wait at once; beyond that a node is answered at once and
 finds the work at its heartbeat. The contract is in
 `specs/001-contention-modes/contracts/wire-negotiation.md`.

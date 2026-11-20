@@ -3426,6 +3426,34 @@ mod pacing_tests {
         );
     }
 
+    /// New work's interval runs as a task end's does, but only once arrivals have paused for
+    /// `ARRIVAL_SETTLE`, so a burst of submissions lands in one heartbeat; never later than the
+    /// regular wake.
+    #[test]
+    fn an_arrival_interval_waits_for_the_burst_to_pause() {
+        use super::service::{ARRIVAL_SETTLE, arrival_wake};
+        let start = Instant::now();
+        let interval = Duration::from_millis(500);
+        let regular = start + interval;
+        let ms = Duration::from_millis;
+        // Just after the sample: the half-interval floor is the later bound.
+        assert_eq!(
+            arrival_wake(None, start, interval, start + ms(10), regular),
+            start + ms(250)
+        );
+        // Past the floor: the settle time after this arrival.
+        let first = arrival_wake(None, start, interval, start + ms(300), regular);
+        assert_eq!(first, start + ms(300) + ARRIVAL_SETTLE);
+        // A later arrival of the burst moves it on.
+        let second = arrival_wake(Some(first), start, interval, start + ms(330), regular);
+        assert_eq!(second, start + ms(330) + ARRIVAL_SETTLE);
+        // Never after the regular wake, however long the burst.
+        assert_eq!(
+            arrival_wake(Some(second), start, interval, start + ms(480), regular),
+            regular
+        );
+    }
+
     /// A slot whose supervisor exited runs nothing, so it frees its worker place at once, before
     /// its release is reported. A Performance node that just filled to its admitted
     /// parallelism then takes the replacement at the next heartbeat, not after its growth

@@ -76,6 +76,23 @@ pub(super) fn early_wake(
     (sampled_at + interval / 2).max(now).min(regular)
 }
 
+/// How long arrivals must pause before the interval they woke runs, so a burst of submissions
+/// lands in one heartbeat and launch pacing does not hold its tail for a cooldown (006 SC-001).
+pub(super) const ARRIVAL_SETTLE: Duration = Duration::from_millis(50);
+
+/// When the interval after new work's arrival runs: as `early_wake`, and `ARRIVAL_SETTLE` after
+/// the latest arrival, so each arrival of a burst moves it; never after the regular wake.
+pub(super) fn arrival_wake(
+    early: Option<Instant>,
+    sampled_at: Instant,
+    interval: Duration,
+    now: Instant,
+    regular: Instant,
+) -> Instant {
+    let floor = early.unwrap_or_else(|| early_wake(sampled_at, interval, now, regular));
+    floor.max(now + ARRIVAL_SETTLE).min(regular)
+}
+
 /// Waiting lease requests, longest waiting first.
 pub(super) fn lease_order(waiting: &mut [(Instant, String)]) {
     waiting.sort();
@@ -3132,9 +3149,10 @@ pub async fn run(
                     ));
                 }
                 // A permit left from an arrival an interval already took wakes nothing.
-                _ = work.arrival.notified(), if early.is_none() && state.stopping.is_none() => {
+                _ = work.arrival.notified(), if state.stopping.is_none() => {
                     if work.arrived.load(std::sync::atomic::Ordering::SeqCst) {
-                        early = Some(early_wake(
+                        early = Some(arrival_wake(
+                            early,
                             state.sampled_at,
                             observation_interval,
                             Instant::now(),

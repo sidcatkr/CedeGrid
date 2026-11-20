@@ -543,6 +543,31 @@ about 1% after the second account arrives, and nothing for speed per CPU-second.
 leaves the scope's two free CPUs idle for about 0.8 s, about 1% of the run, inside the spread of
 the split beside the second account.
 
+### Precision series after the arrival wake (`026e760`)
+
+The precision series showed the agent taking a new assignment 0.40 s (0.09–0.61) after the
+coordinator had the job: the wait for work marked the arrival, but the agent's loop saw the mark
+only at its next interval. `026e760` wakes the loop on the arrival. The same ten-round series ran
+again on 2026-11-20 at 18:14–19:29.
+
+| Measure | F2c | Own work first |
+|---|---|---|
+| Own work | −1.63% ± 1.93% | −2.42% ± 2.06% |
+| Own CPU | −1.39% ± 1.70% | −2.48% ± 1.60% |
+| Work per CPU-second | −0.25% ± 0.68% | +0.06% ± 1.01% |
+| Agent takes the first assignment | 0.11 s median, from 0.40 s | |
+| First own task running after submission | 0.56 s (0.38–0.74), from 0.82 s | 0.46 s (0.38–0.60), from 0.71 s |
+| Last own task running (first four in own work first) | 1.74 s (1.03–3.65), from 1.24 s | 0.92 s (0.67–1.07), from 0.86 s |
+| Scope idle | 1.2 CPU-s against 0.2, from 1.7 | 2.5 against 0.2 before the second account arrives, from 3.1 |
+| The second account's rate | 4,599 ± 28 against 4,600 ± 120 per second | 4,270 ± 75 against 4,172 ± 138 after it arrives |
+
+The first task started a quarter of a second sooner, and the scope idled 0.5–0.6 CPU-s less. In
+two F2c runs the eighth task started 3.6 s after submission: the early heartbeat came while the
+harness was still submitting, took seven tasks, and launch pacing held the eighth for the 2 s RAM
+scale-up cooldown. The interval an arrival brings forward now runs only once arrivals have paused
+for 50 ms. Own work stayed within the earlier intervals: the shorter start is smaller than how
+much the split beside the second account moves from run to run.
+
 ## Rules for validation runs
 
 - Report these statuses separately:
