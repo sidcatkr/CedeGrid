@@ -1544,6 +1544,21 @@ mod tests {
         assert!(!family_pss_applies(5, true));
     }
 
+    /// The single-process PSS diagnostic is off unless a whole number from 2 to 64 is set; on,
+    /// a Tracked family of one takes that fixed period, and Full leaves still keep their
+    /// readings.
+    #[test]
+    fn the_single_process_pss_diagnostic_is_off_unless_set() {
+        assert_eq!(diagnostic_single_pss_every(None), None);
+        assert_eq!(diagnostic_single_pss_every(Some("1")), None);
+        assert_eq!(diagnostic_single_pss_every(Some("65")), None);
+        assert_eq!(diagnostic_single_pss_every(Some("10")), Some(10));
+        assert!(single_pss_applies(1, false, Some(10)));
+        assert!(!single_pss_applies(1, false, None));
+        assert!(!single_pss_applies(2, false, Some(10)));
+        assert!(!single_pss_applies(1, true, Some(10)));
+    }
+
     fn process(pid: u32, uid: Option<u32>, cpu_millicores: u64, ram_mib: u64) -> ProcessSample {
         ProcessSample {
             pid,

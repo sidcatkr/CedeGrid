@@ -243,6 +243,9 @@ pub struct ManagedCollector {
     interval: Duration,
     /// Each Tracked family's PSS schedule and its members this interval, by run (FR-085).
     family_pss: BTreeMap<String, FamilyPss>,
+    /// Diagnostic only: a single-process run's PSS period, from
+    /// `CEDEGRID_DIAGNOSTIC_SINGLE_PSS_EVERY`; `None` reads it every interval.
+    single_pss_every: Option<u32>,
     family_members: BTreeMap<String, BTreeSet<Member>>,
     /// The runs whose RAM this interval is an estimate between passes.
     ram_estimated: BTreeSet<String>,
@@ -292,6 +295,11 @@ impl ManagedCollector {
             handles: HeldHandles::default(),
             interval: Duration::from_millis(config.monitor.interval_ms),
             family_pss: BTreeMap::new(),
+            single_pss_every: diagnostic_single_pss_every(
+                std::env::var("CEDEGRID_DIAGNOSTIC_SINGLE_PSS_EVERY")
+                    .ok()
+                    .as_deref(),
+            ),
             family_members: BTreeMap::new(),
             ram_estimated: BTreeSet::new(),
             delegated_root: config
@@ -452,8 +460,11 @@ impl ManagedCollector {
                 .or_default()
                 .insert((id.pid, id.start_time));
         }
+        let single = self.single_pss_every;
         families.retain(|run, members| {
-            leaders.contains_key(run) && family_pss_applies(members.len(), false)
+            leaders.contains_key(run)
+                && (family_pss_applies(members.len(), false)
+                    || single_pss_applies(members.len(), false, single))
         });
         self.family_pss.retain(|run, _| families.contains_key(run));
         self.ram_estimated.clear();
@@ -480,6 +491,9 @@ impl ManagedCollector {
                 };
                 let schedule = self.family_pss.get_mut(run).expect("entry above");
                 schedule.passed(read.clone(), started.elapsed(), scope_cpu);
+                if let Some(every) = single.filter(|_| members.len() == 1) {
+                    schedule.period = every;
+                }
                 ram.extend(read.into_iter().map(|((pid, _), (pss, _))| (pid, pss)));
             } else {
                 let schedule = self.family_pss.get_mut(run).expect("entry above");
@@ -1639,6 +1653,20 @@ pub(super) fn pss_period(cost: Duration, scope_cpu: Duration) -> u32 {
     u32::try_from(cost.as_nanos().div_ceil(budget))
         .unwrap_or(PSS_PERIOD_MAX)
         .clamp(1, PSS_PERIOD_MAX)
+}
+
+/// A gate's diagnostic period for a single-process run's PSS: a whole number from 2 to 64 in
+/// `CEDEGRID_DIAGNOSTIC_SINGLE_PSS_EVERY`, else none. Not an operator setting: it exists to
+/// measure what reading a running task's `smaps_rollup` every interval costs it (006).
+pub(super) fn diagnostic_single_pss_every(value: Option<&str>) -> Option<u32> {
+    value
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|every| (2..=64).contains(every))
+}
+
+/// Whether the diagnostic period applies: a Tracked family of one, with the diagnostic set.
+pub(super) fn single_pss_applies(members: usize, full: bool, every: Option<u32>) -> bool {
+    members == 1 && !full && every.is_some()
 }
 
 /// A family's memory takes the PSS period only in Tracked with more than its leader; a family

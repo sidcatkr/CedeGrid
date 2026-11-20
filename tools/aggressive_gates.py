@@ -171,8 +171,8 @@ class Cluster:
     """A coordinator and an agent for one run; the agent on `cpus`, everything else outside."""
 
     def __init__(self, repo, out, cpus, mode, workers, lifetime, gpu_uuid=None, gpu_mib=2048,
-                 gpu_reserve_mib=None, ram_mib=None, scope_by_config=False, monitor_ms=None,
-                 scan_every=None):
+                 gpu_reserve_mib=None, ram_mib=None, monitor_ms=None, scan_every=None,
+                 single_pss_every=None):
         from anchor_validation import deployment
         from runtime_config import atomic_runtime_config, read_runtime_config
         from validation_runtime import OwnedProcess
@@ -210,10 +210,6 @@ class Cluster:
         agent.update(max_workers=workers, capacity={'cpu_millicores': len(self.cpus) * 1000,
                      'ram_mib': ram_mib or max(4096, workers * 1024 * 2),
                      'gpu_memory_mib': {gpu_uuid: gpu_mib} if gpu_uuid else {}})
-        if scope_by_config:
-            # The operator's task scope: the agent is permitted the scope and the CPUs outside
-            # it, and keeps its own threads on the latter.
-            agent['cpu_affinity'] = list(self.cpus)
         atomic_runtime_config(self.out / 'agent.toml', agent, 'agent')
         self.services = {'coordinator': OwnedProcess(
             [str(self.binary), 'coordinator', '--deployment', str(self.out / 'coordinator.toml')],
@@ -227,14 +223,17 @@ class Cluster:
                 if time.monotonic() > deadline:
                     raise
                 time.sleep(.1)
-        permitted = sorted(set(self.cpus) | set(outside)) if scope_by_config else self.cpus
         agent_env = dict(self.env)
         if scan_every:
             # Diagnostic only, never an operator setting: the agent's process scan runs once
             # every this many intervals.
             agent_env['CEDEGRID_DIAGNOSTIC_PROCESS_SCAN_EVERY'] = str(scan_every)
+        if single_pss_every:
+            # Diagnostic only: a single-process run's PSS is read once every this many
+            # intervals, as a larger family's is.
+            agent_env['CEDEGRID_DIAGNOSTIC_SINGLE_PSS_EVERY'] = str(single_pss_every)
         self.services['agent'] = OwnedProcess(
-            ['taskset', '-c', ','.join(map(str, permitted)), str(self.binary), '--config',
+            ['taskset', '-c', ','.join(map(str, self.cpus)), str(self.binary), '--config',
              str(self.out / 'node.toml'), 'agent', '--deployment', str(self.out / 'agent.toml')],
             self.repo, self.out / 'agent.log', agent_env)
         deadline = time.monotonic() + 30
@@ -426,11 +425,11 @@ def main():
     p.add_argument('--plain-tasks', type=int, help="own tasks the plain arm starts (default: the shape's)")
     p.add_argument('--agent-outside', action='store_true',
                    help='diagnostic: run the agent off the scope, its tasks on it')
-    p.add_argument('--agent-scope', action='store_true',
-                   help="give the agent the scope as its tasks' cpu_affinity, with CPUs outside it")
     p.add_argument('--monitor-ms', type=int, help="diagnostic: the agent's monitor interval")
     p.add_argument('--diagnostic-scan-every', type=int,
                    help="diagnostic: run the agent's process scan once every N intervals")
+    p.add_argument('--diagnostic-single-pss-every', type=int,
+                   help="diagnostic: read a single-process run's PSS once every N intervals")
     p.add_argument('--window', type=int, default=60)
     p.add_argument('--lead', type=int, default=40)
     p.add_argument('--peer-arm', choices=['cedegrid', 'plain'], default='cedegrid')
@@ -451,10 +450,9 @@ def main():
         p.error('fill runs performance or aggressive')
     if a.shape in FIXED_SHAPES and a.arm not in ('plain', 'performance'):
         p.error(f'{a.shape} runs plain or performance')
-    if (a.agent_outside or a.agent_scope or a.monitor_ms or a.diagnostic_scan_every) \
-            and a.arm in ('alone', 'plain'):
-        p.error('--agent-outside, --agent-scope, --monitor-ms and --diagnostic-scan-every need '
-                'an arm through CedeGrid')
+    if (a.agent_outside or a.monitor_ms or a.diagnostic_scan_every
+            or a.diagnostic_single_pss_every) and a.arm in ('alone', 'plain'):
+        p.error('the diagnostic options need an arm through CedeGrid')
     if a.plain_tasks is not None and (a.arm != 'plain' or a.plain_tasks < 1):
         p.error('--plain-tasks takes a positive count, with --arm plain')
     repo = Path(a.repo).resolve()
@@ -479,8 +477,8 @@ def main():
                                capture_output=True, text=True, check=True).stdout.split()[0]
         gpu_mib = int(total)
     report = {'shape': a.shape, 'arm': a.arm, 'agent_outside': a.agent_outside,
-              'agent_scope': a.agent_scope, 'monitor_ms': a.monitor_ms,
-              'diagnostic_scan_every': a.diagnostic_scan_every, 'cpus': cpus,
+              'monitor_ms': a.monitor_ms, 'diagnostic_scan_every': a.diagnostic_scan_every,
+              'diagnostic_single_pss_every': a.diagnostic_single_pss_every, 'cpus': cpus,
               'tasks': tasks, 'task_millicores': millicores, 'window_seconds': a.window,
               'status': 'running'}
     cluster = None
@@ -493,8 +491,8 @@ def main():
             cluster = Cluster(repo, out, cpus, mode, tasks, lifetime, gpu, gpu_mib,
                               1024 if a.shape == 'vram' else None,
                               total_ram if a.shape == 'ram' else None,
-                              scope_by_config=a.agent_scope, monitor_ms=a.monitor_ms,
-                              scan_every=a.diagnostic_scan_every)
+                              monitor_ms=a.monitor_ms, scan_every=a.diagnostic_scan_every,
+                              single_pss_every=a.diagnostic_single_pss_every)
             if a.arm == 'unprotected' and allow(cluster.binary, out / 'node.toml') != 0:
                 raise RuntimeError('the allowance was not set')
             time.sleep(3)

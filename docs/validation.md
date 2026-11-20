@@ -476,10 +476,12 @@ arms.
 - Report detection, drain, termination and release separately. Insufficient samples are
   inconclusive. Higher CPU utilization alone is not a speedup.
 - Diagnostic arms are labeled as such and are never a gate's result. `tools/aggressive_gates.py`
-  offers `--agent-outside`, `--monitor-ms` and `--diagnostic-scan-every`; the last sets
-  `CEDEGRID_DIAGNOSTIC_PROCESS_SCAN_EVERY` for the agent, which then scans processes once every
-  that many intervals and carries stale principals between scans. It is not an operator setting
-  and has no effect unless set.
+  offers `--agent-outside`, `--monitor-ms`, `--diagnostic-scan-every` and
+  `--diagnostic-single-pss-every`. The last two set `CEDEGRID_DIAGNOSTIC_PROCESS_SCAN_EVERY`
+  (the agent scans processes once every that many intervals and carries stale principals between
+  scans) and `CEDEGRID_DIAGNOSTIC_SINGLE_PSS_EVERY` (it reads a single-process run's PSS once every
+  that many intervals and estimates between, as for larger families). Neither is an operator
+  setting, and neither has any effect unless set.
 - Every run manifest records:
   - the exact source and environment
   - seeds and worker counts
