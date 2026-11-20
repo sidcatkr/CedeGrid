@@ -516,6 +516,33 @@ length, three runs per arm, interleaved.
 | Own work first on CPU | SC-001 | own 1,400,719–1,403,444 against 1,438,011–1,444,994 (−2.9%, −2.5%, −2.8%); own CPU 3,987–3,997 m against 4,071–4,080 m; per CPU-second 5,848–5,858 against 5,874–5,915. Four tasks ran at 0.7 s and the other four 1.3 s after the second account arrived, and those four ran at 5,649–5,795 per CPU-second beside its loops | fail: about 2% from the start and the reaction to the second account, the rest from where the late four ran |
 | Batch: sixteen own tasks of 1000 m on an idle scope | SC-004 | mean 38.9–39.1 s against 57.7–60.8 s by hand (−33% to −36%); total 63.3–64.0 s against 61.2–62.0 s (+2.4%, +4.6%, +2.5%) | pass |
 
+### Precision series at `2d576a8`
+
+On 2026-11-20 at 16:35–17:50 F2c and own work first ran ten rounds each, by hand and under
+Performance, with the arm order alternating between rounds and every hashing task padded. A probe
+read each own task's CPU time every 0.25 s, and the scope's idle time, from CPU 19. Intervals
+are 95% over the ten paired rounds, Performance against by hand.
+
+| Measure | F2c | Own work first |
+|---|---|---|
+| Own work | −0.71% ± 2.18% | −2.35% ± 1.19% |
+| Own CPU | −0.71% ± 2.16% | −2.12% ± 0.89% |
+| Work per CPU-second | +0.01% ± 0.46% | −0.24% ± 0.71% |
+| First own task running after submission | 0.82 s (0.46–1.12) against 0.03 s | 0.71 s (0.42–0.94) against 0.04 s |
+| Last own task running (first four in own work first) | 1.24 s against 0.11 s | 0.86 s against 0.06 s |
+| Scope idle | 1.7 CPU-s against 0.2 | 3.1 against 0.2 before the second account arrives, 0.1 against 0.1 after |
+| The second account's rate | 4,572 ± 49 against 4,662 ± 178 per second | 4,237 ± 33 against 4,221 ± 88 after it arrives |
+
+In own work first, own CPU before the second account arrived was 76.6 against 79.7 CPU-s, the
+scope idle while the first tasks started. After it arrived own CPU was 162.1 against 164.4 CPU-s
+(−2.3 ± 2.4), with the scope busy and the second account's rate the same in both arms. The other
+four tasks started 1.0 s (0.8–1.2) after it arrived, and own work held 2.5 CPUs in that second. The
+first four ran at 5,920 units per CPU-second and the later four at 5,741, against 5,872 by hand,
+which averages to the same. So own work first is short by about 1.3% for the start, at most
+about 1% after the second account arrives, and nothing for speed per CPU-second. In F2c the start
+leaves the scope's two free CPUs idle for about 0.8 s, about 1% of the run, inside the spread of
+the split beside the second account.
+
 ## Rules for validation runs
 
 - Report these statuses separately:
