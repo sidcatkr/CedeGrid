@@ -592,6 +592,32 @@ the coordinator for every job's status every 0.25 s. Load anywhere in the accoun
 its share, so the account had less weight on the CPUs it shares with the second account. The
 harness now asks every 0.25 s only for the first 2 s after submission, then every 1 s.
 
+### Precision series with the harness polling less (`f5b1053`)
+
+The same ten-round series ran again on 2026-11-21 at 16:14–17:28, after an alone run of the
+second account's load (6,272 per second, as before). The owner's account ran 5.6% of a CPU
+outside the scope under Performance, the harness 2.8% and the coordinator 2.8%, from 17%.
+
+| Measure | F2c | Own work first |
+|---|---|---|
+| Own work | −0.69% ± 1.41% | −2.79% ± 1.55% |
+| Own CPU | −0.93% ± 1.10% | −3.00% ± 1.07% |
+| Work per CPU-second | +0.24% ± 0.80% | +0.22% ± 1.03% |
+| First own task running after submission | 0.69 s (0.54–0.89) | 0.55 s (0.43–0.67) |
+| Last own task running (first four in own work first) | 1.12 s (1.04–1.22) | 0.72 s (0.60–0.94) |
+| Scope idle | 1.5 CPU-s against 0.2 | 2.4 against 0.2 before the second account arrives |
+| Own CPU after the second account arrives | | 162.7 against 167.9 CPU-s |
+| The second account's rate | 4,513 ± 104 against 4,608 ± 96 per second | 4,242 ± 24 against 4,074 ± 123 after it arrives |
+
+F2c is level with by hand: its gap is inside its interval, and the 0.7 s start, about 1% of
+own CPU, is all that remains measurable. Own work first is short by about 1% for the start
+and 2% after the second account arrives, when own CPU is 3.1% lower and that account's rate 4.1%
+higher. Under Performance four tasks run on the idle scope and the other four start about 1 s
+after the second account arrives; by hand all eight already sit on the scope's CPUs. Which CPUs
+the kernel puts the later four on sets how much the account gets on the CPUs it shares with the
+second account. A thread sampler over two rounds per arm showed own threads on those CPUs
+spreading from 1.9 to 3.2 on average in both arms, too wide to settle it.
+
 ## Rules for validation runs
 
 - Report these statuses separately:
