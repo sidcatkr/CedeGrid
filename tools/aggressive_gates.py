@@ -416,6 +416,19 @@ for child in children:
 '''
 
 
+# The harness asks the coordinator for every job's status every 0.25 s for the first 2 s after
+# submission, then every 1 s. At 0.25 s throughout it and the coordinator ran 17% of a CPU in the
+# owner's account outside the scope, which shrank the account's share on the scope beside the
+# second account; the plain arm has no such load.
+POLL_FAST_S = 2.0
+POLL_SLOW_S = 1.0
+
+
+def poll_due(since_submission, since_poll):
+    """Whether the harness asks the coordinator for status now."""
+    return since_submission < POLL_FAST_S or since_poll >= POLL_SLOW_S
+
+
 def layout_pads(count, rng=random):
     """Padding lengths, 0 to 1023 characters, for `count` hashing tasks. The hashing loop runs at
     one of two speeds about 1% apart, set by its memory layout, which the lengths of its arguments
@@ -592,6 +605,7 @@ def main():
         # Fixed work runs until every task has finished, within a bound.
         until = submitted + 600 if a.shape in FIXED_SHAPES else end + 3
         moved = False
+        last_poll = 0.0
         while time.time() < until:
             running = sum(1 for p in paths if Path(f'{p}.pid').exists() and not p.exists())
             if cluster and a.agent_outside and not moved and running == len(paths):
@@ -600,11 +614,14 @@ def main():
                 report['agent_moved_s'] = round(time.time() - submitted, 2)
             if cluster:
                 cluster.check()
-                states = [t['status'] for j in cluster.jobs for t in cluster.client.status(j).get('tasks', [])]
-                samples.append([round(time.time() - submitted, 2),
-                                states.count('assigned') + states.count('completed'), running])
-                service = [{**service[0], **{k: max(v, service[0].get(k, 0)) for k, v in
-                                             service_ticks(cluster.binary, coordinator).items()}}]
+                if poll_due(time.time() - submitted, time.time() - last_poll):
+                    last_poll = time.time()
+                    states = [t['status'] for j in cluster.jobs
+                              for t in cluster.client.status(j).get('tasks', [])]
+                    samples.append([round(time.time() - submitted, 2),
+                                    states.count('assigned') + states.count('completed'), running])
+                    service = [{**service[0], **{k: max(v, service[0].get(k, 0)) for k, v in
+                                                 service_ticks(cluster.binary, coordinator).items()}}]
             elif plain:
                 samples.append([round(time.time() - submitted, 2), len(paths), running])
             if a.shape in FIXED_SHAPES and all(ended(p) for p in paths):

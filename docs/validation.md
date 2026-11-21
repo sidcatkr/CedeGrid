@@ -568,6 +568,30 @@ scale-up cooldown. The interval an arrival brings forward now runs only once arr
 for 50 ms. Own work stayed within the earlier intervals: the shorter start is smaller than how
 much the split beside the second account moves from run to run.
 
+### Precision series after the burst settle (`7e88701`), and the harness's own load
+
+The same ten-round series ran again on 2026-11-21 at 01:58–03:12. The eight F2c tasks now arrive
+in one heartbeat: the last one ran at 1.10 s (1.06–1.14), and none waited for launch pacing.
+
+| Measure | F2c | Own work first |
+|---|---|---|
+| Own work | −1.93% ± 1.76% | −3.30% ± 1.45% |
+| Own CPU | −1.68% ± 1.72% | −2.89% ± 1.30% |
+| Work per CPU-second | −0.25% ± 0.59% | −0.42% ± 1.01% |
+| First own task running after submission | 0.71 s (0.54–0.82) | 0.57 s (0.45–0.64) |
+| Scope idle | 1.5 CPU-s against 0.2 | 2.4 against 0.2 before the second account arrives |
+| Own CPU after the second account arrives | | 162.0 against 166.8 CPU-s |
+| The second account's rate | 4,655 ± 74 against 4,663 ± 127 per second | 4,246 ± 37 against 4,140 ± 156 after it arrives |
+
+Own CPU stayed short while the second account ran, by more than the start explains, and that
+account gained about as much. A probe of every process of the owner's account over 30 s of F2c,
+two runs per arm, found the account running 266–269% of a CPU under Performance against 253% by
+hand. Own tasks ran 248–251% against 253%; the rest was the harness, 8.5% of a CPU, and the
+coordinator, 8.3%, both outside the scope, and CedeGrid on the scope, 0.7%. The harness asked
+the coordinator for every job's status every 0.25 s. Load anywhere in the account counts toward
+its share, so the account had less weight on the CPUs it shares with the second account. The
+harness now asks every 0.25 s only for the first 2 s after submission, then every 1 s.
+
 ## Rules for validation runs
 
 - Report these statuses separately:

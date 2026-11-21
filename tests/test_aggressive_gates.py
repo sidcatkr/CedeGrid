@@ -81,6 +81,15 @@ class EndedTest(unittest.TestCase):
             self.assertTrue(gates.ended(path))
 
 
+class PollDueTest(unittest.TestCase):
+    def test_polls_fast_after_submission_then_once_a_second(self):
+        self.assertTrue(gates.poll_due(0.3, 0.25))
+        self.assertTrue(gates.poll_due(1.9, 0.0))
+        self.assertFalse(gates.poll_due(2.5, 0.5))
+        self.assertTrue(gates.poll_due(2.5, 1.0))
+        self.assertFalse(gates.poll_due(40.0, 0.75))
+
+
 class LayoutPadsTest(unittest.TestCase):
     def test_each_task_gets_its_own_length_within_the_range(self):
         import random
