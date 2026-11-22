@@ -278,6 +278,7 @@ pub(super) async fn start_assignment(
             .is_some_and(|n| n <= agent.max_spool_bytes),
         "named inputs and resume exceed remaining node spool budget"
     );
+    crate::supervision::launch_trace("checks_done", &assignment.request.assignment_id);
     private_dir(&output)?;
     let workspace = Namespace::new(&config.state_dir)?
         .control_dir()
@@ -289,8 +290,10 @@ pub(super) async fn start_assignment(
     for name in ["output", "tmp", "cache"] {
         private_dir(&workspace.join(name))?;
     }
+    crate::supervision::launch_trace("directories_made", &assignment.request.assignment_id);
     let inputs = download_inputs(client, &assignment, &workspace).await?;
     let resume = download_checkpoint(client, &assignment, &workspace).await?;
+    crate::supervision::launch_trace("inputs_fetched", &assignment.request.assignment_id);
     let metadata = assignment
         .request
         .env
@@ -300,6 +303,7 @@ pub(super) async fn start_assignment(
         .unwrap_or(serde_json::json!({}));
     let context = serde_json::json!({"schema_version":2,"namespace_id":client.namespace_guard.identity().namespace_id,"session_id":client.namespace_guard.identity().session_id.as_ref().unwrap_or(&client.namespace_guard.identity().namespace_id),"task_id":assignment.request.task_id,"assignment_id":assignment.request.assignment_id,"generation":assignment.generation,"output_dir":workspace.join("output"),"metadata":metadata,"resume":resume,"inputs":inputs,"max_spool_bytes":agent.max_spool_bytes,"capabilities":["resource_targets"]});
     client.write_json_new(&workspace.join("context.json"), &context)?;
+    crate::supervision::launch_trace("context_written", &assignment.request.assignment_id);
     assignment.request.env.insert(
         "CEDEGRID_CONTEXT".into(),
         workspace.join("context.json").display().to_string(),

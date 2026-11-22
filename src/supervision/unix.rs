@@ -1449,10 +1449,12 @@ pub(super) fn supervise(
             && options.release_confirm_timeout_ms > 0,
         "preparation timeout, release confirmation timeout and lease must be positive"
     );
+    crate::supervision::launch_trace("supervise_start", &request.assignment_id);
     let gpu_release = crate::telemetry::GpuReleaseGuard::prepare(&request.resources)?;
     check_reaping_policy()?;
     let drain = DrainDirectory::new()?;
     let mut record = journal.reserve(request, capacity)?;
+    crate::supervision::launch_trace("reserved", &request.assignment_id);
     record.backend = backend.name().into();
     let mut child: Option<OwnedChild> = None;
     let mut children: Option<ChildServer> = None;
@@ -1489,7 +1491,9 @@ pub(super) fn supervise(
         let deadline = Instant::now()
             .checked_add(Duration::from_millis(options.prepare_timeout_ms))
             .context("preparation timeout is too large")?;
+        crate::supervision::launch_trace("preparing", &request.assignment_id);
         let mut setup = backend.prepare(request)?;
+        crate::supervision::launch_trace("backend_prepared", &request.assignment_id);
         // The launch nice already reflects the task's mode; 0 leaves the default priority.
         if request.class == AllocationClass::Opportunistic
             && setup.nice.is_none()

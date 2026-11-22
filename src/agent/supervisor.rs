@@ -383,6 +383,10 @@ pub fn assignment_supervisor(spec_path: &Path) -> Result<()> {
         &spec.output_dir.join("supervisor-identity.json"),
         &supervisor_identity,
     )?;
+    crate::supervision::launch_trace(
+        "supervisor_identity_written",
+        &spec.assignment.request.assignment_id,
+    );
     if let Some(cpus) = spec.assignment.request.env.get("CEDEGRID_CPU_AFFINITY") {
         supervision::apply_current_cpu_affinity(&serde_json::from_str::<Vec<u32>>(cpus)?)?;
     }
@@ -434,11 +438,17 @@ pub fn assignment_supervisor(spec_path: &Path) -> Result<()> {
         None => None,
     };
     drop(tx);
+    crate::supervision::launch_trace(
+        "control_socket_ready",
+        &spec.assignment.request.assignment_id,
+    );
     let mut backend = execution_backend(&spec.config, &spec.assignment.request)?;
+    crate::supervision::launch_trace("backend_ready", &spec.assignment.request.assignment_id);
     let journal = AssignedJournal {
         store: open_existing_node_store_guarded(&spec.config, namespace_guard.clone())?,
         generation: spec.assignment.generation,
     };
+    crate::supervision::launch_trace("journal_open", &spec.assignment.request.assignment_id);
     let mut control = PipeControl {
         rx,
         #[cfg(unix)]
