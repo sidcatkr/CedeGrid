@@ -642,6 +642,25 @@ puts each pinned task back on the whole scope a set time after it starts, to tes
 placing the later tasks round the scope and then leaving them to the kernel matches by hand on
 both sides.
 
+### Own work first: placing the later tasks and leaving them to the kernel (`c387ca9`)
+
+On 2026-11-22 at 04:51–06:17 own work first ran ten more rounds of five arms, the order rotating.
+"Placed" pins each task to one CPU round the scope and puts it back on the whole scope 0.5 s
+after it starts.
+
+| Arm | Own work | Own CPU after the second account arrives | The second account's rate after it arrives |
+|---|---|---|---|
+| By hand | 1,431,164 ± 19,599 units | 164.7 ± 2.9 CPU-s | 4,237 ± 145 per second |
+| By hand, the last four started 1 s after the second account arrives | −1.03% ± 2.18% | −1.47% ± 3.02% | +1.69% ± 5.27% |
+| The same, each task placed | −0.79% ± 1.29% | −0.40% ± 1.94% | −0.38% ± 4.03% |
+| By hand, each task placed | −0.12% ± 1.98% | +0.04% ± 2.48% | −0.63% ± 4.87% |
+| Performance | −1.55% ± 1.17% | −1.65% ± 1.52% | −0.17% ± 4.28% |
+
+Placed this way, the later tasks match by hand on both sides: own CPU after the second account
+arrives within 0.4%, and the second account's rate within 0.4%. Across the two series the late
+start without placement cost own work 1.5% and 3.0% of its CPU after the second account arrived,
+and Performance 1.7% and 2.7%.
+
 ## Rules for validation runs
 
 - Report these statuses separately:
