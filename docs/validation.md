@@ -695,6 +695,43 @@ FR-007b gains about a point in own work first, as the plain arms of 2026-11-22 p
 remains is mostly the start: the first own task runs at 0.59 s against 0.04 s by hand, while
 the scope's CPUs wait.
 
+### The start path (`562154c`, `35016ed`)
+
+`562154c` writes an attempt's context and supervisor spec under one ledger commit instead of
+one each, and opens the output publisher while the gate is prepared instead of before the gate
+is spawned. The publisher must still be open before EXEC, and every synced write is kept.
+
+Launch traces (`--diagnostic-launch-trace`, 2026-11-22 15:57–16:07, three runs of each shape)
+showed the publisher's wait moving to just before EXEC rather than going away. At 16:08–17:29
+ten rounds of own work first and five of F2c ran with nothing beside them, by hand, Performance
+at `562154c` and Performance at `b066fec`, the order rotating:
+
+| Arm | Own work first | F2c | First and last own task start, own work first | F2c |
+|---|---|---|---|---|
+| By hand | | | 0.04 s, 0.06 s | |
+| `562154c` against by hand | −1.15% ± 1.22% (own CPU −1.86% ± 1.10%) | −0.34% ± 2.71% | 0.38 s, 0.43 s | 0.43 s, 0.65 s |
+| `b066fec` against by hand | −1.37% ± 1.47% | +0.70% ± 2.08% | 0.38 s, 0.44 s | 0.21 s, 0.98 s |
+| `562154c` against `b066fec` | +0.23% ± 0.85% | −1.03% ± 1.75% | | |
+
+No measurable change. `35016ed` adds trace points for the stretch before the agent receives a
+task (when it hears of new work, the interval, the sample, the decision, the observation write
+and the heartbeat) and records when each submission returns. Its traces (17:42–17:49, three
+runs of own work first, two of F2c) split the start:
+
+- the harness's eight submissions return 9 ms apart, from 13 ms on; the agent hears of the
+  first at once;
+- the interval runs 50 ms after the last arrival, at about 124 ms, so the burst goes in one
+  heartbeat; sample, decision, observation write and heartbeat then take about 17 ms;
+- the four admitted tasks start at 0.16–0.31 s, each launch taking 80–170 ms after receipt,
+  most of it synced writes to the one state database that the four launches take in turn.
+
+The same stages took 0.60–0.87 s in the traces at 15:57–16:07, with each arrival record taking
+8 ms instead of 1.5 ms: the host's synced writes were slower then, and a launch's time grows
+with them. What remains of the start is the client's own submissions, the 50 ms settle that
+keeps a burst in one heartbeat (a split burst waits a cooldown, see `7e88701` above), and the
+launch barrier's synced writes. None of these gets shorter without dropping a synced write or
+splitting bursts, so the start path stays as it is.
+
 ## Rules for validation runs
 
 - Report these statuses separately:
