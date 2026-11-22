@@ -732,6 +732,68 @@ keeps a burst in one heartbeat (a split burst waits a cooldown, see `7e88701` ab
 launch barrier's synced writes. None of these gets shorter without dropping a synced write or
 splitting bursts, so the start path stays as it is.
 
+### System mode: priority over plain users and the unprotected raise (`d30b24a`)
+
+On 2026-11-22 at 18:20–19:54 the packages 0.2.0~sys006.1, built at `d30b24a` and installed by
+the user, ran with a policy that permits `aggressive`, `unprotected` and `plain_priority`, both
+accounts in the `cedegrid` group and each account's unit in its own account slice. The
+coordinator and the harness (`--system`) ran from a build of `d30b24a`. Own work ran as the
+first account. The second account ran its saturating load (two threads, each tied to one of two
+scope CPUs), or its own CedeGrid in its unit with two 1000 m tasks on those CPUs. Three rounds
+of each arm, the order rotating, 60 s windows.
+
+"Share of its CPUs" is own work's share of the second account's two CPUs. In F2c it comes from
+own CPU beyond the two free CPUs; in own work first, from the second account's rate against its
+rate with the two CPUs to itself (6,051 requests/s, from the F2c runs).
+
+Beside a plain account:
+
+| Shape | Arm | Own work against by hand | Second account's rate | Share of its CPUs | Own account slice's weight |
+|---|---|---|---|---|---|
+| F2c | by hand | | | 19.7–20.6% | 100 |
+| F2c | Performance | +2.5% (+0.6 to +4.7) | −6.4% | 22.1–25.4% | 100 |
+| F2c | Performance, priority over plain users | +15.5% (+15.2 to +15.7) | −25.8%, p99 3.3 ms | 38.5–39.0% | 200 from 0.8 s after submission until 0.3–0.4 s after the work ended |
+| F2c | Unprotected | +10.6% (+8.5 to +12.1) | −20.4%, p99 6.3 ms | 30.3–34.6% | 400 from 5.0–5.3 s until 0.05–0.3 s after the work ended |
+| Own work first | by hand | | | 24.1–30.6% | 100 |
+| Own work first | Performance | −0.7% (−0.9 to −0.3) | −1.8% | 28.8–29.7% | 100 |
+| Own work first | Performance, priority over plain users | +6.0% (+5.9 to +6.2) | −19.9% | 41.2–43.7% | 200 from 0.8 s until 0.3–0.4 s after the work ended |
+| One process against one thread on one CPU | by hand | | | 49.4% | 100 |
+| One process against one thread on one CPU | Performance, priority over plain users | +32.5% | −33.1%, p99 6.3 ms | 65.4–65.5% | 200 from 0.8 s until 0.3–0.4 s after the work ended |
+
+By hand, own work gets a fifth of the second account's CPUs in F2c and under a third in own
+work first, not half: the kernel spreads the account slice's weight over the four CPUs its
+tasks run on, while the second account's stays on its two. Priority over plain users roughly
+doubles that share: 18–19 points over by hand in F2c and 12–18 in own work first, and own work
+does more than by hand in every run. On one CPU it gives the two thirds the spec describes. Own
+work first gains less than F2c because its first 25 s run alone in both arms. Unprotected admitted
+four of the eight F2c tasks where Performance admitted all eight, so its higher weight bought
+less: 10–15 points over by hand.
+
+The second account's p99 was 3.3 ms by hand in every shape. The one-CPU rows ran on 2026-11-22 at
+19:44–19:54, three rounds alternating, from a host script that starts the same unit and one task.
+
+Beside the second account's CedeGrid:
+
+| Shape | Arm | Own work against by hand | Second account against by hand | Weights |
+|---|---|---|---|---|
+| Second account first | priority on, the other's off | −24.7% | +20.2% | both 100 |
+| Second account first | both on | −23.8% | +20.2% | the other's 200 from its start, own 200 from 0.8 s |
+| Second account first | unprotected | −22.7% | +20.1% | both 100 |
+| Own work first | priority on, the other's off | +34.4% | −91.3% | own 200 from 0.8 s, the other's 100 |
+| Own work first | both on | +34.2% | −91.0% | own 200; the other's 200 only after own work ended |
+
+Between CedeGrid accounts the first-comer rule decides. The later account's Performance work
+waits at admission and uses only the CPUs the first-comer leaves free, so in these shapes the
+two never shared a CPU. No raise applied while the other account's work ran without the choice,
+and unprotected never raised beside a protected first-comer. The first-comer kept its CPUs
+(+20%), and the later account ran its work after the first-comer's ended.
+
+| Requirement | Verdict |
+|---|---|
+| SC-009: above the even split by 10 points and above by hand, in 3 of 3 runs of F2c and own work first | pass, with the even split read as what plain Linux gives; two thirds only on one CPU |
+| SC-009: beside a second CedeGrid account without the choice, no raise and the even split | no raise: pass. The even split does not arise: the first-comer rule holds the later account at admission |
+| SC-006: above the even split by 10 points, never beside a protected first-comer, back within two monitor intervals | pass: 10–15 points, no raise in the three runs beside a first-comer, back to 100 within 0.3 s |
+
 ## Rules for validation runs
 
 - Report these statuses separately:

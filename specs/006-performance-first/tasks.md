@@ -115,8 +115,8 @@ this thread's.
   feature 006.
   - *Done in part (2026-11-18, `f13b429`, `05d5c04`):* F2c and own-first on CPU and GPU, fill,
     batch, VRAM, RAM (one plain run: its OOM also killed the account's desktop session, so the
-    other two were stopped) and CedeGrid against CedeGrid, with plain arms. Open: the
-    same-cgroup layout and the System mode raise (both need the user's sudo steps); the own-first
+    other two were stopped) and CedeGrid against CedeGrid, with plain arms. The System mode raise
+    ran with T077 on 2026-11-22. Open: the same-cgroup layout (needs the user's sudo steps); the own-first
     CPU gap (start and reaction latency) and the batch's total time (handoff between tasks).
 
 ## Phase 6b: Priority over plain users (US6, maintainer decisions of 2026-11-19)
@@ -148,9 +148,12 @@ this thread's.
   reason (`src/main.rs`, `src/explain.rs` with the 001 thread).
 - [ ] T076 [US6] Docs: `docs/system-mode.md`, `docs/guarantees.md` (with the 001 thread),
   `CHANGELOG.md`, both security review packages.
-- [ ] T077 [US6] SC-009 gate on the test host from installed packages: F2c and own-first on CPU
+- [x] T077 [US6] SC-009 gate on the test host from installed packages: F2c and own-first on CPU
   against a plain account, and against a second CedeGrid account with and without the option,
   with plain arms, three runs each; record in `docs/validation.md`.
+  - *Done 2026-11-22 (0.2.0~sys006.1, `d30b24a`):* with the SC-006 raise and a one-CPU shape.
+    Between CedeGrid accounts the first-comer rule decides, so the even split of SC-009's second
+    part does not arise.
 
 ## Phase 6c: Placement of held-back tasks (FR-007b, maintainer go of 2026-11-22)
 
