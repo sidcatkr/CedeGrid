@@ -178,6 +178,7 @@ fn spec(dir: &Path, class: AllocationClass, argv: Vec<String>) -> SupervisorSpec
         control_token: None,
         nofile_soft: None,
         launched_at_unix_ms: None,
+        cpu_placement: None,
     }
 }
 fn start(spec: &SupervisorSpec) -> (Owned, ChildStdin, mpsc::Receiver<serde_json::Value>) {

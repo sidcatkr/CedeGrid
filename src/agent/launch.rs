@@ -223,6 +223,7 @@ pub(super) async fn start_assignment(
     client: &NodeClient,
     arrival_unix_ms: u64,
     wakes: Wakes,
+    cpu_placement: Option<u32>,
 ) -> Result<ChildSlot> {
     validate_replay_launch(config, &assignment.request)?;
     ensure!(
@@ -375,6 +376,7 @@ pub(super) async fn start_assignment(
         control_token: new_control_token()?,
         nofile_soft: STARTING_DESCRIPTOR_LIMIT.get().copied(),
         launched_at_unix_ms: Some(super::reconcile::now_unix_ms()),
+        cpu_placement,
     };
     let path = output.join("supervisor-spec.json");
     client.write_json_new(&path, &spec)?;

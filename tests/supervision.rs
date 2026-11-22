@@ -255,6 +255,7 @@ impl LaunchBackend for Backend {
             oom_score_adj: None,
             nofile_soft: None,
             parent_death_signal: None,
+            cpu_placement: None,
         })
     }
     fn preparation_evidence(&self) -> Vec<ControlEvidence> {
@@ -331,6 +332,7 @@ fn options() -> SupervisorOptions {
         ram_noise_tolerance_mib: 256,
         ram_calm_window_ms: 1_500,
         nofile_soft: None,
+        cpu_placement: None,
     }
 }
 fn run(
@@ -951,6 +953,66 @@ fn explicit_cpu_affinity_is_verified_or_refused_before_execution() {
         assert!(!dir.path().join("marker").exists());
         assert_eq!(journal.last().phase, ExecutionPhase::Released);
     }
+}
+
+/// A placed task starts on its one CPU of the scope and is back on the whole scope after the
+/// release, with the placement in its evidence (006 FR-007b).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_placed_task_starts_on_its_cpu_and_goes_back_on_the_scope() {
+    let dir = TempDir::new().unwrap();
+    let mut request = request(dir.path());
+    let status = fs::read_to_string("/proc/self/status").unwrap();
+    let allowed = cedegrid::kernel::parse_cpu_list(
+        status
+            .lines()
+            .find_map(|l| l.strip_prefix("Cpus_allowed_list:"))
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
+    if allowed.len() < 2 {
+        eprintln!("skipped: needs two CPUs");
+        return;
+    }
+    let scope = allowed[..2].to_vec();
+    let python = std::env::var("CEDEGRID_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
+    request.argv = vec![
+        python,
+        "-c".into(),
+        "import os, time\n\
+         open('first', 'w').write(str(sorted(os.sched_getaffinity(0))))\n\
+         time.sleep(1.5)\n\
+         open('later', 'w').write(str(sorted(os.sched_getaffinity(0))))"
+            .into(),
+    ];
+    request.env.insert(
+        "CEDEGRID_CPU_AFFINITY".into(),
+        serde_json::to_string(&scope).unwrap(),
+    );
+    let options = SupervisorOptions {
+        cpu_placement: Some(scope[1]),
+        ..options()
+    };
+    let journal = Journal::new();
+    let outcome = run(&request, &options, &journal, &mut Backend::new()).unwrap();
+    assert_eq!(outcome.exit_code, Some(0));
+    assert_eq!(
+        fs::read_to_string(dir.path().join("first")).unwrap(),
+        format!("[{}]", scope[1])
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("later")).unwrap(),
+        format!("[{}, {}]", scope[0], scope[1])
+    );
+    assert!(
+        outcome
+            .record
+            .evidence
+            .iter()
+            .any(|e| e.control == "cpu.placement"
+                && e.effective.as_deref() == Some(scope[1].to_string().as_str()))
+    );
 }
 
 fn run_controlled(

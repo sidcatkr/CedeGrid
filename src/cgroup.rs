@@ -1238,6 +1238,7 @@ impl LaunchBackend for CgroupBackend {
                 oom_score_adj: None,
                 nofile_soft: None,
                 parent_death_signal: None,
+                cpu_placement: None,
             })
         }
         #[cfg(not(target_os = "linux"))]

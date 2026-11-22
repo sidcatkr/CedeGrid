@@ -1044,6 +1044,7 @@ fn run_supervisor(config: &Config, job: &Path) -> Result<()> {
         ram_noise_tolerance_mib: config.ram_cap_check().0,
         ram_calm_window_ms: config.ram_cap_check().1,
         nofile_soft: None,
+        cpu_placement: None,
     };
     let outcome = match supervision::supervise(
         &request,

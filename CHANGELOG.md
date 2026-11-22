@@ -87,6 +87,13 @@
   user on the CPU is below the weight, and ends it as it ends the unprotected raise. `doctor`
   and `observe` show whether it is chosen, permitted and in force. In System mode, an account
   whose unit runs work counts as CedeGrid even where its processes are hidden.
+- **Held-back tasks start where plain Linux has them.** In Performance and Aggressive, tasks
+  that waited for the scope's capacity and start because a user without CedeGrid began to
+  compete each start on the scope CPU with the fewest own tasks, and go back on the whole scope
+  0.5 s later. Started where the kernel puts them, those tasks got 1.5–3% less CPU than the same
+  work started by hand; placed this way they match it, and so does the other user. Only
+  single-process tasks on a node with a CPU scope are placed; launch evidence records
+  `cpu.placement`.
 - **Waiting for work.** A node with room waits at the coordinator for the next queued task
   (`await_work/1`), and the answer wakes the agent's loop, so new work is placed within half a
   monitor interval of its submission instead of at the next 2 s heartbeat.

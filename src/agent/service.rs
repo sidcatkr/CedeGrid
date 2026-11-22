@@ -309,6 +309,32 @@ pub(super) fn room_opened(
     (beside_plain && !was_beside_plain) || headroom_cpu >= last_headroom_cpu.saturating_add(500)
 }
 
+/// How long after a plain principal began to contend own CPU tasks held for capacity still
+/// start placed (006 FR-007b): they arrive in the heartbeat that room brings forward.
+pub(super) const PLACEMENT_WINDOW: Duration = Duration::from_secs(3);
+
+/// Whether this interval opens the window in which own tasks start placed: a plain principal
+/// began to contend while own CPU work left the scope no room, so tasks were waiting for it
+/// that plain Linux would already be running (006 FR-007b).
+pub(super) fn placement_window_opens(
+    was_beside_plain: bool,
+    beside_plain: bool,
+    last_headroom_cpu: u64,
+) -> bool {
+    beside_plain && !was_beside_plain && last_headroom_cpu == 0
+}
+
+/// The scope CPU a placed task starts on: the one with the fewest own tasks, the first in the
+/// scope's order on a tie (006 FR-007b).
+pub(super) fn pick_placement(scope: &[u32], own_on: impl Fn(u32) -> usize) -> Option<u32> {
+    scope
+        .iter()
+        .copied()
+        .enumerate()
+        .min_by_key(|(order, cpu)| (own_on(*cpu), *order))
+        .map(|(_, cpu)| cpu)
+}
+
 /// Whether lease renewals are asked for: only while the newest sample the loop acted on is no
 /// older than one lease, so work it no longer watches is not kept leased (FR-079).
 pub(super) fn renewals_asked(sample_age: Duration, lease: Duration) -> bool {
@@ -565,6 +591,10 @@ struct AgentLoop<'a> {
     heartbeat_prompt: bool,
     /// Last interval's CPU headroom and whether a plain user competed, for `room_opened`.
     last_room: (u64, bool),
+    /// Until when own CPU tasks start placed, and where those not yet running were placed
+    /// (006 FR-007b).
+    placement_until: Option<Instant>,
+    placed: BTreeMap<String, u32>,
     /// Whether admission was open at the last interval, for `admission_reopened`.
     last_open: bool,
     /// Shared with the wait for work, which brings the next heartbeat forward (006 SC-001).
@@ -607,6 +637,42 @@ struct AgentLoop<'a> {
 }
 
 impl AgentLoop<'_> {
+    /// Where a task starts while the placement window is open: the CPU of the node's scope with
+    /// the fewest own tasks, counting the leaders running now, by the CPU each last ran on, and
+    /// the tasks placed but not yet running. Only single-process tasks beside a plain principal,
+    /// on a node with a CPU scope (006 FR-007b).
+    fn placement(&self, assignment: &Assignment, decision: &crate::model::Decision) -> Option<u32> {
+        let until = self.placement_until?;
+        if Instant::now() > until
+            || !decision.cpu_beside_plain
+            || assignment.request.managed_child_limit > 0
+        {
+            return None;
+        }
+        let scope = self.agent.cpu_affinity.as_ref()?;
+        let running = self
+            .slots
+            .values()
+            .filter(|slot| !slot.exited)
+            .filter_map(|slot| {
+                let pid = slot.prepared.as_ref()?.identity.as_ref()?.pid;
+                crate::kernel::last_cpu(pid)
+            });
+        let pending = self.placed.iter().filter_map(|(id, cpu)| {
+            let started = self
+                .slots
+                .get(id)
+                .and_then(|slot| slot.prepared.as_ref())
+                .is_some_and(|record| record.identity.is_some());
+            (!started).then_some(*cpu)
+        });
+        let mut own: BTreeMap<u32, usize> = BTreeMap::new();
+        for cpu in running.chain(pending) {
+            *own.entry(cpu).or_default() += 1;
+        }
+        pick_placement(scope, |cpu| own.get(&cpu).copied().unwrap_or(0))
+    }
+
     /// Finished preparations become slots; refused launches get a durable refusal.
     /// Between intervals, takes the launches that finished preparing and asks for their
     /// authorization at once, so a task does not wait for the next interval to start (006
@@ -2047,6 +2113,17 @@ impl AgentLoop<'_> {
         if room_opened(self.last_room.1, room.1, self.last_room.0, room.0) {
             self.heartbeat_prompt = true;
         }
+        if placement_window_opens(self.last_room.1, room.1, self.last_room.0) {
+            self.placement_until = Some(Instant::now() + PLACEMENT_WINDOW);
+        }
+        if !room.1
+            || self
+                .placement_until
+                .is_some_and(|until| Instant::now() > until)
+        {
+            self.placement_until = None;
+            self.placed.clear();
+        }
         self.last_room = room;
         let open = decision.expansion_allowed || decision.cpu_ram_expansion_allowed;
         if admission_reopened(self.last_open, open) {
@@ -2546,6 +2623,10 @@ impl AgentLoop<'_> {
                         decision.admit_immediately_budget.as_ref(),
                         admits,
                     );
+                    let placement = self.placement(&assignment, decision);
+                    if let Some(cpu) = placement {
+                        self.placed.insert(id.clone(), cpu);
+                    }
                     let task_snapshot = snapshot.clone();
                     let task_executable = executable.to_path_buf();
                     let task_client = self.client.clone();
@@ -2574,6 +2655,7 @@ impl AgentLoop<'_> {
                                 &task_client,
                                 arrival,
                                 wakes,
+                                placement,
                             )
                             .await
                         });
@@ -2970,6 +3052,8 @@ pub async fn run(
         raise: RaiseSteer::default(),
         heartbeat_prompt: false,
         last_room: (0, false),
+        placement_until: None,
+        placed: BTreeMap::new(),
         last_open: true,
         work: std::sync::Arc::clone(&work),
         wakes: super::launch::Wakes::default(),

@@ -15,6 +15,10 @@ use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+/// How long a placed task runs on its one CPU before the supervisor puts it back on the whole
+/// scope (006 FR-007b). Measured by hand, 0.5 s matched plain Linux's placement on both sides.
+pub const PLACEMENT_RELEASE_MS: u64 = 500;
+
 #[derive(Debug, Clone)]
 pub struct SupervisorOptions {
     pub nice: i32,
@@ -34,6 +38,8 @@ pub struct SupervisorOptions {
     pub ram_calm_window_ms: u64,
     /// The soft descriptor limit the user's command gets back (FR-077).
     pub nofile_soft: Option<u64>,
+    /// The scope CPU the task starts on before it goes back on the whole scope (006 FR-007b).
+    pub cpu_placement: Option<u32>,
 }
 impl Default for SupervisorOptions {
     fn default() -> Self {
@@ -50,6 +56,7 @@ impl Default for SupervisorOptions {
             ram_noise_tolerance_mib: 256,
             ram_calm_window_ms: 1_500,
             nofile_soft: None,
+            cpu_placement: None,
         }
     }
 }

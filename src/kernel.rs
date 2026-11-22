@@ -775,6 +775,22 @@ pub fn cpu_pressure(roots: &ProbeRoots, own: Option<&Path>) -> CpuPressure {
 
 /// One `key value` count from a flat-keyed file such as `/proc/vmstat` or a cgroup's
 /// `memory.events`; a missing or malformed count is unknown.
+/// The CPU a process last ran on, from field 39 of its `/proc/<pid>/stat`; `None` when the
+/// process is gone or the line does not parse. Read-only.
+pub fn last_cpu(pid: u32) -> Option<u32> {
+    last_cpu_of(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
+}
+
+/// Field 39 of a `/proc/<pid>/stat` line: the 37th after the command's closing parenthesis.
+pub fn last_cpu_of(stat: &str) -> Option<u32> {
+    stat.rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(36)?
+        .parse()
+        .ok()
+}
+
 pub fn event_count(text: &str, key: &str) -> Option<u64> {
     text.lines().find_map(|line| {
         let (name, value) = line.split_once(' ')?;
@@ -2084,5 +2100,20 @@ mod cpu_alignment_tests {
             1500,
         );
         assert!(tracker.max_interval_ticks.is_none());
+    }
+}
+
+#[cfg(test)]
+mod last_cpu_tests {
+    use super::*;
+
+    /// Field 39 of a stat line is the CPU the process last ran on; a command name with spaces
+    /// and parentheses does not move it.
+    #[test]
+    fn the_last_cpu_is_field_39() {
+        let rest: Vec<String> = (3..=52).map(|field| field.to_string()).collect();
+        let line = format!("4242 (a (b) c) {}", rest.join(" "));
+        assert_eq!(last_cpu_of(&line), Some(39));
+        assert_eq!(last_cpu_of("4242 (short) S 1 2"), None);
     }
 }

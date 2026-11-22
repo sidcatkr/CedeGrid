@@ -113,6 +113,7 @@ fn owned_cuda_context_is_observed_then_released_after_drain() {
         ram_noise_tolerance_mib: 256,
         ram_calm_window_ms: 1_500,
         nofile_soft: None,
+        cpu_placement: None,
     };
     let mut control = GpuReadyDrain {
         marker,

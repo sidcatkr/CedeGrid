@@ -170,6 +170,10 @@ pub struct GateSetup {
     /// Opportunistic work, SIGCONT for Guaranteed work (FR-078). Linux only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_death_signal: Option<i32>,
+    /// One CPU of the scope the gate pins itself to before user execution; the supervisor puts
+    /// the task back on the whole scope `PLACEMENT_RELEASE_MS` after it starts (006 FR-007b).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_placement: Option<u32>,
 }
 
 pub trait ExecutionJournal {

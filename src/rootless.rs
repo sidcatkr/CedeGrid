@@ -41,6 +41,7 @@ impl LaunchBackend for RootlessBackend {
             oom_score_adj: None,
             nofile_soft: None,
             parent_death_signal: None,
+            cpu_placement: None,
         })
     }
     fn verify(&mut self, _identity: &ProcessIdentity) -> Result<Vec<ControlEvidence>> {

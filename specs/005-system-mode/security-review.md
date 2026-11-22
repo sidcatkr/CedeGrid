@@ -62,6 +62,15 @@ unit's own `jobs` cgroup, accepted only inside the user's own unit (`system_mode
 057 Part C's files also go in: the fork-gate module, `src/supervision/unix.rs` and
 `src/supervision/family.rs`.
 
+006 FR-007b adds one thread-ID call on the user side: 0.5 s after a placed task starts, the
+supervisor puts every thread of its unreaped leader back on the whole CPU scope
+(`OwnedChild::release_threads`, `ThreadIdentity` in `src/supervision/unix.rs`). The leader's pidfd
+shows it alive first; each thread is fixed by a thread pidfd, or by its start time under the
+leader's `/proc/<pid>/task` where the kernel has none, and the same check runs after the call. A
+failed check leaves the thread where it is and reports it. Only the supervisor's own child is
+reached, and the kernel refuses the call on other users' threads
+(`a_placed_task_starts_on_its_cpu_and_goes_back_on_the_scope`).
+
 ## Evidence to hand the review
 
 - The container suite (`tools/docker-validation/system-mode/`, module `container`): eighteen

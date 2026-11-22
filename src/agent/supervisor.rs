@@ -458,6 +458,7 @@ pub fn assignment_supervisor(spec_path: &Path) -> Result<()> {
         ram_noise_tolerance_mib: spec.config.ram_cap_check().0,
         ram_calm_window_ms: spec.config.ram_cap_check().1,
         nofile_soft: spec.nofile_soft,
+        cpu_placement: spec.cpu_placement,
     };
     let result = supervision::supervise_controlled(
         &spec.assignment.request,

@@ -27,7 +27,9 @@ arms through `tools/aggressive_gates.py`.
 
 - **I. External processes**: identification reads `/proc` command lines, parent chains and
   cgroups, and NVML process lists. Nothing is written or signalled. The nice raise acts only on
-  the run's verified processes, through the supervisor's existing pidfd-held handles. Pass.
+  the run's verified processes, through the supervisor's existing pidfd-held handles. FR-007b's
+  release is a thread-ID call on threads of the unreaped verified leader only, under the rule
+  for such calls (thread pidfd or start time, checked before and after). Pass.
 - **II. No harm** (9.0.0): FR-007 to FR-013 implement Principals, Arrival order, Admission and
   Admit immediately as amended. The floors, OOM order and the first-come GPU floor are
   unchanged. Unprotected is the priority exception, with real-time classes excluded. Pass, with
@@ -91,6 +93,24 @@ arms through `tools/aggressive_gates.py`.
   `admit_immediately_budget` in the decision, the node report and the coordinator's placement).
 - New reason codes: `admitted_as_plain`, `held_for_first_comer`, and
   `admit_immediately_ignored_for_protected_first_comer`.
+
+### Placement of held-back tasks (FR-007b), in the agent and the supervisor
+
+- The agent opens a 3 s window when an interval finds a plain principal newly contending while
+  the previous interval left no CPU headroom. Within it, a single-process task on a node with a
+  CPU scope starts placed: on the scope CPU with the fewest own tasks, counting running leaders
+  by the CPU each last ran on (`/proc/<pid>/stat` field 39, read-only) and tasks placed but not
+  yet running. The window closes when the plain principal stops contending.
+- The supervisor spec and the gate setup carry the CPU; the gate pins itself to it after the
+  scope affinity and before exec, and the supervisor verifies the leader's affinity is that CPU
+  and records `cpu.placement`. Mediated children start on the whole scope.
+- 0.5 s after exec the supervisor puts every thread of the unreaped leader back on the scope:
+  the leader's pidfd shows it alive; each thread is fixed by a thread pidfd (`PIDFD_THREAD`,
+  Linux 6.9 and later) or else its `/proc/<pid>/task/<tid>` start time, and the same check runs
+  after the call. A thread that fails it is reported and not touched again.
+- Evidence: the harness proof of 2026-11-22 (`docs/validation.md`): pinned for good, own work took
+  2% more and the plain principal got 7.7% less than beside plain Linux; placed and released,
+  both matched plain Linux within 0.4%.
 
 ### Options (FR-012 to FR-019)
 

@@ -103,6 +103,7 @@ Path('leader-exit-time').write_text(str(time.clock_gettime_ns(time.CLOCK_MONOTON
         ram_noise_tolerance_mib: 256,
         ram_calm_window_ms: 1_500,
         nofile_soft: None,
+        cpu_placement: None,
     };
     let start = monotonic_now();
     let outcome = supervision::supervise(

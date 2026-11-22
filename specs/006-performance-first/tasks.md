@@ -152,6 +152,19 @@ this thread's.
   against a plain account, and against a second CedeGrid account with and without the option,
   with plain arms, three runs each; record in `docs/validation.md`.
 
+## Phase 6c: Placement of held-back tasks (FR-007b, maintainer go of 2026-11-22)
+
+- [x] T078 Tests first: the window rule and the CPU choice (`src/agent.rs`), the last-CPU read
+  (`src/kernel.rs`), and on Linux a supervised task that starts on its CPU and is back on the
+  whole scope after the release, with `cpu.placement` evidence (`tests/supervision.rs`).
+- [x] T079 The agent's window, choice and bookkeeping (`src/agent/service.rs`), the spec field
+  (`src/agent.rs`, `src/agent/launch.rs`, `src/agent/supervisor.rs`).
+- [x] T080 The gate's placement and the supervisor's verification and release
+  (`src/execution_model.rs`, `src/supervision.rs`, `src/supervision/unix.rs`), mediated children
+  on the whole scope.
+- [ ] T081 Own work first and F2c gates on the test host, ten rounds against plain arms, and the
+  batch, recorded in `docs/validation.md`; `CHANGELOG.md` and the security review packages.
+
 ## Phase 7: Docs and checks
 
 - [ ] T060 Update `docs/guarantees.md` (with T023), the 004 and 005 docs and specs for the

@@ -53,6 +53,7 @@ fn options() -> SupervisorOptions {
         ram_noise_tolerance_mib: 256,
         ram_calm_window_ms: 1_500,
         nofile_soft: None,
+        cpu_placement: None,
         nice: 10,
     }
 }

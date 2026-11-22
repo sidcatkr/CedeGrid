@@ -25,6 +25,82 @@ struct OwnedChild {
     reaped: bool,
     handle_detail: String,
 }
+
+/// What a placement release did: threads put back on the scope, and those whose identity could
+/// not be confirmed around the call (006 FR-007b).
+#[cfg(target_os = "linux")]
+#[derive(Debug, Default)]
+struct ThreadRelease {
+    done: usize,
+    unverified: Vec<u32>,
+}
+
+/// Signal zero through a pidfd: whether the process or thread it holds is alive.
+#[cfg(target_os = "linux")]
+fn pidfd_alive(fd: i32) -> bool {
+    // SAFETY: a probe through an owned descriptor; signal zero sends nothing.
+    unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            fd,
+            0,
+            std::ptr::null::<libc::siginfo_t>(),
+            0u32,
+        ) == 0
+    }
+}
+
+/// One thread of an owned leader, its identity fixed before a call that takes only its thread
+/// ID: a thread pidfd where the kernel has them (Linux 6.9 and later), else its start time under
+/// the leader's `/proc/<pid>/task`.
+#[cfg(target_os = "linux")]
+enum ThreadIdentity {
+    Pidfd(OwnedFd),
+    Start(u64),
+}
+#[cfg(target_os = "linux")]
+impl ThreadIdentity {
+    /// The identity of thread `tid` of leader `pid`, or `None` when it is gone or is not this
+    /// leader's.
+    fn fix(pid: u32, tid: u32) -> Option<Self> {
+        // PIDFD_THREAD is O_EXCL; a kernel before 6.9 refuses it, and the start time stands in.
+        // SAFETY: opens a new descriptor or fails; no other state changes.
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, tid, libc::O_EXCL as u32) };
+        let identity = if fd >= 0 {
+            // SAFETY: a successful syscall returns a newly owned descriptor.
+            Self::Pidfd(unsafe { OwnedFd::from_raw_fd(fd as i32) })
+        } else {
+            Self::Start(thread_start(pid, tid)?)
+        };
+        // Still listed under this leader once the handle or the start time is held.
+        let listed = thread_start(pid, tid)?;
+        let fixed = match &identity {
+            Self::Pidfd(fd) => pidfd_alive(fd.as_raw_fd()),
+            Self::Start(start) => *start == listed,
+        };
+        fixed.then_some(identity)
+    }
+    /// Whether the same thread is still alive under the leader after the call.
+    fn still(&self, pid: u32, tid: u32) -> bool {
+        match self {
+            Self::Pidfd(fd) => pidfd_alive(fd.as_raw_fd()) && thread_start(pid, tid).is_some(),
+            Self::Start(start) => thread_start(pid, tid) == Some(*start),
+        }
+    }
+}
+
+/// A thread's start time in clock ticks, from its entry under the leader's `/proc/<pid>/task`.
+#[cfg(target_os = "linux")]
+fn thread_start(pid: u32, tid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/task/{tid}/stat")).ok()?;
+    stat.rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()
+}
+
 impl OwnedChild {
     fn new(child: Child) -> Self {
         Self {
@@ -86,6 +162,55 @@ impl OwnedChild {
             }
         }
         Ok(())
+    }
+    /// Puts every thread of this unreaped leader on `cpus`, under the constitution's rule for
+    /// calls that take only a thread ID (006 FR-007b). The leader is alive before the calls
+    /// (its pidfd, or unreaped where there is none). Each thread's identity is fixed by a
+    /// thread pidfd where the kernel has them, else by its entry under this leader's
+    /// `/proc/<pid>/task` with its start time, and checked the same way after the call.
+    #[cfg(target_os = "linux")]
+    fn release_threads(&mut self, cpus: &[u32]) -> Result<ThreadRelease> {
+        ensure!(!self.reaped, "refusing to touch a reaped leader");
+        if let Some(fd) = self.pidfd.as_ref() {
+            ensure!(
+                pidfd_alive(fd.as_raw_fd()),
+                "the leader ended before its placement release"
+            );
+        }
+        let pid = self.child.id();
+        let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+        for id in cpus {
+            ensure!(
+                (*id as usize) < libc::CPU_SETSIZE as usize,
+                "CPU affinity exceeds supported native mask"
+            );
+            // SAFETY: the index is within the set's size.
+            unsafe { libc::CPU_SET(*id as usize, &mut set) };
+        }
+        ensure!(!cpus.is_empty(), "empty scope for the placement release");
+        let mut release = ThreadRelease::default();
+        for entry in std::fs::read_dir(format!("/proc/{pid}/task"))? {
+            let Some(tid) = entry?
+                .file_name()
+                .to_str()
+                .and_then(|n| n.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            let Some(thread) = ThreadIdentity::fix(pid, tid) else {
+                continue;
+            };
+            // SAFETY: a valid set for a thread of this leader whose identity was just fixed.
+            let rc = unsafe {
+                libc::sched_setaffinity(tid as libc::pid_t, std::mem::size_of_val(&set), &set)
+            };
+            if rc == 0 && thread.still(pid, tid) {
+                release.done += 1;
+            } else {
+                release.unverified.push(tid);
+            }
+        }
+        Ok(release)
     }
     fn signal(&mut self, signal: i32) -> Result<()> {
         ensure!(!self.reaped, "refusing to signal a reaped child");
@@ -1209,6 +1334,40 @@ impl Outstanding {
     }
 }
 
+/// Puts a placed leader's threads back on the whole scope and reports what it did (006
+/// FR-007b). A thread whose check fails stays where it is; the run goes on either way.
+fn release_placement(owned: &mut OwnedChild, request: &LaunchRequest, assignment_id: &str) {
+    #[cfg(target_os = "linux")]
+    {
+        let scope = match request.env.get("CEDEGRID_CPU_AFFINITY") {
+            Some(cpus) => serde_json::from_str::<Vec<u32>>(cpus).map_err(anyhow::Error::from),
+            None => read_cpu_affinity(0),
+        };
+        match scope.and_then(|cpus| owned.release_threads(&cpus)) {
+            Ok(released) if released.unverified.is_empty() => report(
+                "placement_released",
+                assignment_id,
+                format!("threads back on the whole scope: {}", released.done),
+            ),
+            Ok(released) => report(
+                "placement_release_unverified",
+                assignment_id,
+                format!(
+                    "threads back on the whole scope: {}; left where they are, as their identity could not be confirmed around the call: {:?}",
+                    released.done, released.unverified
+                ),
+            ),
+            Err(error) => report(
+                "placement_release_failed",
+                assignment_id,
+                format!("{error:#}"),
+            ),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (owned, request, assignment_id);
+}
+
 /// Best-effort operator diagnostic; a closed stderr never unwinds supervision.
 fn report(event: &str, assignment_id: &str, detail: String) {
     let _ = writeln!(
@@ -1344,6 +1503,7 @@ pub(super) fn supervise(
             setup.oom_score_adj = Some(OOM_PREFERRED);
         }
         setup.nofile_soft = options.nofile_soft;
+        setup.cpu_placement = options.cpu_placement;
         // Without its supervisor an Opportunistic run can be neither yielded nor drained,
         // and a replacement would start beside it; Guaranteed work goes on (FR-078). The
         // kernel sends it when the thread that spawned the gate exits, not the process: the
@@ -1355,7 +1515,12 @@ pub(super) fn supervise(
                 AllocationClass::Guaranteed => libc::SIGCONT,
             });
         }
-        children = ChildServer::new(request, record.generation, setup.clone(), journal)?;
+        // Mediated children start on the whole scope: only the leader is placed (006 FR-007b).
+        let child_setup = GateSetup {
+            cpu_placement: None,
+            ..setup.clone()
+        };
+        children = ChildServer::new(request, record.generation, child_setup, journal)?;
         if let Some(server) = children.as_mut() {
             server.leader_directory = Some(drain.path.clone());
         }
@@ -1417,11 +1582,30 @@ pub(super) fn supervise(
             requested.sort_unstable();
             #[cfg(target_os = "linux")]
             {
+                // A placed task starts on its one CPU (006 FR-007b).
+                let expected = match gate.setup.cpu_placement {
+                    Some(cpu) => vec![cpu],
+                    None => requested.clone(),
+                };
                 ensure!(
-                    read_cpu_affinity(actual.pid)? == requested,
+                    read_cpu_affinity(actual.pid)? == expected,
                     "owned gate CPU affinity verification failed"
                 );
                 record.evidence.push(ControlEvidence{control:"cpu.affinity".into(),available:Some(true),permitted:Some(true),configured:true,applied:true,fallback:false,scope:format!("direct_child:{}",actual.pid),requested:Some(cpus.clone()),effective:Some(serde_json::to_string(&requested)?),detail:"Exact inherited/gate CPU-ID placement within permitted CPUs; not a CPU bandwidth guarantee".into()});
+                if let Some(cpu) = gate.setup.cpu_placement {
+                    record.evidence.push(ControlEvidence {
+                        control: "cpu.placement".into(),
+                        available: Some(true),
+                        permitted: Some(true),
+                        configured: true,
+                        applied: true,
+                        fallback: false,
+                        scope: format!("direct_child:{}", actual.pid),
+                        requested: Some(cpu.to_string()),
+                        effective: Some(cpu.to_string()),
+                        detail: "Starts on one CPU of the scope and goes back on the whole scope shortly after (006 FR-007b)".into(),
+                    });
+                }
             }
             #[cfg(not(target_os = "linux"))]
             bail!("required CPU affinity unavailable");
@@ -1584,8 +1768,18 @@ pub(super) fn supervise(
         // every member ended (FR-087).
         let (mut leftovers_termed, mut members_killed) = (None::<Instant>, None::<Instant>);
         let mut ended = std::collections::BTreeSet::new();
+        // A placed task goes back on the whole scope once it has run on its CPU (006 FR-007b).
+        let mut placement_due = options
+            .cpu_placement
+            .map(|_| start + Duration::from_millis(crate::supervision::PLACEMENT_RELEASE_MS));
         loop {
             let elapsed = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
+            if placement_due.is_some_and(|due| Instant::now() >= due) {
+                placement_due = None;
+                if leader_status.is_none() {
+                    release_placement(owned, request, &record.assignment_id);
+                }
+            }
             let waited = if leader_status.is_none() {
                 match owned.try_wait() {
                     Ok(status) => status,
@@ -2133,6 +2327,7 @@ pub(super) fn supervise(
                 }),
                 kill_at.map(|at| at + Duration::from_millis(options.release_confirm_timeout_ms)),
                 outstanding.retry_at(),
+                placement_due,
             ];
             let until = deadlines
                 .into_iter()
@@ -2426,6 +2621,11 @@ pub(super) fn worker_gate() -> Result<()> {
     }
     if let Some(cpus) = gate.request.env.get("CEDEGRID_CPU_AFFINITY") {
         apply_current_cpu_affinity(&serde_json::from_str::<Vec<u32>>(cpus)?)?;
+    }
+    // Started for room a plain principal opened: on one CPU of the scope until the supervisor
+    // puts it back on the whole scope (006 FR-007b).
+    if let Some(cpu) = gate.setup.cpu_placement {
+        apply_current_cpu_affinity(&[cpu])?;
     }
     let id = identity(
         std::process::id(),

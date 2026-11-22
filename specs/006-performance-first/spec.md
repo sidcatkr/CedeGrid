@@ -46,6 +46,16 @@ Arrival order, Admission, Admit immediately and Unprotected rules, and Principle
   option, renamed unprotected; its admission effect is now Performance's default beside plain
   users and admit immediately's beside CedeGrid users.
 
+### Session 2026-11-22
+
+- Q: Own work first loses 2–3% of its CPU after a plain principal arrives, because the tasks
+  held back for capacity start then and the kernel puts them off that principal's CPUs. How is
+  that recovered without giving up the batch's mean completion? → A: those tasks start evenly
+  placed and are released to the kernel 0.5 s later (FR-007b). By hand, the same placement
+  matched plain Linux on both sides: own CPU after the arrival within 0.4%, the plain
+  principal's rate within 0.4%. Pinned for good, own work took 2% more and the plain principal
+  got 7.7% less than beside plain Linux, which only priority over plain users may do.
+
 ### Session 2026-11-19
 
 - Q: Is matching plain Linux enough for Performance in the default mode? → A: No. The goal is a
@@ -283,6 +293,14 @@ and for own work, its arrival and the options in force.
   gives more threads more CPU (maintainer, 2026-11-18). Own work started this way MUST NOT be
   stepped when that principal leaves; new CPU work then waits until own CPU requests fit the
   capacity again. On an idle scope and beside first-comers the CPU-sized limit stays.
+- **FR-007b**: Own CPU tasks that waited for the scope's capacity and start because a plain
+  principal began to contend (FR-007a) MUST start where plain Linux would already have had them:
+  each pinned to the scope CPU holding the fewest own tasks, then put back on the whole scope
+  0.5 s after it starts, every thread of the member and of its managed children, under the
+  constitution's rule for calls that take only a thread ID. Tasks submitted while a plain
+  principal already contends start on the whole scope as today: placing those evenly takes more
+  CPU from that principal than plain Linux does. A thread whose release cannot be verified is
+  reported and not touched again.
 - **FR-008**: Beside a first-comer, new own work MUST be held as 001 holds it today, counting only
   first-comers: the kept equal share with the mode's margin on CPU, and the time-slice rule on
   GPU compute. New own work MUST NOT start into a first-comer's activity of unknown amount.

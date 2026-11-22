@@ -103,6 +103,9 @@ pub struct SupervisorSpec {
     /// When the agent launched it, so a re-adopted run keeps its start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launched_at_unix_ms: Option<u64>,
+    /// The scope CPU the task starts on, then leaves for the whole scope (006 FR-007b).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_placement: Option<u32>,
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
@@ -2910,6 +2913,44 @@ mod drain_tests {
 mod pacing_tests {
     use super::service::{lease_order, lease_turn, needs_pin};
     use std::time::{Duration, Instant};
+
+    /// The window opens only when a plain principal begins to contend while own CPU work left
+    /// the scope no room: then tasks were waiting that plain Linux would already run (FR-007b).
+    #[test]
+    fn placement_opens_only_for_room_a_plain_arrival_made_on_a_full_scope() {
+        use super::service::placement_window_opens;
+        assert!(placement_window_opens(false, true, 0));
+        // Room was left: nothing waited for capacity.
+        assert!(!placement_window_opens(false, true, 1_000));
+        // Already beside the plain principal, or it left.
+        assert!(!placement_window_opens(true, true, 0));
+        assert!(!placement_window_opens(true, false, 0));
+    }
+
+    /// A placed task starts on the scope CPU with the fewest own tasks, the first on a tie.
+    #[test]
+    fn a_placed_task_goes_where_own_tasks_are_fewest() {
+        use super::service::pick_placement;
+        let own = |counts: &'static [(u32, usize)]| {
+            move |cpu: u32| {
+                counts
+                    .iter()
+                    .find(|(c, _)| *c == cpu)
+                    .map_or(0, |(_, n)| *n)
+            }
+        };
+        let scope = [0, 2, 4, 6];
+        assert_eq!(
+            pick_placement(&scope, own(&[(0, 1), (2, 1), (4, 3), (6, 3)])),
+            Some(0)
+        );
+        assert_eq!(
+            pick_placement(&scope, own(&[(0, 2), (2, 1), (4, 3), (6, 3)])),
+            Some(2)
+        );
+        assert_eq!(pick_placement(&scope, own(&[])), Some(0));
+        assert_eq!(pick_placement(&[], own(&[])), None);
+    }
 
     /// Lease requests go out longest waiting first, whatever kind they are.
     #[test]
