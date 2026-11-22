@@ -61,6 +61,22 @@ impl NodeClient {
         // After reservation, any write/sync uncertainty retains the full charge.
         write_json_new_reserved(path, value, Some(&charge))
     }
+    /// Writes new files of encoded JSON lines after reserving all their bytes at once: one
+    /// ledger open and one commit for a launch's files instead of one of each per file (006
+    /// SC-001). As with one file, the reservation comes first and is kept on any failure.
+    pub(super) fn write_lines_new(&self, files: &[(&Path, Vec<u8>)]) -> Result<()> {
+        let first = files.first().context("no files to write")?.0;
+        let charge = self.download_charge(first)?;
+        let entries = files
+            .iter()
+            .map(|(path, bytes)| Ok((*path, u64::try_from(bytes.len())?)))
+            .collect::<Result<Vec<_>>>()?;
+        charge.reserve_paths(&entries)?;
+        for (path, bytes) in files {
+            write_new_synced(path, bytes)?;
+        }
+        Ok(())
+    }
     pub(super) async fn request(&self, request: &Request) -> Result<Response> {
         tokio::time::timeout(Duration::from_secs(15), self.request_paced(request))
             .await

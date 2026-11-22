@@ -1688,6 +1688,11 @@ pub(super) fn supervise(
             "Gate blocked: identity, required controls and backend membership verified".into();
         journal.transition(&record)?;
         control.prepared(&record)?;
+        // The publisher opened while the gate was prepared and authorized; it must be open
+        // before anything runs (006 SC-001).
+        if let Some(server) = children.as_mut() {
+            server.publisher_ready()?;
+        }
         ensure!(
             Instant::now() < deadline,
             "launch preparation deadline exceeded before authorization"

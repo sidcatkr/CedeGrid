@@ -339,11 +339,20 @@ fn write_json_new_reserved(
     value: &impl Serialize,
     charge: Option<&crate::publication::CaptureCharge>,
 ) -> Result<()> {
-    let mut bytes = serde_json::to_vec(value)?;
-    bytes.push(b'\n');
+    let bytes = json_line(value)?;
     if let Some(charge) = charge {
         charge.reserve(bytes.len().try_into()?)?;
     }
+    write_new_synced(path, &bytes)
+}
+/// A value as one JSON line.
+fn json_line(value: &impl Serialize) -> Result<Vec<u8>> {
+    let mut bytes = serde_json::to_vec(value)?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+/// Creates `path` with `bytes`, mode 0600, and syncs it and its directory.
+fn write_new_synced(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut opts = OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
@@ -352,7 +361,7 @@ fn write_json_new_reserved(
         opts.mode(0o600);
     }
     let mut file = opts.open(path)?;
-    file.write_all(&bytes)?;
+    file.write_all(bytes)?;
     file.sync_all()?;
     File::open(path.parent().context("missing parent")?)?.sync_all()?;
     Ok(())

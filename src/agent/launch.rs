@@ -302,11 +302,11 @@ pub(super) async fn start_assignment(
         .transpose()?
         .unwrap_or(serde_json::json!({}));
     let context = serde_json::json!({"schema_version":2,"namespace_id":client.namespace_guard.identity().namespace_id,"session_id":client.namespace_guard.identity().session_id.as_ref().unwrap_or(&client.namespace_guard.identity().namespace_id),"task_id":assignment.request.task_id,"assignment_id":assignment.request.assignment_id,"generation":assignment.generation,"output_dir":workspace.join("output"),"metadata":metadata,"resume":resume,"inputs":inputs,"max_spool_bytes":agent.max_spool_bytes,"capabilities":["resource_targets"]});
-    client.write_json_new(&workspace.join("context.json"), &context)?;
-    crate::supervision::launch_trace("context_written", &assignment.request.assignment_id);
+    let context_path = workspace.join("context.json");
+    let context = json_line(&context)?;
     assignment.request.env.insert(
         "CEDEGRID_CONTEXT".into(),
-        workspace.join("context.json").display().to_string(),
+        context_path.display().to_string(),
     );
     assignment.request.env.insert(
         "CEDEGRID_OUTPUT_DIR".into(),
@@ -383,7 +383,7 @@ pub(super) async fn start_assignment(
         cpu_placement,
     };
     let path = output.join("supervisor-spec.json");
-    client.write_json_new(&path, &spec)?;
+    client.write_lines_new(&[(&context_path, context), (&path, json_line(&spec)?)])?;
     // Other accounts' agents read the task's modes and its run's arrival from this argument,
     // read-only (006 FR-001); the hidden dispatch reads only the spec path before it.
     let marker = work_marker(config, &assignment.request, arrival_unix_ms);

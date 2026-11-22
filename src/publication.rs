@@ -42,9 +42,19 @@ struct Work {
 pub struct PublisherService {
     sender: Option<mpsc::SyncSender<Work>>,
     worker: Option<thread::JoinHandle<()>>,
+    /// The worker's answer to opening the publisher, until `wait_ready` takes it.
+    ready: Option<mpsc::Receiver<std::result::Result<(), String>>>,
 }
 impl PublisherService {
     pub fn new(settings: NativePublisherSettings, guard: NamespaceGuard) -> Result<Self> {
+        let mut service = Self::start(settings, guard)?;
+        service.wait_ready()?;
+        Ok(service)
+    }
+    /// Starts the worker, which opens the publisher on its own thread; `wait_ready` waits for
+    /// it. A supervisor starts it before the gate and waits before authorization, so the open
+    /// overlaps the gate's preparation (006 SC-001).
+    pub fn start(settings: NativePublisherSettings, guard: NamespaceGuard) -> Result<Self> {
         let (sender, receiver) = mpsc::sync_channel::<Work>(16);
         let (started, ready) = mpsc::channel();
         let worker = thread::Builder::new()
@@ -77,19 +87,30 @@ impl PublisherService {
                     let _ = work.reply.send(response);
                 }
             })?;
+        Ok(Self {
+            sender: Some(sender),
+            worker: Some(worker),
+            ready: Some(ready),
+        })
+    }
+    /// Waits for the publisher to open; an open that failed or took over 15 s fails it.
+    pub fn wait_ready(&mut self) -> Result<()> {
+        let Some(ready) = self.ready.take() else {
+            return Ok(());
+        };
         match ready.recv_timeout(std::time::Duration::from_secs(15)) {
-            Ok(Ok(())) => Ok(Self {
-                sender: Some(sender),
-                worker: Some(worker),
-            }),
+            Ok(Ok(())) => Ok(()),
             other => {
-                drop(sender);
-                let _ = worker.join();
+                self.sender.take();
+                if let Some(worker) = self.worker.take() {
+                    let _ = worker.join();
+                }
                 bail!("native publication initialization failed: {other:?}")
             }
         }
     }
     pub fn submit(&self, value: Value) -> Result<mpsc::Receiver<Value>> {
+        ensure!(self.ready.is_none(), "publication server not ready");
         let (reply, receiver) = mpsc::channel();
         self.sender
             .as_ref()
@@ -929,6 +950,32 @@ impl CaptureCharge {
         )?;
         Ok(())
     }
+    /// Reserves every entry's bytes in one transaction, against the node-wide quota as
+    /// `reserve` does, so a launch's files cost one ledger commit (006 SC-001).
+    pub fn reserve_paths(&self, entries: &[(&Path, u64)]) -> Result<()> {
+        let tx =
+            Transaction::new_unchecked(&self.store.connection, TransactionBehavior::Immediate)?;
+        let total: i64 = tx.query_row(
+            "SELECT COALESCE(SUM(bytes),0) FROM local_spool_entries",
+            [],
+            |r| r.get(0),
+        )?;
+        let wanted = entries
+            .iter()
+            .try_fold(0u64, |sum, (_, bytes)| sum.checked_add(*bytes))
+            .context("reserved byte count overflow")?;
+        ensure!(
+            (total as u64)
+                .checked_add(wanted)
+                .is_some_and(|n| n <= self.quota),
+            "ERR_CEDEGRID_SPOOL_QUOTA: output capture exceeds node-wide quota"
+        );
+        for (path, bytes) in entries {
+            tx.execute("INSERT INTO local_spool_entries(path,bytes,assignment_id) VALUES (?1,?2,?3) ON CONFLICT(path) DO UPDATE SET bytes=bytes+excluded.bytes",params![path.to_str().context("non-UTF8 capture path")?,db(*bytes)?,self.assignment])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
     pub fn reserve(&self, bytes: u64) -> Result<()> {
         let tx =
             Transaction::new_unchecked(&self.store.connection, TransactionBehavior::Immediate)?;
@@ -1000,6 +1047,64 @@ mod tests {
         assert!(entry_metadata(&root.join("gone/file")).unwrap().is_none());
         collect_files(&root, &mut files, false).unwrap();
         assert_eq!(files, vec![(root.join("kept/file"), 10)]);
+    }
+    /// A launch's files are reserved together: within the quota both are recorded in one
+    /// commit, and over it neither is (006 SC-001).
+    #[test]
+    fn reserve_paths_records_every_file_or_none() {
+        let temp = crate::namespace::TestStateDir(
+            tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap(),
+        );
+        let root = temp.path().join("state");
+        let store = StateStore::open(&root).unwrap();
+        let guard = store.namespace_guard();
+        let context = root.join("attempts/a/context.json");
+        let spec = root.join("attempts/a/supervisor-spec.json");
+        fs::create_dir_all(context.parent().unwrap()).unwrap();
+        let mut baseline = Vec::new();
+        collect_files(&root, &mut baseline, true).unwrap();
+        collect_files(
+            crate::namespace::Namespace::new(&root)
+                .unwrap()
+                .control_dir(),
+            &mut baseline,
+            false,
+        )
+        .unwrap();
+        let baseline_bytes: u64 = baseline.iter().map(|(_, bytes)| *bytes).sum();
+        let recorded = |path: &Path| -> Option<i64> {
+            store
+                .connection
+                .query_row(
+                    "SELECT bytes FROM local_spool_entries WHERE path=?1",
+                    [path.to_str().unwrap()],
+                    |row| row.get(0),
+                )
+                .ok()
+        };
+        let tight = CaptureCharge::for_download(
+            &root,
+            StorageProfile::WalFull,
+            guard.clone(),
+            &context,
+            baseline_bytes + 100,
+        )
+        .unwrap();
+        let error = tight
+            .reserve_paths(&[(&context, 60), (&spec, 60)])
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("SPOOL_QUOTA"));
+        assert_eq!((recorded(&context), recorded(&spec)), (None, None));
+        let room = CaptureCharge::for_download(
+            &root,
+            StorageProfile::WalFull,
+            guard,
+            &context,
+            baseline_bytes + 200,
+        )
+        .unwrap();
+        room.reserve_paths(&[(&context, 60), (&spec, 70)]).unwrap();
+        assert_eq!((recorded(&context), recorded(&spec)), (Some(60), Some(70)));
     }
     #[test]
     fn first_input_reservation_counts_retained_quarantine_without_a_publisher() {

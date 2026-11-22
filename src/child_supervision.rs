@@ -73,7 +73,7 @@ impl ChildServer {
         let session_id = guard.as_ref().and_then(|g| g.identity().session_id.clone()).unwrap_or_else(|| namespace_id.clone());
         let publisher = parent.env.get("CEDEGRID_PUBLICATION_SPEC").map(|raw| -> Result<_> {
             let settings = serde_json::from_str(raw)?;
-            crate::publication::PublisherService::new(settings, guard.clone().context("publication requires a protected native namespace")?)
+            crate::publication::PublisherService::start(settings, guard.clone().context("publication requires a protected native namespace")?)
         }).transpose()?;
         let directory = Path::new("/tmp").canonicalize()?.join(format!(
             "rmc-{}",
@@ -106,6 +106,14 @@ impl ChildServer {
             records_since: None,
             records_reported: false,
         }))
+    }
+    /// Waits for the publisher started with the server; user code never runs before it is open
+    /// (006 SC-001).
+    fn publisher_ready(&mut self) -> Result<()> {
+        match self.publisher.as_mut() {
+            Some(publisher) => publisher.wait_ready(),
+            None => Ok(()),
+        }
     }
     fn expose(&self, request: &mut LaunchRequest) {
         request.env.remove("CEDEGRID_PUBLICATION_SPEC");
