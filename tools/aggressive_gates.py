@@ -623,6 +623,7 @@ def main():
         # Own work is submitted at the start: after the second account's load in f2c and gpu,
         # before it in the first shapes, or on an idle scope.
         submitted = time.time()
+        submit_returned = []
         if cluster:
             extra = {}
             if a.arm == 'unprotected':
@@ -640,6 +641,7 @@ def main():
                                     replay_safe=True, max_attempts=1, **extra)
                 cluster.client.submit(task_id, cluster.run_id, [task])
                 cluster.jobs.append(task_id)
+                submit_returned.append(time.time())
         elif a.arm == 'plain':
             # The baseline: the same work started by hand where CedeGrid would run it, from a
             # process already on the scope. Its own session, so cleanup reaches every task.
@@ -723,8 +725,8 @@ def main():
             report['warnings'] = log.count('this run is UNPROTECTED')
             report['cautions'] = log.count('"event":"admit_immediately"')
             report['refusals'] = log.count('unprotected_refused')
-        report.update(submitted_unix=submitted, start_unix=start, end_unix=end, epoch_unix=epoch,
-                      status='completed')
+        report.update(submitted_unix=submitted, submit_returned_unix=submit_returned,
+                      start_unix=start, end_unix=end, epoch_unix=epoch, status='completed')
     except BaseException as error:
         report['status'] = 'failed'
         report['error'] = repr(error)[:2000]

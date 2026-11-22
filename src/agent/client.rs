@@ -377,6 +377,7 @@ where
                 if seen.is_some() && !unchanged {
                     watch.arrived.store(true, Ordering::SeqCst);
                     watch.arrival.notify_one();
+                    crate::supervision::launch_trace("work_arrived", "-");
                 }
                 seen = Some(generation);
                 // An unchanged answer that came at once was not held: ask again later.

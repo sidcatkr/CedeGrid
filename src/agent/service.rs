@@ -1581,6 +1581,7 @@ impl AgentLoop<'_> {
             self.collector.next_cpu_sample_at(),
         ))
         .await;
+        crate::supervision::launch_trace("sample_ready", "-");
         let mut mark = LoopCost::thread_ns();
         let descendants: Vec<_> = self
             .slots
@@ -1593,6 +1594,7 @@ impl AgentLoop<'_> {
             &descendants,
         )?;
         self.sampled_at = Instant::now();
+        crate::supervision::launch_trace("sampled", "-");
         mark = self.cost.charge("sample", mark);
         // Parts of `sample`, so CedeGrid's own cost shows where it goes (SC-014).
         for (part, ns) in self.collector.collector.last_sample_cost() {
@@ -2354,6 +2356,7 @@ impl AgentLoop<'_> {
                 "allocations": report.allocations.len(),
             })
         });
+        crate::supervision::launch_trace("heartbeat_sent", "-");
         match bounded(
             self.rpc_budget,
             self.client
@@ -2362,6 +2365,7 @@ impl AgentLoop<'_> {
         .await
         {
             Ok(Response::Heartbeat { reply }) => {
+                crate::supervision::launch_trace("heartbeat_answered", "-");
                 if let Some(mut trace) = trace {
                     trace["offers"] = reply.assignments.len().into();
                     emit(&trace)?;
@@ -3100,6 +3104,7 @@ pub async fn run(
         next_observation =
             next_periodic_wake(next_observation, observation_interval, Instant::now());
         let iteration: Result<bool> = async {
+            crate::supervision::launch_trace("interval_start", "-");
             let mut mark = LoopCost::thread_ns();
             state.pins = PinGate::default();
             if let Some(guard) = &replay_journal {
@@ -3136,6 +3141,7 @@ pub async fn run(
             state.cost.charge("records", mark);
             // Observation charges its own stages.
             let (snapshot, allocations, mut decision) = state.observe(&records).await?;
+            crate::supervision::launch_trace("decided", "-");
             state.steer_raise(&snapshot, &allocations).await?;
             mark = LoopCost::thread_ns();
             state.share_observation(&snapshot);
@@ -3147,6 +3153,7 @@ pub async fn run(
             let written = Instant::now();
             state.store.append_observation(&snapshot, &decision)?;
             state.store_write = written.elapsed();
+            crate::supervision::launch_trace("stored", "-");
             state.observations_since_prune += 1;
             if state.observations_since_prune >= OBSERVATIONS_PER_PRUNE {
                 state.observations_since_prune = 0;
