@@ -650,7 +650,10 @@ spreading from 1.9 to 3.2 on average in both arms, too wide to settle it.
   random length and records the lengths as `layout_pads`.
 - Diagnostic arms are labeled as such and are never a gate's result. `tools/aggressive_gates.py`
   offers `--agent-outside`, `--monitor-ms`, `--diagnostic-scan-every` and
-  `--diagnostic-single-pss-every` and `--diagnostic-task-reads`. The last three set
+  `--diagnostic-single-pss-every` and `--diagnostic-task-reads`, and for the plain arm
+  `--plain-late` (in own work first, the last tasks start 1 s after the second account arrives,
+  as CedeGrid starts the tasks beyond the idle scope's capacity) and `--plain-spread` (each task
+  pinned to one CPU, round the scope). The last three set
   `CEDEGRID_DIAGNOSTIC_PROCESS_SCAN_EVERY` (the agent scans processes once every that many
   intervals and carries stale principals between scans), `CEDEGRID_DIAGNOSTIC_SINGLE_PSS_EVERY`
   (it reads a single-process run's PSS once every that many intervals and estimates between, as

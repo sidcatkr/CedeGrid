@@ -115,6 +115,21 @@ class PlainLauncherTest(unittest.TestCase):
         self.assertEqual(argv[:2], ['/usr/bin/python3', '-c'])
         self.assertEqual(argv[3:], ['[0, 2]', '[["a", "1"], ["b", "2"]]'])
 
+    def test_spread_pins_go_round_the_scope(self):
+        self.assertEqual(gates.spread_pins([0, 2, 4, 6], 8), [0, 2, 4, 6, 0, 2, 4, 6])
+        argv = gates.plain_launcher('/usr/bin/python3', [0, 2], [['a'], ['b']], [0, 2])
+        self.assertEqual(argv[3:], ['[0, 2]', '[["a"], ["b"]]', '[0, 2]'])
+
+    @unittest.skipUnless(hasattr(__import__('os'), 'sched_setaffinity'), 'Linux only')
+    def test_a_pinned_task_runs_on_its_cpu(self):
+        import os, tempfile
+        cpus = sorted(os.sched_getaffinity(0))[:2]
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / 'aff'
+            task = [sys.executable, '-c', f'import os; open({str(out)!r}, "w").write(str(sorted(os.sched_getaffinity(0))))']
+            subprocess.run(gates.plain_launcher(sys.executable, cpus, [task], [cpus[-1]]), check=True, timeout=30)
+            self.assertEqual(out.read_text(), str([cpus[-1]]))
+
     @unittest.skipUnless(hasattr(__import__('os'), 'sched_setaffinity'), 'Linux only')
     def test_tasks_inherit_the_scope(self):
         import os, tempfile
@@ -163,6 +178,19 @@ class ArgumentsTest(unittest.TestCase):
                 capture_output=True, text=True)
             self.assertEqual(result.returncode, 2, result.stderr)
             self.assertIn('--plain-tasks takes a positive count', result.stderr)
+
+    def test_the_late_and_spread_plain_arms_are_plain_only(self):
+        for args, message in ((['--shape', 'first', '--arm', 'performance', '--plain-late', '4'],
+                               '--plain-late takes a positive count'),
+                              (['--shape', 'f2c', '--arm', 'plain', '--plain-late', '4'],
+                               '--plain-late takes a positive count'),
+                              (['--shape', 'first', '--arm', 'performance', '--plain-spread'],
+                               '--plain-spread needs --arm plain')):
+            result = subprocess.run(
+                [sys.executable, str(Path(gates.__file__)), '--repo', '.', '--output', 'unused',
+                 '--python', sys.executable, *args], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn(message, result.stderr)
 
 
 if __name__ == '__main__':

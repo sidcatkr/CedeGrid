@@ -409,11 +409,19 @@ def peer_role(a):
 PLAIN_LAUNCHER = r'''
 import json, os, subprocess, sys
 os.sched_setaffinity(0, json.loads(sys.argv[1]))
+argvs = json.loads(sys.argv[2])
+pins = json.loads(sys.argv[3]) if len(sys.argv) > 3 else [None] * len(argvs)
+def pinned(cpu):
+    return None if cpu is None else (lambda: os.sched_setaffinity(0, {cpu}))
 children = [subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL) for argv in json.loads(sys.argv[2])]
+                             stderr=subprocess.DEVNULL, preexec_fn=pinned(cpu))
+            for argv, cpu in zip(argvs, pins)]
 for child in children:
     child.wait()
 '''
+# Diagnostic plain arms for own work first (--plain-late): the last tasks start this long after
+# the second account arrives, as CedeGrid starts the tasks beyond the idle scope's capacity.
+PLAIN_LATE_S = 1.0
 
 
 # The harness asks the coordinator for every job's status every 0.25 s for the first 2 s after
@@ -437,9 +445,16 @@ def layout_pads(count, rng=random):
     return [rng.randrange(1024) for _ in range(count)]
 
 
-def plain_launcher(python, cpus, argvs):
-    """The argv of one launcher that starts `argvs` from the scope `cpus`."""
-    return [python, '-c', PLAIN_LAUNCHER, json.dumps(list(cpus)), json.dumps(argvs)]
+def plain_launcher(python, cpus, argvs, pins=None):
+    """The argv of one launcher that starts `argvs` from the scope `cpus`, each task on its CPU
+    in `pins` where one is given."""
+    argv = [python, '-c', PLAIN_LAUNCHER, json.dumps(list(cpus)), json.dumps(argvs)]
+    return argv + [json.dumps(pins)] if pins is not None else argv
+
+
+def spread_pins(cpus, count):
+    """One CPU per task, round the scope, so `count` tasks sit evenly on its CPUs."""
+    return [list(cpus)[i % len(cpus)] for i in range(count)]
 
 
 def main():
@@ -451,6 +466,11 @@ def main():
     p.add_argument('--shape', choices=sorted(SHAPES))
     p.add_argument('--arm', choices=['alone', 'plain', 'performance', 'admit', 'aggressive', 'unprotected'])
     p.add_argument('--plain-tasks', type=int, help="own tasks the plain arm starts (default: the shape's)")
+    p.add_argument('--plain-late', type=int,
+                   help='diagnostic, first shape: the plain arm starts this many of its tasks '
+                        f'{PLAIN_LATE_S:g} s after the second account arrives')
+    p.add_argument('--plain-spread', action='store_true',
+                   help='diagnostic: the plain arm pins each task to one CPU, round the scope')
     p.add_argument('--agent-outside', action='store_true',
                    help='diagnostic: run the agent off the scope, its tasks on it')
     p.add_argument('--monitor-ms', type=int, help="diagnostic: the agent's monitor interval")
@@ -486,6 +506,10 @@ def main():
         p.error('the diagnostic options need an arm through CedeGrid')
     if a.plain_tasks is not None and (a.arm != 'plain' or a.plain_tasks < 1):
         p.error('--plain-tasks takes a positive count, with --arm plain')
+    if a.plain_late is not None and (a.arm != 'plain' or a.shape != 'first' or a.plain_late < 1):
+        p.error('--plain-late takes a positive count, with --arm plain and --shape first')
+    if a.plain_spread and a.arm != 'plain':
+        p.error('--plain-spread needs --arm plain')
     repo = Path(a.repo).resolve()
     out = Path(a.output).resolve()
     out.mkdir(mode=0o700, parents=True, exist_ok=False)
@@ -510,11 +534,13 @@ def main():
     report = {'shape': a.shape, 'arm': a.arm, 'agent_outside': a.agent_outside,
               'monitor_ms': a.monitor_ms, 'diagnostic_scan_every': a.diagnostic_scan_every,
               'diagnostic_single_pss_every': a.diagnostic_single_pss_every,
-              'diagnostic_task_reads': a.diagnostic_task_reads, 'cpus': cpus,
+              'diagnostic_task_reads': a.diagnostic_task_reads, 'plain_late': a.plain_late,
+              'plain_spread': a.plain_spread, 'cpus': cpus,
               'tasks': tasks, 'task_millicores': millicores, 'window_seconds': a.window,
               'status': 'running'}
     cluster = None
     plain = []
+    late_launch = None
     try:
         if a.arm not in ('alone', 'plain'):
             mode = 'performance' if a.arm in ('performance', 'admit') else 'aggressive'
@@ -593,8 +619,13 @@ def main():
         elif a.arm == 'plain':
             # The baseline: the same work started by hand where CedeGrid would run it, from a
             # process already on the scope. Its own session, so cleanup reaches every task.
+            pins = spread_pins(cpus, len(paths)) if a.plain_spread else None
+            argvs = [argv(path, pad) for path, pad in zip(paths, pads)]
+            early = len(paths) - (a.plain_late or 0)
+            if a.plain_late:
+                late_launch = (argvs[early:], pins[early:] if pins else None)
             plain.append(subprocess.Popen(
-                plain_launcher(a.python, cpus, [argv(path, pad) for path, pad in zip(paths, pads)]),
+                plain_launcher(a.python, cpus, argvs[:early], pins[:early] if pins else None),
                 cwd=str(repo), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True))
         samples = []
@@ -607,6 +638,13 @@ def main():
         moved = False
         last_poll = 0.0
         while time.time() < until:
+            if late_launch and time.time() >= epoch + PLAIN_LATE_S:
+                late_argvs, late_pins = late_launch
+                plain.append(subprocess.Popen(
+                    plain_launcher(a.python, cpus, late_argvs, late_pins), cwd=str(repo),
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    start_new_session=True))
+                late_launch = None
             running = sum(1 for p in paths if Path(f'{p}.pid').exists() and not p.exists())
             if cluster and a.agent_outside and not moved and running == len(paths):
                 cluster.move_agent_outside()
