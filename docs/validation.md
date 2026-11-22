@@ -661,6 +661,40 @@ arrives within 0.4%, and the second account's rate within 0.4%. Across the two s
 start without placement cost own work 1.5% and 3.0% of its CPU after the second account arrived,
 and Performance 1.7% and 2.7%.
 
+### Own work first with FR-007b (`b066fec`)
+
+`b066fec` starts the tasks Performance held for the idle scope's capacity, once a plain user
+arrives, each on the scope CPU with the fewest own tasks, and puts it back on the whole scope
+0.5 s later. In every run the four tasks were placed, mostly three on the second account's CPUs
+and one beside them, which with the first four makes two per CPU, and released.
+
+On 2026-11-22 at 12:18–13:21, beside the CPU probe:
+
+| Run | Requirement | Result | Verdict |
+|---|---|---|---|
+| Own work first on CPU, ten rounds | SC-001 | −2.72% ± 1.12% against by hand; own CPU after the second account arrives 163.0 against 167.4 CPU-s | fail |
+| F2c on CPU, five rounds | SC-001 | −1.05% ± 1.99%; work per CPU-second +0.16% ± 0.52% | within the spread |
+| Batch, three rounds | SC-004 | mean 38.6–38.8 s against 58.8–60.2 s (−34% to −36%); total +5.8%, +1.1%, +1.4% | mean: pass; total: pass in two runs of three |
+
+A thread sampler beside the next six rounds (13:22–13:55) showed the placed tasks staying where
+they were put: 2.7 own threads on the second account's CPUs through the run under Performance,
+2.2–2.3 by hand. With it running, own work under Performance did +0.45% ± 1.41% against by hand.
+But the sampler runs in the owner's account too, and every arm then lost CPU to the second
+account (by hand 156.9 against 167.4 CPU-s after it arrived), so neither series settles it.
+
+At 13:57–14:50 ten rounds ran with nothing beside them, by hand, Performance at `b066fec` and
+Performance at `f5b1053` (before FR-007b), the order rotating:
+
+| Arm | Own work against by hand | Own CPU against by hand |
+|---|---|---|
+| Performance with FR-007b | −1.43% ± 1.31% | −1.62% ± 1.23% |
+| Performance before it | −2.40% ± 1.15% | −2.45% ± 0.88% |
+| With against before | +1.00% ± 1.39% | +0.86% ± 1.28% |
+
+FR-007b gains about a point in own work first, as the plain arms of 2026-11-22 predicted. What
+remains is mostly the start: the first own task runs at 0.59 s against 0.04 s by hand, while
+the scope's CPUs wait.
+
 ## Rules for validation runs
 
 - Report these statuses separately:

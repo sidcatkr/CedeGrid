@@ -162,7 +162,7 @@ this thread's.
 - [x] T080 The gate's placement and the supervisor's verification and release
   (`src/execution_model.rs`, `src/supervision.rs`, `src/supervision/unix.rs`), mediated children
   on the whole scope.
-- [ ] T081 Own work first and F2c gates on the test host, ten rounds against plain arms, and the
+- [x] T081 Own work first and F2c gates on the test host, ten rounds against plain arms, and the
   batch, recorded in `docs/validation.md`; `CHANGELOG.md` and the security review packages.
 
 ## Phase 7: Docs and checks

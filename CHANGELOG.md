@@ -91,7 +91,8 @@
   that waited for the scope's capacity and start because a user without CedeGrid began to
   compete each start on the scope CPU with the fewest own tasks, and go back on the whole scope
   0.5 s later. Started where the kernel puts them, those tasks got 1.5–3% less CPU than the same
-  work started by hand; placed this way they match it, and so does the other user. Only
+  work started by hand. With the placement, own work first goes from 2.4% to 1.4% below the same
+  work started by hand. Only
   single-process tasks on a node with a CPU scope are placed; launch evidence records
   `cpu.placement`.
 - **Waiting for work.** A node with room waits at the coordinator for the next queued task
