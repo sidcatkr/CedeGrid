@@ -416,6 +416,15 @@ def pinned(cpu):
 children = [subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL, preexec_fn=pinned(cpu))
             for argv, cpu in zip(argvs, pins)]
+release = float(sys.argv[4]) if len(sys.argv) > 4 else None
+if release is not None:
+    import time
+    time.sleep(release)
+    for child in children:
+        try:
+            os.sched_setaffinity(child.pid, json.loads(sys.argv[1]))
+        except ProcessLookupError:
+            pass
 for child in children:
     child.wait()
 '''
@@ -445,11 +454,13 @@ def layout_pads(count, rng=random):
     return [rng.randrange(1024) for _ in range(count)]
 
 
-def plain_launcher(python, cpus, argvs, pins=None):
+def plain_launcher(python, cpus, argvs, pins=None, release=None):
     """The argv of one launcher that starts `argvs` from the scope `cpus`, each task on its CPU
-    in `pins` where one is given."""
+    in `pins` where one is given, and back on the whole scope `release` seconds later."""
     argv = [python, '-c', PLAIN_LAUNCHER, json.dumps(list(cpus)), json.dumps(argvs)]
-    return argv + [json.dumps(pins)] if pins is not None else argv
+    if pins is None:
+        return argv
+    return argv + [json.dumps(pins)] + ([str(release)] if release is not None else [])
 
 
 def spread_pins(cpus, count):
@@ -471,6 +482,9 @@ def main():
                         f'{PLAIN_LATE_S:g} s after the second account arrives')
     p.add_argument('--plain-spread', action='store_true',
                    help='diagnostic: the plain arm pins each task to one CPU, round the scope')
+    p.add_argument('--plain-release', type=float,
+                   help='diagnostic, with --plain-spread: each task goes back on the whole scope '
+                        'this many seconds after it starts')
     p.add_argument('--agent-outside', action='store_true',
                    help='diagnostic: run the agent off the scope, its tasks on it')
     p.add_argument('--monitor-ms', type=int, help="diagnostic: the agent's monitor interval")
@@ -510,6 +524,8 @@ def main():
         p.error('--plain-late takes a positive count, with --arm plain and --shape first')
     if a.plain_spread and a.arm != 'plain':
         p.error('--plain-spread needs --arm plain')
+    if a.plain_release is not None and (not a.plain_spread or a.plain_release < 0):
+        p.error('--plain-release takes seconds, with --plain-spread')
     repo = Path(a.repo).resolve()
     out = Path(a.output).resolve()
     out.mkdir(mode=0o700, parents=True, exist_ok=False)
@@ -535,7 +551,7 @@ def main():
               'monitor_ms': a.monitor_ms, 'diagnostic_scan_every': a.diagnostic_scan_every,
               'diagnostic_single_pss_every': a.diagnostic_single_pss_every,
               'diagnostic_task_reads': a.diagnostic_task_reads, 'plain_late': a.plain_late,
-              'plain_spread': a.plain_spread, 'cpus': cpus,
+              'plain_spread': a.plain_spread, 'plain_release': a.plain_release, 'cpus': cpus,
               'tasks': tasks, 'task_millicores': millicores, 'window_seconds': a.window,
               'status': 'running'}
     cluster = None
@@ -625,7 +641,8 @@ def main():
             if a.plain_late:
                 late_launch = (argvs[early:], pins[early:] if pins else None)
             plain.append(subprocess.Popen(
-                plain_launcher(a.python, cpus, argvs[:early], pins[:early] if pins else None),
+                plain_launcher(a.python, cpus, argvs[:early], pins[:early] if pins else None,
+                               a.plain_release),
                 cwd=str(repo), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True))
         samples = []
@@ -641,7 +658,7 @@ def main():
             if late_launch and time.time() >= epoch + PLAIN_LATE_S:
                 late_argvs, late_pins = late_launch
                 plain.append(subprocess.Popen(
-                    plain_launcher(a.python, cpus, late_argvs, late_pins), cwd=str(repo),
+                    plain_launcher(a.python, cpus, late_argvs, late_pins, a.plain_release), cwd=str(repo),
                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     start_new_session=True))
                 late_launch = None

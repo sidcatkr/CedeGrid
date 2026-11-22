@@ -618,6 +618,30 @@ the kernel puts the later four on sets how much the account gets on the CPUs it 
 second account. A thread sampler over two rounds per arm showed own threads on those CPUs
 spreading from 1.9 to 3.2 on average in both arms, too wide to settle it.
 
+### Own work first: the start pattern and where the later tasks run (`1453727`)
+
+On 2026-11-22 at 03:14–04:40 own work first ran ten rounds of five arms, the order rotating
+between rounds, each beside the CPU probe. The rows after the first are paired against by hand,
+round by round.
+
+| Arm | Own work | Own CPU after the second account arrives | The second account's rate after it arrives |
+|---|---|---|---|
+| By hand | 1,444,477 ± 19,403 units | 166.4 ± 2.3 CPU-s | 4,141 ± 171 per second |
+| By hand, the last four started 1 s after the second account arrives | −2.26% ± 2.05% | −3.03% ± 2.40% | +5.06% ± 5.14% |
+| The same, each task pinned to one CPU round the scope | +2.26% ± 1.31% | +4.08% ± 1.39% | −7.74% ± 3.80% |
+| By hand, each task pinned to one CPU round the scope | +2.02% ± 1.34% | +4.06% ± 1.38% | −7.69% ± 3.81% |
+| Performance | −2.87% ± 1.70% | −2.72% ± 1.74% | +3.25% ± 5.25% |
+
+By hand with CedeGrid's start pattern loses what Performance loses after the second account
+arrives, so the pattern costs that share, not CedeGrid's own work. The kernel puts tasks started
+after the second account mostly on the CPUs it does not use. With every task pinned round the
+scope own work does 2% more than by hand, and the second account gets 7.7% less than beside the
+same work by hand: more than plain Linux takes from it. By hand the kernel's placement varies
+from run to run, and the second account's rate ranged 3,788–4,596 per second. `--plain-release`
+puts each pinned task back on the whole scope a set time after it starts, to test whether
+placing the later tasks round the scope and then leaving them to the kernel matches by hand on
+both sides.
+
 ## Rules for validation runs
 
 - Report these statuses separately:
@@ -652,8 +676,9 @@ spreading from 1.9 to 3.2 on average in both arms, too wide to settle it.
   offers `--agent-outside`, `--monitor-ms`, `--diagnostic-scan-every` and
   `--diagnostic-single-pss-every` and `--diagnostic-task-reads`, and for the plain arm
   `--plain-late` (in own work first, the last tasks start 1 s after the second account arrives,
-  as CedeGrid starts the tasks beyond the idle scope's capacity) and `--plain-spread` (each task
-  pinned to one CPU, round the scope). The last three set
+  as CedeGrid starts the tasks beyond the idle scope's capacity), `--plain-spread` (each task
+  pinned to one CPU, round the scope) and `--plain-release` (with `--plain-spread`, each task back
+  on the whole scope that many seconds after it starts). The last three set
   `CEDEGRID_DIAGNOSTIC_PROCESS_SCAN_EVERY` (the agent scans processes once every that many
   intervals and carries stale principals between scans), `CEDEGRID_DIAGNOSTIC_SINGLE_PSS_EVERY`
   (it reads a single-process run's PSS once every that many intervals and estimates between, as

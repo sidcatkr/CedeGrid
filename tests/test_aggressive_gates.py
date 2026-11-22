@@ -121,6 +121,18 @@ class PlainLauncherTest(unittest.TestCase):
         self.assertEqual(argv[3:], ['[0, 2]', '[["a"], ["b"]]', '[0, 2]'])
 
     @unittest.skipUnless(hasattr(__import__('os'), 'sched_setaffinity'), 'Linux only')
+    def test_a_released_task_goes_back_on_the_whole_scope(self):
+        import os, tempfile
+        cpus = sorted(os.sched_getaffinity(0))[:2]
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / 'aff'
+            task = [sys.executable, '-c', 'import os, sys, time; first = sorted(os.sched_getaffinity(0)); '
+                    f'time.sleep(1.0); open({str(out)!r}, "w").write(str([first, sorted(os.sched_getaffinity(0))]))']
+            subprocess.run(gates.plain_launcher(sys.executable, cpus, [task], [cpus[-1]], 0.3),
+                           check=True, timeout=30)
+            self.assertEqual(out.read_text(), str([[cpus[-1]], cpus]))
+
+    @unittest.skipUnless(hasattr(__import__('os'), 'sched_setaffinity'), 'Linux only')
     def test_a_pinned_task_runs_on_its_cpu(self):
         import os, tempfile
         cpus = sorted(os.sched_getaffinity(0))[:2]
@@ -185,7 +197,9 @@ class ArgumentsTest(unittest.TestCase):
                               (['--shape', 'f2c', '--arm', 'plain', '--plain-late', '4'],
                                '--plain-late takes a positive count'),
                               (['--shape', 'first', '--arm', 'performance', '--plain-spread'],
-                               '--plain-spread needs --arm plain')):
+                               '--plain-spread needs --arm plain'),
+                              (['--shape', 'first', '--arm', 'plain', '--plain-release', '0.2'],
+                               '--plain-release takes seconds, with --plain-spread')):
             result = subprocess.run(
                 [sys.executable, str(Path(gates.__file__)), '--repo', '.', '--output', 'unused',
                  '--python', sys.executable, *args], capture_output=True, text=True)
