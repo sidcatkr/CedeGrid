@@ -102,8 +102,55 @@ class LayoutPadsTest(unittest.TestCase):
         self.assertGreater(max(pads), 960)
 
     def test_only_the_hashing_shapes_are_padded(self):
-        self.assertEqual(gates.HASH_SHAPES, {'fill', 'f2c', 'first', 'batch'})
+        self.assertEqual(gates.HASH_SHAPES, {'fill', 'f2c', 'first', 'batch', 'cg-later-cpu', 'cg-first-cpu'})
         self.assertFalse(gates.HASH_SHAPES & gates.GPU_SHAPES)
+
+
+class SystemModeTest(unittest.TestCase):
+    """The pure parts of --system: where the unit's jobs go, its node configuration, and the
+    account slices' weights."""
+
+    def test_the_jobs_go_in_the_account_slice_or_in_cedegrid_slice(self):
+        self.assertEqual(gates.system_jobs_root(1000, 'user'), Path(
+            '/sys/fs/cgroup/user.slice/user-1000.slice/cedegrid-u1000.service/jobs'))
+        self.assertEqual(gates.system_jobs_root(1000, 'cedegrid'), Path(
+            '/sys/fs/cgroup/cedegrid.slice/cedegrid-u1000.service/jobs'))
+
+    def test_the_node_delegates_the_units_subtree_and_carries_the_choice(self):
+        root = Path('/sys/fs/cgroup/cedegrid.slice/cedegrid-u1000.service/jobs')
+        node = gates.system_node({'contention': {'default_mode': 'performance'}}, root, True)
+        self.assertEqual(node['cgroup'], {'enabled': True, 'delegated_root': str(root),
+                                          'authorized_controls': gates.UNIT_CONTROLS})
+        self.assertEqual(node['contention'], {'default_mode': 'performance', 'priority_over_plain': True})
+        plain = gates.system_node({'contention': {'default_mode': 'performance'}}, root, False)
+        self.assertNotIn('priority_over_plain', plain['contention'])
+
+    def test_reads_each_account_slices_weight(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / 'user-1000.slice').mkdir()
+            (root / 'user-1000.slice' / 'cpu.weight').write_text('200\n')
+            (root / 'user-1001.slice').mkdir()
+            (root / 'user@1000.service').mkdir()
+            (root / 'cpu.weight').write_text('100\n')
+            self.assertEqual(gates.slice_weights(root), {1000: 200, 1001: None})
+        self.assertEqual(gates.slice_weights(Path(d) / 'gone'), {})
+
+    def test_keeps_only_the_samples_where_a_weight_changed(self):
+        series = [(0.0, {1000: 100}), (0.25, {1000: 100}), (0.5, {1000: 200}), (0.75, {1000: 200}),
+                  (1.0, {1000: 200, 1001: 100}), (1.25, {1000: 100, 1001: 100})]
+        self.assertEqual(gates.weight_changes(series), [
+            [0.0, {1000: 100}], [0.5, {1000: 200}], [1.0, {1000: 200, 1001: 100}],
+            [1.25, {1000: 100, 1001: 100}]])
+
+    def test_the_cpu_cg_shapes_run_beside_a_cedegrid_peer(self):
+        cpu = {'cg-later-cpu', 'cg-first-cpu'}
+        self.assertLessEqual(cpu, gates.CEDEGRID_PEER_SHAPES & gates.PEER_SHAPES)
+        self.assertFalse(cpu & gates.GPU_SHAPES)
+        self.assertIn('cg-first-cpu', gates.FIRST_SHAPES)
+        self.assertEqual(gates.LATER_SHAPES, {'cg-later-gpu', 'cg-later-cpu'})
+        self.assertEqual(gates.SHAPES['cg-later-cpu'], gates.SHAPES['f2c'])
 
 
 class PlainLauncherTest(unittest.TestCase):
@@ -190,6 +237,24 @@ class ArgumentsTest(unittest.TestCase):
                 capture_output=True, text=True)
             self.assertEqual(result.returncode, 2, result.stderr)
             self.assertIn('--plain-tasks takes a positive count', result.stderr)
+
+    def test_system_mode_options_go_together(self):
+        for args, message in ((['--shape', 'f2c', '--arm', 'performance', '--priority-over-plain'],
+                               '--priority-over-plain needs --system'),
+                              (['--role', 'peer', '--priority-over-plain'], '--priority-over-plain needs --system'),
+                              (['--shape', 'f2c', '--arm', 'performance', '--system', '--peer-priority'],
+                               '--peer-priority needs --system and a cg shape'),
+                              (['--shape', 'cg-later-cpu', '--arm', 'performance', '--peer-priority'],
+                               '--peer-priority needs --system and a cg shape'),
+                              (['--shape', 'gpu', '--arm', 'performance', '--system'], '--system runs the CPU shapes'),
+                              (['--shape', 'batch', '--arm', 'performance', '--system'], '--system runs the CPU shapes'),
+                              (['--shape', 'f2c', '--arm', 'performance', '--system', '--diagnostic-launch-trace'],
+                               'the diagnostic options run without --system')):
+            result = subprocess.run(
+                [sys.executable, str(Path(gates.__file__)), '--repo', '.', '--output', 'unused',
+                 '--python', sys.executable, *args], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn(message, result.stderr)
 
     def test_the_late_and_spread_plain_arms_are_plain_only(self):
         for args, message in ((['--shape', 'first', '--arm', 'performance', '--plain-late', '4'],

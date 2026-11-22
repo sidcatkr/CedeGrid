@@ -22,6 +22,14 @@ started directly and the coordinator and this harness outside the scope.
         (--peer-arm cedegrid, in --peer-mode) or by hand (--peer-arm plain), the second account
         first or second, 20 s apart (006 SC-003). The second account's side runs this script
         with --role peer from a copy it can read.
+  cg-later-cpu, cg-first-cpu
+        as f2c and first, but the second account's two CPU tasks, one per CPU of two of the
+        scope's, run through its own CedeGrid or by hand, as in the cg GPU shapes (006 SC-009).
+
+With --system the agent runs in the account's System mode unit from the installed packages,
+started with `cedegrid system start`, and --priority-over-plain sets the account's choice of
+priority over plain users (006 US6). Every account slice's CPU weight is then recorded each
+0.25 s. The agent reads ~/.config/cedegrid for the run, which must be empty before it.
 
 Arms: alone (the second account's load with no own work), plain (own tasks started by hand on the
 scope without CedeGrid, the harm baseline; --plain-tasks sets how many), performance, admit
@@ -98,7 +106,8 @@ json.dump({'units': units, 'cpu_seconds': time.process_time(), 'seconds': time.t
 '''
 SHAPES = {'fill': (8, 500), 'f2c': (8, 1000), 'gpu': (2, 500), 'first': (8, 1000), 'first-gpu': (2, 500),
           'batch': (16, 1000), 'vram': (6, 500)}
-SHAPES.update({'cg-later-gpu': (2, 500), 'cg-first-gpu': (2, 500), 'ram': (12, 500)})
+SHAPES.update({'cg-later-gpu': (2, 500), 'cg-first-gpu': (2, 500), 'ram': (12, 500),
+               'cg-later-cpu': (8, 1000), 'cg-first-cpu': (8, 1000)})
 RAM_LOOP = r'''
 import json, os, sys, time
 seconds, mib, path = float(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
@@ -118,17 +127,72 @@ RAM_TASK_MIB = 4096
 FIXED_SHAPES = {'batch', 'vram', 'ram'}
 GPU_SHAPES = {'gpu', 'first-gpu', 'vram', 'cg-later-gpu', 'cg-first-gpu'}
 # Shapes whose tasks run the hashing loop or the batch's fixed hashing work.
-HASH_SHAPES = {'fill', 'f2c', 'first', 'batch'}
+HASH_SHAPES = {'fill', 'f2c', 'first', 'batch', 'cg-later-cpu', 'cg-first-cpu'}
 # Shapes with the second account's load, started by the operator from schedule.json.
-PEER_SHAPES = {'f2c', 'gpu', 'first', 'first-gpu', 'cg-later-gpu', 'cg-first-gpu'}
+PEER_SHAPES = {'f2c', 'gpu', 'first', 'first-gpu', 'cg-later-gpu', 'cg-first-gpu', 'cg-later-cpu',
+               'cg-first-cpu'}
 # Own work arrives first; the second account 20 s later.
-FIRST_SHAPES = {'first', 'first-gpu', 'cg-first-gpu'}
+FIRST_SHAPES = {'first', 'first-gpu', 'cg-first-gpu', 'cg-first-cpu'}
 # The second account runs its work through its own CedeGrid, or by hand, from this script.
-CEDEGRID_PEER_SHAPES = {'cg-later-gpu', 'cg-first-gpu'}
+CEDEGRID_PEER_SHAPES = {'cg-later-gpu', 'cg-first-gpu', 'cg-later-cpu', 'cg-first-cpu'}
+# The second account's CedeGrid starts first; own work 20 s after it.
+LATER_SHAPES = {'cg-later-gpu', 'cg-later-cpu'}
 # Each batch task's CPU work: about 15 s of one CPU on the test host.
 BATCH_UNITS = 90_000
 VRAM_TASK_MIB = 2048
 PHRASE = "slow other users' compute on this host"
+# System mode (--system): the installed binary the account's unit runs, the configuration it
+# reads, and the controls its delegated subtree grants (005).
+INSTALLED = Path('/usr/bin/cedegrid')
+CONFIG_DIR = Path.home() / '.config/cedegrid'
+UNIT_CONTROLS = ['cgroup.procs', 'cpu.weight', 'cpu.max', 'cgroup.freeze', 'memory.high']
+USER_SLICES = Path('/sys/fs/cgroup/user.slice')
+
+
+def system_jobs_root(uid, slice_kind):
+    """Where the account's ordinary unit puts its jobs: in the account's slice where the host
+    splits CPU by account, else in cedegrid.slice (005 `units.ordinary_slice`)."""
+    unit = f'cedegrid-u{uid}.service'
+    if slice_kind == 'user':
+        return USER_SLICES / f'user-{uid}.slice' / unit / 'jobs'
+    return Path('/sys/fs/cgroup/cedegrid.slice') / unit / 'jobs'
+
+
+def system_node(node, jobs_root, priority):
+    """The node configuration for an agent in the account's unit: its delegated subtree, and the
+    account's choice of priority over plain users."""
+    node['cgroup'] = {'enabled': True, 'delegated_root': str(jobs_root),
+                      'authorized_controls': list(UNIT_CONTROLS)}
+    if priority:
+        node.setdefault('contention', {})['priority_over_plain'] = True
+    return node
+
+
+def slice_weights(root=None):
+    """Each account slice's cpu.weight by UID, read only; None where it cannot be read."""
+    root = USER_SLICES if root is None else root
+    weights = {}
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return weights
+    for entry in entries:
+        name = entry.name
+        if name.startswith('user-') and name.endswith('.slice') and name[5:-6].isdigit():
+            try:
+                weights[int(name[5:-6])] = int((entry / 'cpu.weight').read_text())
+            except (OSError, ValueError):
+                weights[int(name[5:-6])] = None
+    return weights
+
+
+def weight_changes(series):
+    """From [(seconds, {uid: weight})] samples, each sample where any weight changed."""
+    changes = []
+    for at, weights in series:
+        if not changes or weights != changes[-1][1]:
+            changes.append([at, weights])
+    return changes
 
 
 def peer_summary(requests, window):
@@ -172,11 +236,14 @@ def allow(binary, config):
 
 
 class Cluster:
-    """A coordinator and an agent for one run; the agent on `cpus`, everything else outside."""
+    """A coordinator and an agent for one run; the agent on `cpus`, everything else outside. With
+    `system`, the agent runs in the account's System mode unit instead, from the installed
+    binary, and reads its configuration from CONFIG_DIR for the run."""
 
     def __init__(self, repo, out, cpus, mode, workers, lifetime, gpu_uuid=None, gpu_mib=2048,
                  gpu_reserve_mib=None, ram_mib=None, monitor_ms=None, scan_every=None,
-                 single_pss_every=None, task_reads=None, launch_trace=False):
+                 single_pss_every=None, task_reads=None, launch_trace=False, system=False,
+                 priority=False, slice_kind='user'):
         from anchor_validation import deployment
         from runtime_config import atomic_runtime_config, read_runtime_config
         from validation_runtime import OwnedProcess
@@ -190,6 +257,18 @@ class Cluster:
         self.node_id = 'aggressive-gate-' + uuid.uuid4().hex
         self.run_id = 'aggressive-gate-' + uuid.uuid4().hex
         self.jobs = []
+        self.system = system
+        self.unit = None
+        self.wrote_config = False
+        self.started_unit = False
+        self.started_at = time.time()
+        # The binary CedeGrid's own processes run: the unit runs the installed one.
+        self.agent_binary = INSTALLED if system else self.binary
+        if system:
+            if CONFIG_DIR.exists() and any(CONFIG_DIR.iterdir()):
+                raise RuntimeError(f'{CONFIG_DIR} is not empty; refusing to overwrite it')
+            if any(unit.get('state') == 'active' for unit in self.system_call('status').get('units', [])):
+                raise RuntimeError('a System mode unit is already running')
         self.client = deployment(self.out, self.binary, self.cpus, self.node_id, gpu_uuid or '', lifetime,
                                  self.env, device='gpu' if gpu_uuid else 'cpu')
         node = read_runtime_config(self.out / 'node.toml')
@@ -209,6 +288,9 @@ class Cluster:
         if monitor_ms:
             # Diagnostic: a longer interval halves the agent's per-interval work.
             node.setdefault('monitor', {})['interval_ms'] = monitor_ms
+        if system:
+            self.jobs_root = system_jobs_root(os.getuid(), slice_kind)
+            system_node(node, self.jobs_root, priority)
         atomic_runtime_config(self.out / 'node.toml', node, 'node')
         agent = read_runtime_config(self.out / 'agent.toml')
         agent.update(max_workers=workers, capacity={'cpu_millicores': len(self.cpus) * 1000,
@@ -242,18 +324,78 @@ class Cluster:
         if launch_trace:
             # Diagnostic only: the agent, its supervisors and gates log each launch stage.
             agent_env['CEDEGRID_DIAGNOSTIC_LAUNCH_TRACE'] = '1'
-        self.services['agent'] = OwnedProcess(
-            ['taskset', '-c', ','.join(map(str, self.cpus)), str(self.binary), '--config',
-             str(self.out / 'node.toml'), 'agent', '--deployment', str(self.out / 'agent.toml')],
-            self.repo, self.out / 'agent.log', agent_env)
+        try:
+            self._start_agent(system, agent_env)
+        except BaseException:
+            # A half-started cluster leaves no unit, configuration or coordinator behind.
+            self.stop()
+            raise
+        self.outside = outside
+        self.client.put_pool(self.run_id, [self.node_id], max_workers=workers, min_workers=0,
+                             allocation_class='opportunistic')
+
+    def _start_agent(self, system, agent_env):
+        from validation_runtime import OwnedProcess
+        if system:
+            CONFIG_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+            self.wrote_config = True
+            for source, name in (('node.toml', 'cedegrid.toml'), ('agent.toml', 'deployment.toml')):
+                fd = os.open(CONFIG_DIR / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, 'wb') as config:
+                    config.write((self.out / source).read_bytes())
+            self.start_reply = self.system_call('start')
+            self.started_unit = True
+        else:
+            self.services['agent'] = OwnedProcess(
+                ['taskset', '-c', ','.join(map(str, self.cpus)), str(self.binary), '--config',
+                 str(self.out / 'node.toml'), 'agent', '--deployment', str(self.out / 'agent.toml')],
+                self.repo, self.out / 'agent.log', agent_env)
         deadline = time.monotonic() + 30
         while not self.client.status().get('nodes'):
             if time.monotonic() > deadline:
                 raise TimeoutError('agent did not register')
             time.sleep(.2)
-        self.outside = outside
-        self.client.put_pool(self.run_id, [self.node_id], max_workers=workers, min_workers=0,
-                             allocation_class='opportunistic')
+        if system:
+            self.unit = next((Path('/sys/fs/cgroup') / unit['cgroup'].lstrip('/')
+                              for unit in self.system_call('status').get('units', [])
+                              if unit.get('kind') == 'ordinary' and unit.get('state') == 'active'), None)
+            if self.unit is None or self.unit / 'jobs' != self.jobs_root:
+                raise RuntimeError(f'unit at {self.unit}, expected {self.jobs_root.parent}')
+
+    def system_call(self, *args, check=True):
+        """`cedegrid system <args> --require-system` with the installed binary, as JSON."""
+        done = subprocess.run([str(INSTALLED), 'system', *args, '--require-system'],
+                              capture_output=True, text=True, timeout=30)
+        if check and done.returncode != 0:
+            raise RuntimeError(f'cedegrid system {args[0]} failed: {done.stderr.strip()[:500]}')
+        try:
+            return json.loads(done.stdout)
+        except json.JSONDecodeError:
+            return {'stdout': done.stdout.strip()[:500], 'stderr': done.stderr.strip()[:500],
+                    'code': done.returncode}
+
+    def jobs_running(self):
+        """Whether any process is left in the unit's jobs subtree, read only."""
+        if self.unit is None:
+            return False
+        for path in (self.unit / 'jobs').rglob('cgroup.procs'):
+            try:
+                if path.read_text().split():
+                    return True
+            except OSError:
+                pass
+        return False
+
+    def agent_log(self):
+        """The agent's log: its file, or in System mode the unit's journal since the run began,
+        written to the same file."""
+        path = self.out / 'agent.log'
+        if self.system and self.unit is not None:
+            done = subprocess.run(['journalctl', '--no-pager', '-o', 'cat', '-u', self.unit.name,
+                                   '--since', f'@{int(self.started_at)}'],
+                                  capture_output=True, text=True, timeout=60)
+            path.write_text(done.stdout if done.returncode == 0 else '')
+        return path.read_text(errors='replace') if path.exists() else ''
 
     def move_agent_outside(self):
         """Diagnostic: moves every thread of the agent this harness started off the scope, once
@@ -266,6 +408,8 @@ class Cluster:
         for name, child in self.services.items():
             if child.poll() is not None:
                 raise RuntimeError(f'{name} exited')
+        if self.system and self.unit is not None and not (self.unit / 'agent').exists():
+            raise RuntimeError('the unit\'s agent exited')
 
     def decisions(self, after_unix):
         import sqlite3
@@ -288,11 +432,24 @@ class Cluster:
                 t['status'] == 'assigned' for j in self.jobs for t in self.client.status(j).get('tasks', [])):
             time.sleep(.5)
         result = {}
+        if self.started_unit:
+            # The unit's jobs end with their tasks; the unit stops through the broker.
+            while time.monotonic() < deadline and self.jobs_running():
+                time.sleep(.5)
+            result['system_stop'] = self.system_call('stop', check=False)
         for name in ['agent', 'coordinator']:
+            if name not in self.services:
+                continue
             try:
                 result[name] = self.services[name].stop(grace=20)
             except Exception as error:
                 result[name] = repr(error)
+        if self.wrote_config:
+            for name in ('cedegrid.toml', 'deployment.toml'):
+                try:
+                    (CONFIG_DIR / name).unlink()
+                except FileNotFoundError:
+                    pass
         return result
 
 
@@ -344,9 +501,11 @@ def completion(own, submitted):
 
 
 def peer_role(a):
-    """The second account's side of the cg shapes: one GPU task through its own CedeGrid in
-    --peer-mode, or by hand, submitted at --at and running until --until. Writes report.json with
-    its units; acts only on processes it starts."""
+    """The second account's side of the cg shapes, through its own CedeGrid in --peer-mode or by
+    hand, submitted at --at and running until --until: one GPU task, or with --peer-shape cpu one
+    CPU task per CPU of --peer-cpus. With --system its agent runs in its System mode unit, and
+    --priority-over-plain sets its choice. Writes report.json with its units and CPU; acts only
+    on processes it starts."""
     repo = Path(a.repo).resolve()
     out = Path(a.output).resolve()
     out.mkdir(mode=0o700, parents=True, exist_ok=False)
@@ -354,43 +513,54 @@ def peer_role(a):
         sys.path.insert(0, str(repo / sub))
     from validation_runtime import atomic_json
     from cedegrid import command_task
-    gpu = subprocess.run(['nvidia-smi', '--query-gpu=uuid', '--format=csv,noheader'], capture_output=True,
-                         text=True, check=True).stdout.split()[0]
+    gpu = None
+    if a.peer_shape == 'gpu':
+        gpu = subprocess.run(['nvidia-smi', '--query-gpu=uuid', '--format=csv,noheader'], capture_output=True,
+                             text=True, check=True).stdout.split()[0]
     cpus = [int(c) for c in a.peer_cpus.split(',')]
-    path = out / 'peer-0.json'
-    report = {'role': 'peer', 'arm': a.peer_arm, 'mode': a.peer_mode, 'status': 'running'}
-    cluster, child = None, None
+    count = 1 if gpu else len(cpus)
+    paths = [out / f'peer-{i}.json' for i in range(count)]
+    report = {'role': 'peer', 'arm': a.peer_arm, 'mode': a.peer_mode, 'shape': a.peer_shape,
+              'system': a.system, 'priority_over_plain': a.priority_over_plain, 'status': 'running'}
+    cluster, children = None, []
     try:
         if a.peer_arm == 'cedegrid':
-            cluster = Cluster(repo, out, cpus, a.peer_mode, 1, int(a.until - time.time()) + 240, gpu)
+            cluster = Cluster(repo, out, cpus, a.peer_mode, count, int(a.until - time.time()) + 240, gpu,
+                              system=a.system, priority=a.priority_over_plain)
         while time.time() < a.at:
             if cluster:
                 cluster.check()
             time.sleep(.05)
         submitted = time.time()
-        argv = [a.python, '-c', GPU_LOOP, str(a.until), str(path)]
-        if cluster:
-            task_id = f'{cluster.run_id}.0'
-            cluster.client.submit(task_id, cluster.run_id, [command_task(
-                task_id, argv, str(repo), env=cluster.worker_env, cpu_millicores=500, ram_mib=1024,
-                gpu_vram_mib={gpu: 512}, allocation_class='opportunistic', single_process=True,
-                no_escape=True, replay_safe=True, max_attempts=1)])
-            cluster.jobs.append(task_id)
-        else:
-            child = subprocess.Popen(argv, cwd=str(repo), stdin=subprocess.DEVNULL,
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            os.sched_setaffinity(child.pid, cpus)
+        for i, path in enumerate(paths):
+            argv = [a.python, '-c', GPU_LOOP if gpu else CPU_LOOP, str(a.until), str(path)]
+            if cluster:
+                task_id = f'{cluster.run_id}.{i}'
+                cluster.client.submit(task_id, cluster.run_id, [command_task(
+                    task_id, argv, str(repo), env=cluster.worker_env, cpu_millicores=500 if gpu else 1000,
+                    ram_mib=1024 if gpu else 256, gpu_vram_mib={gpu: 512} if gpu else {},
+                    allocation_class='opportunistic', single_process=True, no_escape=True,
+                    replay_safe=True, max_attempts=1)])
+                cluster.jobs.append(task_id)
+            else:
+                # By hand, one task per CPU, as the second account's saturating load is tied.
+                child = subprocess.Popen(argv, cwd=str(repo), stdin=subprocess.DEVNULL,
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                os.sched_setaffinity(child.pid, cpus if gpu else [cpus[i]])
+                children.append(child)
         while time.time() < a.until + 3:
             if cluster:
                 cluster.check()
             time.sleep(.25)
         deadline = time.time() + 60
-        while Path(f'{path}.pid').exists() and not path.exists() and time.time() < deadline:
+        while any(Path(f'{p}.pid').exists() and not p.exists() for p in paths) and time.time() < deadline:
             time.sleep(.5)
-        own = json.loads(path.read_text()) if path.exists() else {}
-        started = json.loads(Path(f'{path}.pid').read_text())['started'] if Path(f'{path}.pid').exists() else None
-        report.update(units=own.get('units', 0), seconds=own.get('seconds'), submitted_unix=submitted,
-                      started_unix=started, status='completed')
+        done = [json.loads(p.read_text()) for p in paths if p.exists()]
+        started = [json.loads(Path(f'{p}.pid').read_text())['started'] for p in paths if Path(f'{p}.pid').exists()]
+        report.update(units=sum(d.get('units', 0) for d in done),
+                      cpu_seconds=round(sum(d.get('cpu_seconds', 0) for d in done), 2),
+                      seconds=max((d.get('seconds') or 0 for d in done), default=None),
+                      submitted_unix=submitted, started_unix=min(started, default=None), status='completed')
     except BaseException as error:
         report['status'] = 'failed'
         report['error'] = repr(error)[:2000]
@@ -398,12 +568,13 @@ def peer_role(a):
     finally:
         if cluster is not None:
             report['cluster_cleanup'] = cluster.stop()
-        if child is not None:
+        for child in children:
             if child.poll() is None:
                 child.kill()
             child.wait()
         atomic_json(out / 'report.json', report)
-        print(json.dumps({k: report.get(k) for k in ('role', 'arm', 'mode', 'status', 'units', 'error')}))
+        print(json.dumps({k: report.get(k) for k in ('role', 'arm', 'mode', 'status', 'units', 'cpu_seconds',
+                                                      'error')}))
 
 
 # The plain arm's launcher: it moves itself onto the scope, then starts every task, so each one
@@ -504,26 +675,45 @@ def main():
     p.add_argument('--peer-arm', choices=['cedegrid', 'plain'], default='cedegrid')
     p.add_argument('--peer-mode', choices=['performance', 'neutral'], default='performance')
     p.add_argument('--peer-cpus', help='peer role: the CPUs its work runs on')
+    p.add_argument('--peer-shape', choices=['gpu', 'cpu'], default='gpu',
+                   help='peer role: one GPU task, or one CPU task per CPU of --peer-cpus')
+    p.add_argument('--peer-priority', action='store_true',
+                   help='cg shapes with --system: the second account chooses priority over plain users')
+    p.add_argument('--system', action='store_true',
+                   help="run the agent in the account's System mode unit from the installed packages")
+    p.add_argument('--system-slice', choices=['user', 'cedegrid'], default='user',
+                   help="System mode: where the host's policy puts the account's unit")
+    p.add_argument('--priority-over-plain', action='store_true',
+                   help="with --system: the account's choice of priority over plain users")
     p.add_argument('--at', type=float, help='peer role: when to submit, in Unix seconds')
     p.add_argument('--until', type=float, help='peer role: when its work ends, in Unix seconds')
     a = p.parse_args()
+    if a.priority_over_plain and not a.system:
+        p.error('--priority-over-plain needs --system')
     if a.role == 'peer':
         if a.peer_cpus is None or a.at is None or a.until is None:
             p.error('the peer role takes --peer-cpus, --at and --until')
         return peer_role(a)
     if a.shape is None or a.arm is None:
         p.error('--shape and --arm are required')
+    if a.peer_priority and (not a.system or a.shape not in CEDEGRID_PEER_SHAPES):
+        p.error('--peer-priority needs --system and a cg shape')
+    if a.system and a.shape in FIXED_SHAPES | GPU_SHAPES:
+        p.error('--system runs the CPU shapes')
     if a.arm == 'admit' and a.shape not in CEDEGRID_PEER_SHAPES:
         p.error('admit runs the cg shapes')
     if a.shape == 'fill' and a.arm in ('alone', 'plain', 'unprotected'):
         p.error('fill runs performance or aggressive')
     if a.shape in FIXED_SHAPES and a.arm not in ('plain', 'performance'):
         p.error(f'{a.shape} runs plain or performance')
-    if (a.agent_outside or a.monitor_ms or a.diagnostic_scan_every
-            or a.diagnostic_single_pss_every or a.diagnostic_task_reads
-            or a.diagnostic_launch_trace) \
-            and a.arm in ('alone', 'plain'):
+    diagnostics = (a.agent_outside or a.monitor_ms or a.diagnostic_scan_every
+                   or a.diagnostic_single_pss_every or a.diagnostic_task_reads
+                   or a.diagnostic_launch_trace)
+    if diagnostics and a.arm in ('alone', 'plain'):
         p.error('the diagnostic options need an arm through CedeGrid')
+    if diagnostics and a.system:
+        # The unit's agent gets no environment from this script.
+        p.error('the diagnostic options run without --system')
     if a.plain_tasks is not None and (a.arm != 'plain' or a.plain_tasks < 1):
         p.error('--plain-tasks takes a positive count, with --arm plain')
     if a.plain_late is not None and (a.arm != 'plain' or a.shape != 'first' or a.plain_late < 1):
@@ -560,6 +750,8 @@ def main():
               'diagnostic_launch_trace': a.diagnostic_launch_trace, 'plain_late': a.plain_late,
               'plain_spread': a.plain_spread, 'plain_release': a.plain_release, 'cpus': cpus,
               'tasks': tasks, 'task_millicores': millicores, 'window_seconds': a.window,
+              'system': a.system, 'priority_over_plain': a.priority_over_plain,
+              'peer_priority': a.peer_priority,
               'status': 'running'}
     cluster = None
     plain = []
@@ -575,8 +767,11 @@ def main():
                               monitor_ms=a.monitor_ms, scan_every=a.diagnostic_scan_every,
                               single_pss_every=a.diagnostic_single_pss_every,
                               task_reads=a.diagnostic_task_reads,
-                              launch_trace=a.diagnostic_launch_trace)
-            if a.arm == 'unprotected' and allow(cluster.binary, out / 'node.toml') != 0:
+                              launch_trace=a.diagnostic_launch_trace, system=a.system,
+                              priority=a.priority_over_plain, slice_kind=a.system_slice)
+            # The unit's agent reads the configuration the account's setup would write.
+            if a.arm == 'unprotected' and (allow(INSTALLED, CONFIG_DIR / 'cedegrid.toml') if a.system
+                                           else allow(cluster.binary, out / 'node.toml')) != 0:
                 raise RuntimeError('the allowance was not set')
             time.sleep(3)
         else:
@@ -585,7 +780,7 @@ def main():
             # Own work on an idle scope first; the second account 20 s after it.
             start = int(time.time()) + 5
             epoch = start + 20
-        elif a.shape == 'cg-later-gpu':
+        elif a.shape in LATER_SHAPES:
             # The second account's CedeGrid first; own work 20 s after it.
             epoch = int(time.time()) + a.lead
             start = epoch + 20
@@ -593,12 +788,14 @@ def main():
             lead = a.lead if a.shape in PEER_SHAPES else 5
             epoch = int(time.time()) + lead
             start = epoch + 5
-        end = (start if a.shape == 'cg-later-gpu' else epoch + 5) + a.window
+        end = (start if a.shape in LATER_SHAPES else epoch + 5) + a.window
         if a.shape in PEER_SHAPES:
             schedule = {'epoch': epoch, 'seconds': a.window + 15, 'cpus': ','.join(map(str, peer_cpus)),
                         'kind': 'saturating', 'tied': 1, 'gpu': gpu}
             if a.shape in CEDEGRID_PEER_SHAPES:
-                schedule.update(peer_arm=a.peer_arm, peer_mode=a.peer_mode, until=end + 5)
+                schedule.update(peer_arm=a.peer_arm, peer_mode=a.peer_mode, until=end + 5,
+                                peer_shape='gpu' if gpu else 'cpu', system=a.system,
+                                peer_priority=a.peer_priority)
             atomic_json(out / 'schedule.json', schedule)
             report.update(peer_arm=a.peer_arm, peer_mode=a.peer_mode)
         paths = [out / f'own-{i}.json' for i in range(tasks)]
@@ -658,7 +855,9 @@ def main():
         samples = []
         # CedeGrid's own CPU on the scope, the overhead SC-001 allows for.
         coordinator = {cluster.services['coordinator'].child.pid} if cluster else set()
-        service = [service_ticks(cluster.binary, coordinator)] if cluster else []
+        service = [service_ticks(cluster.agent_binary, coordinator)] if cluster else []
+        # System mode: every account slice's weight, to see the raise come and go (006 US6).
+        weights = []
         service_start = service[0] if service else {}
         # Fixed work runs until every task has finished, within a bound.
         until = submitted + 600 if a.shape in FIXED_SHAPES else end + 3
@@ -686,9 +885,11 @@ def main():
                     samples.append([round(time.time() - submitted, 2),
                                     states.count('assigned') + states.count('completed'), running])
                     service = [{**service[0], **{k: max(v, service[0].get(k, 0)) for k, v in
-                                                 service_ticks(cluster.binary, coordinator).items()}}]
+                                                 service_ticks(cluster.agent_binary, coordinator).items()}}]
             elif plain:
                 samples.append([round(time.time() - submitted, 2), len(paths), running])
+            if a.system:
+                weights.append((round(time.time() - submitted, 2), slice_weights()))
             if a.shape in FIXED_SHAPES and all(ended(p) for p in paths):
                 break
             time.sleep(.25)
@@ -715,13 +916,15 @@ def main():
             report['own'].update(finished=len(own), killed=len(started) - len(own),
                                  **completion(own, submitted))
         report['samples'] = samples
+        if a.system:
+            report['slice_weights'] = weight_changes(weights)
         report['admitted_at'] = admitted_at(samples, (0.5, 1, 2, 4, 8))
         if cluster:
             decisions = cluster.decisions(submitted)
             # SC-002: no compute cap, pause or drain on own work in any run.
             report['own_steps'] = [[round(at - submitted, 2), action.get('code'), action.get('resource')]
                                    for at, decision in decisions for action in decision.get('actions', [])]
-            log = (out / 'agent.log').read_text(errors='replace')
+            log = cluster.agent_log()
             report['warnings'] = log.count('this run is UNPROTECTED')
             report['cautions'] = log.count('"event":"admit_immediately"')
             report['refusals'] = log.count('unprotected_refused')
