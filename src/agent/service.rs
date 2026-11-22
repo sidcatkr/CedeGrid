@@ -971,6 +971,7 @@ impl AgentLoop<'_> {
                     let Some(record) = slot.prepared.clone() else {
                         continue;
                     };
+                    crate::supervision::launch_trace("authorization_asked", id);
                     initial.push((
                         slot.started_at,
                         LeaseItem::Prepared {
@@ -1021,7 +1022,11 @@ impl AgentLoop<'_> {
                                 continue;
                             };
                             match item {
-                                LeaseItem::Prepared { .. } => {
+                                LeaseItem::Prepared { assignment_id, .. } => {
+                                    crate::supervision::launch_trace(
+                                        "authorization_answered",
+                                        assignment_id,
+                                    );
                                     authorization_reply(slot, requested, item_result(result))?
                                 }
                                 LeaseItem::Renew { .. } => {
@@ -2623,6 +2628,7 @@ impl AgentLoop<'_> {
                         decision.admit_immediately_budget.as_ref(),
                         admits,
                     );
+                    crate::supervision::launch_trace("received", &id);
                     let placement = self.placement(&assignment, decision);
                     if let Some(cpu) = placement {
                         self.placed.insert(id.clone(), cpu);
@@ -2640,6 +2646,10 @@ impl AgentLoop<'_> {
                     let handle = tokio::task::spawn_blocking(move || {
                         let prepared = runtime.block_on(async move {
                             let _permit = gate.acquire().await?;
+                            crate::supervision::launch_trace(
+                                "permit",
+                                &task_assignment.request.assignment_id,
+                            );
                             validate_gpu_launch_contract(
                                 &task_config,
                                 &task_snapshot,

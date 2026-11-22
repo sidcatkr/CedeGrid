@@ -736,7 +736,9 @@ the scope's CPUs wait.
   intervals and carries stale principals between scans), `CEDEGRID_DIAGNOSTIC_SINGLE_PSS_EVERY`
   (it reads a single-process run's PSS once every that many intervals and estimates between, as
   for larger families) and `CEDEGRID_DIAGNOSTIC_TASK_READS` (comma-separated per-task reads it
-  skips: `affinity`, `rss`, `clock`, or `all` for no per-task usage). None is an operator
+  skips: `affinity`, `rss`, `clock`, or `all` for no per-task usage), and
+  `--diagnostic-launch-trace` sets `CEDEGRID_DIAGNOSTIC_LAUNCH_TRACE=1` (the agent, its
+  supervisors and gates log the wall-clock time of each launch stage). None is an operator
   setting, and none has any effect unless set.
 - Every run manifest records:
   - the exact source and environment

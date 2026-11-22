@@ -15,6 +15,31 @@ use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+/// Gate-only diagnostic: with `CEDEGRID_DIAGNOSTIC_LAUNCH_TRACE=1` the agent, the supervisor and
+/// the gate each write one line per launch stage to stderr with its wall-clock time, so a gate
+/// can see where a launch spends its time (006 SC-001). Not an operator setting; no effect
+/// unless set.
+pub fn launch_trace(stage: &str, assignment_id: &str) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| {
+        std::env::var_os("CEDEGRID_DIAGNOSTIC_LAUNCH_TRACE").is_some_and(|value| value == "1")
+    }) {
+        return;
+    }
+    let at_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis());
+    let line = serde_json::json!({
+        "event": "launch_trace",
+        "stage": stage,
+        "assignment_id": assignment_id,
+        "at_unix_ms": at_unix_ms,
+    });
+    use std::io::Write;
+    // A diagnostic line that cannot be written changes nothing.
+    let _ = writeln!(std::io::stderr(), "{line}");
+}
+
 /// How long a placed task runs on its one CPU before the supervisor puts it back on the whole
 /// scope (006 FR-007b). Measured by hand, 0.5 s matched plain Linux's placement on both sides.
 pub const PLACEMENT_RELEASE_MS: u64 = 500;

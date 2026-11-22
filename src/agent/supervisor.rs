@@ -44,6 +44,7 @@ impl SupervisorControl for PipeControl {
                 self.assignment.request.class,
             )?;
         }
+        crate::supervision::launch_trace("prepared", &record.assignment_id);
         emit(&Event::Prepared {
             record: record.clone(),
         })?;
@@ -78,6 +79,10 @@ impl SupervisorControl for PipeControl {
                     }
                     self.remaining_ms = Some(remaining_ms);
                     self.authorized_at = Some(Instant::now());
+                    crate::supervision::launch_trace(
+                        "authorized",
+                        &self.assignment.request.assignment_id,
+                    );
                     return Ok(());
                 }
                 Control::Drain { .. } | Control::Renewal { .. } => {
@@ -362,6 +367,10 @@ pub fn assignment_supervisor(spec_path: &Path) -> Result<()> {
         spec_path,
         3 * 1024 * 1024,
     )?)?;
+    crate::supervision::launch_trace(
+        "supervisor_spec_read",
+        &spec.assignment.request.assignment_id,
+    );
     namespace_guard.validate_root(&spec.config.state_dir)?;
     ensure!(spec.config.execution.enabled, "execution opt-in missing");
     validate_replay_launch(&spec.config, &spec.assignment.request)?;

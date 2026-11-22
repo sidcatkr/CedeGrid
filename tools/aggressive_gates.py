@@ -176,7 +176,7 @@ class Cluster:
 
     def __init__(self, repo, out, cpus, mode, workers, lifetime, gpu_uuid=None, gpu_mib=2048,
                  gpu_reserve_mib=None, ram_mib=None, monitor_ms=None, scan_every=None,
-                 single_pss_every=None, task_reads=None):
+                 single_pss_every=None, task_reads=None, launch_trace=False):
         from anchor_validation import deployment
         from runtime_config import atomic_runtime_config, read_runtime_config
         from validation_runtime import OwnedProcess
@@ -239,6 +239,9 @@ class Cluster:
         if task_reads:
             # Diagnostic only: per-task reads the agent skips.
             agent_env['CEDEGRID_DIAGNOSTIC_TASK_READS'] = task_reads
+        if launch_trace:
+            # Diagnostic only: the agent, its supervisors and gates log each launch stage.
+            agent_env['CEDEGRID_DIAGNOSTIC_LAUNCH_TRACE'] = '1'
         self.services['agent'] = OwnedProcess(
             ['taskset', '-c', ','.join(map(str, self.cpus)), str(self.binary), '--config',
              str(self.out / 'node.toml'), 'agent', '--deployment', str(self.out / 'agent.toml')],
@@ -494,6 +497,8 @@ def main():
                    help="diagnostic: read a single-process run's PSS once every N intervals")
     p.add_argument('--diagnostic-task-reads',
                    help='diagnostic: per-task reads the agent skips (affinity, rss, clock, all)')
+    p.add_argument('--diagnostic-launch-trace', action='store_true',
+                   help='diagnostic: log the time of each launch stage')
     p.add_argument('--window', type=int, default=60)
     p.add_argument('--lead', type=int, default=40)
     p.add_argument('--peer-arm', choices=['cedegrid', 'plain'], default='cedegrid')
@@ -515,7 +520,8 @@ def main():
     if a.shape in FIXED_SHAPES and a.arm not in ('plain', 'performance'):
         p.error(f'{a.shape} runs plain or performance')
     if (a.agent_outside or a.monitor_ms or a.diagnostic_scan_every
-            or a.diagnostic_single_pss_every or a.diagnostic_task_reads) \
+            or a.diagnostic_single_pss_every or a.diagnostic_task_reads
+            or a.diagnostic_launch_trace) \
             and a.arm in ('alone', 'plain'):
         p.error('the diagnostic options need an arm through CedeGrid')
     if a.plain_tasks is not None and (a.arm != 'plain' or a.plain_tasks < 1):
@@ -550,7 +556,8 @@ def main():
     report = {'shape': a.shape, 'arm': a.arm, 'agent_outside': a.agent_outside,
               'monitor_ms': a.monitor_ms, 'diagnostic_scan_every': a.diagnostic_scan_every,
               'diagnostic_single_pss_every': a.diagnostic_single_pss_every,
-              'diagnostic_task_reads': a.diagnostic_task_reads, 'plain_late': a.plain_late,
+              'diagnostic_task_reads': a.diagnostic_task_reads,
+              'diagnostic_launch_trace': a.diagnostic_launch_trace, 'plain_late': a.plain_late,
               'plain_spread': a.plain_spread, 'plain_release': a.plain_release, 'cpus': cpus,
               'tasks': tasks, 'task_millicores': millicores, 'window_seconds': a.window,
               'status': 'running'}
@@ -567,7 +574,8 @@ def main():
                               total_ram if a.shape == 'ram' else None,
                               monitor_ms=a.monitor_ms, scan_every=a.diagnostic_scan_every,
                               single_pss_every=a.diagnostic_single_pss_every,
-                              task_reads=a.diagnostic_task_reads)
+                              task_reads=a.diagnostic_task_reads,
+                              launch_trace=a.diagnostic_launch_trace)
             if a.arm == 'unprotected' and allow(cluster.binary, out / 'node.toml') != 0:
                 raise RuntimeError('the allowance was not set')
             time.sleep(3)

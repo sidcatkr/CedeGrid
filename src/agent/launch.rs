@@ -404,7 +404,9 @@ pub(super) async fn start_assignment(
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
+    crate::supervision::launch_trace("spec_written", &assignment.request.assignment_id);
     let mut child = command.spawn()?;
+    crate::supervision::launch_trace("supervisor_spawned", &assignment.request.assignment_id);
     let stderr = child.stderr.take().context("supervisor stderr absent")?;
     let stderr_path = output.join("supervisor.stderr");
     let capture_guard = client.namespace_guard.clone();

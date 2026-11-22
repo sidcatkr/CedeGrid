@@ -1558,6 +1558,7 @@ pub(super) fn supervise(
             })
             .spawn()
             .context("cannot spawn trusted worker gate")?;
+        crate::supervision::launch_trace("gate_spawned", &request.assignment_id);
         child = Some(OwnedChild::new(raw_child));
         let owned = child.as_mut().expect("just installed child");
         // Never call try_wait or permit another reaper before this operation.
@@ -1703,6 +1704,7 @@ pub(super) fn supervise(
             descendants.begin(super::family::boot_ticks()?, &gates)?;
         }
         write_deadline(&mut input, b"EXEC\n", deadline)?;
+        crate::supervision::launch_trace("exec_sent", &request.assignment_id);
         drop(input);
         let start = Instant::now();
         let mut lifecycle = Lifecycle::new(
@@ -2672,6 +2674,7 @@ pub(super) fn worker_gate() -> Result<()> {
     if let Some(path) = &gate.resource_target_file {
         command.env("CEDEGRID_RESOURCE_TARGET_FILE", path);
     }
+    crate::supervision::launch_trace("gate_exec", &gate.request.assignment_id);
     Err(command.exec()).context("authorized workload exec failed")
 }
 
