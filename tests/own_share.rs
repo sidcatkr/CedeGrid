@@ -295,29 +295,23 @@ fn the_kept_share_never_takes_from_the_other_principals_share() {
     assert!(budget(ContentionMode::Performance, 2400, 50, Some(true)) < 2000);
 }
 
-/// T117 on the test host (SC-003): fourteen steady 250 m tasks beside a second account whose
-/// busy loops take any CPU they get, on a host that splits CPU by account, so own work gets
-/// half the scope whatever its task count. Single intervals in which the account list read the
-/// other account below the scope's external reading counted as a second contender, and each
-/// paused more own tasks; none resumed while own work still read at its share. Once too few
-/// ran, own work fell below the share, the loops took the rest, and the target followed what
-/// they left: own work stayed at about 1270 m until they stopped. Running own work keeps the
-/// equal share, so the paused tasks resume to it. Admission still gets only what is left.
-#[test]
-fn a_greedy_principal_does_not_keep_running_own_work_below_its_share() {
+/// The T117 host's SC-003 shape: fourteen steady 250 m tasks in Neutral beside a second
+/// account whose busy loops take any CPU they get, on a host that splits CPU by account, so
+/// own work gets the lesser of what its running tasks want and half the scope, whatever its
+/// task count. `listed` gives the account list's reading of the other account from its usage,
+/// by interval. Returns own usage and the paused tasks, by interval.
+fn beside_a_greedy_account(intervals: u64, listed: &dyn Fn(u64, u64) -> u64) -> Vec<(u64, usize)> {
     const TASK: u64 = 250;
     const TASKS: u64 = 14;
     const CEDEGRID: u64 = 25;
     let mut engine = PolicyEngine::new();
     let mut paused: Vec<String> = Vec::new();
-    let mut own = 0;
-    for i in 0..120u64 {
+    let mut run = Vec::new();
+    for i in 0..intervals {
         let (mut snapshot, mut input) = reading_beside(0, CEDEGRID, 0, Some(true), None);
         let job = input.allocations[0].clone();
         let running = TASKS - paused.len() as u64;
-        // The kernel's per-account split: own work gets the lesser of what its running tasks
-        // want and half the scope, CedeGrid's own CPU inside the owner's half.
-        own = (TASK * running).min(2000 - CEDEGRID);
+        let own = (TASK * running).min(2000 - CEDEGRID);
         let per_task = own / running.max(1);
         input.allocations = (0..TASKS)
             .map(|k| {
@@ -356,13 +350,7 @@ fn a_greedy_principal_does_not_keep_running_own_work_below_its_share() {
             .collect();
         // The other account's busy loops take all the rest of the scope.
         let other = 4000 - own - CEDEGRID;
-        // In three single intervals its listed usage reads 60 m below the scope's reading.
-        let listed = if [15, 40, 51].contains(&i) {
-            other - 60
-        } else {
-            other
-        };
-        snapshot.principals.as_mut().unwrap()[1].cpu_millicores = listed;
+        snapshot.principals.as_mut().unwrap()[1].cpu_millicores = listed(i, other);
         snapshot.managed_cpu_lower_millicores = Some(own);
         snapshot.cpu_busy_millicores = Some(4000);
         snapshot.kernel.as_mut().unwrap().cpu.busy_millicores = Some(4000);
@@ -377,13 +365,76 @@ fn a_greedy_principal_does_not_keep_running_own_work_below_its_share() {
             .filter(|a| a.resource == ResourceKey::Cpu && a.step == YieldStep::Pause)
             .map(|a| a.allocation_id.clone())
             .collect();
+        run.push((own, paused.len()));
     }
+    run
+}
+
+/// T117 on the test host (SC-003): single intervals in which the account list read the other
+/// account 60 m below the scope's reading counted as a second contender, and each paused more
+/// own tasks; none resumed while own work still read at its share. Once too few ran, own work
+/// fell below the share, the loops took the rest, and running work was held to what they left,
+/// about 1270 m, until they stopped. Running own work keeps the equal share, so the paused
+/// tasks resume to it. Admission still gets only what is left.
+#[test]
+fn a_greedy_principal_does_not_keep_running_own_work_below_its_share() {
+    let run = beside_a_greedy_account(120, &|i, other| {
+        if [15, 40, 51].contains(&i) {
+            other - 60
+        } else {
+            other
+        }
+    });
+    let (own, paused) = run[run.len() - 1];
     // Back at the share, to within half a task, well within SC-003's 60 s of the last gap.
-    assert!(
-        own + TASK / 2 >= 2000 - CEDEGRID,
-        "own {own}, paused {}",
-        paused.len()
-    );
+    assert!(own + 125 >= 1975, "own {own}, paused {paused}");
+}
+
+/// The same with the list's sampling error, as on the test host: it reads the other account up
+/// to 80 m above its usage and, in single intervals, 60 m below. A gap within what the list
+/// read above the scope in recent intervals is that error, not another principal, so own work
+/// holds its share without a pause swinging it down (SC-003, FR-021).
+#[test]
+fn gaps_within_the_account_lists_own_error_pause_no_own_work() {
+    const ERROR: [i64; 6] = [80, -10, 40, 0, 60, -30];
+    let run = beside_a_greedy_account(120, &|i, other| {
+        if [15, 40, 51, 66, 80].contains(&i) {
+            other - 60
+        } else {
+            (other as i64 + ERROR[(i % 6) as usize]) as u64
+        }
+    });
+    // Converged after the first interval; never below the share by half a task after that.
+    for (i, (own, paused)) in run.iter().enumerate().skip(2) {
+        assert!(
+            own + 125 >= 1975,
+            "interval {i}: own {own}, paused {paused}"
+        );
+    }
+}
+
+/// Usage the account list cannot see at all, well beyond its error, is another principal at
+/// once, as before: Neutral holds own work to the fair share in the first interval that shows
+/// it (SC-002).
+#[test]
+fn an_unlisted_load_beyond_the_lists_error_contends_at_once() {
+    let mut engine = PolicyEngine::new();
+    let mut budgets = Vec::new();
+    for i in 0..8u64 {
+        let hidden = if i < 6 { 0 } else { 2000 };
+        let (mut snapshot, input) = reading_beside(0, 25, 0, Some(true), None);
+        let busy = 1000 + 25 + hidden;
+        snapshot.cpu_busy_millicores = Some(busy);
+        snapshot.kernel.as_mut().unwrap().cpu.busy_millicores = Some(busy);
+        snapshot.observed_at_unix_ms = 100 + i * 500;
+        snapshot.kernel.as_mut().unwrap().monotonic_elapsed_ms = 500 + i * 500;
+        let decision = engine
+            .evaluate(&config(ContentionMode::Neutral), &snapshot, &input, i * 500)
+            .unwrap();
+        budgets.push(decision.managed_budget.cpu_millicores);
+    }
+    assert!(budgets[5] > 2500, "{budgets:?}");
+    assert!(budgets[6] <= 2000, "{budgets:?}");
 }
 
 /// The owner's other processes, such as a shell or the coordinator, share the owner's slice

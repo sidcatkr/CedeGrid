@@ -693,6 +693,7 @@ mod modes {
             probe: None,
             fair_share_limit: None,
             unprotected: false,
+            unattributed_hold: 0,
         }
     }
 
@@ -2148,6 +2149,7 @@ mod scenarios {
                         probe: None,
                         fair_share_limit: None,
                         unprotected: false,
+                        unattributed_hold: 0,
                     },
                     &config.contention.thresholds(ResourceKind::GpuMemory),
                 );
