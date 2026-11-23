@@ -56,6 +56,14 @@ Arrival order, Admission, Admit immediately and Unprotected rules, and Principle
   principal's rate within 0.4%. Pinned for good, own work took 2% more and the plain principal
   got 7.7% less than beside plain Linux, which only priority over plain users may do.
 
+### Session 2026-11-23
+
+- Q: SC-009 asked for the even split beside a second CedeGrid account, but the first-comer rule
+  holds the later account at admission, so the two never share a CPU (T077, 2026-11-22). What
+  does it ask instead? → A: no raise while that account's work runs without the option, and the
+  first-comer rule decides between CedeGrid users as without the option (maintainer,
+  2026-11-23).
+
 ### Session 2026-11-19
 
 - Q: Is matching plain Linux enough for Performance in the default mode? → A: No. The goal is a
@@ -200,8 +208,8 @@ hand.
 
 An operator in System mode, with the administrator's permission, answers yes in setup. When a
 user who runs no CedeGrid work competes for the CPU, own Performance work gets about two thirds
-of it, where plain Linux would give each account half. Another CedeGrid user is never pushed
-below their fair share by it.
+of it, where plain Linux would give each account half. Between CedeGrid users the first-comer
+rule decides, as it does without the option.
 
 **Why this priority**: where the kernel splits CPU per account, it is the only way Performance
 gets more CPU than plain Linux by default, the maintainer's goal of 2026-11-19.
@@ -215,11 +223,13 @@ without the option.
 1. **Given** the policy permits it, the user chose it and own Performance work runs, **When** a
    plain account saturates the same CPUs, **Then** the account slice runs at weight 200 and own
    work's CPU share is above the even split by at least 10 points.
-2. **Given** the same, **When** a second CedeGrid account without the option competes, **Then**
-   no raise applies while it competes, and both get the even split.
+2. **Given** the same, **When** a second CedeGrid account without the option has work on the
+   same CPUs, **Then** no raise applies while that work runs, and the first-comer rule decides
+   between them: the later account's new work waits at admission rather than take the
+   first-comer below the lesser of its demand and its fair share.
 3. **Given** both CedeGrid accounts chose it, **When** they compete with each other and a plain
-   account, **Then** both run at 200, the even split holds between them and both get more than
-   the plain account.
+   account, **Then** both run at 200, the first-comer rule decides between them, and both get
+   more than the plain account.
 4. **Given** the policy forbids it, or the user did not choose it, or the host is rootless,
    **Then** no raise applies, and `doctor` says which condition is missing.
 5. **Given** a raise in force, **When** own work ends, the user turns it off, the policy turns it
@@ -436,7 +446,8 @@ and for own work, its arrival and the options in force.
 - **SC-009**: In System mode with priority over plain users permitted and chosen, own work's CPU
   share beside a saturating plain account is above the even split by at least 10 points, and its
   throughput above the same work by hand, in 3 of 3 runs of F2c and own-first; beside a second
-  CedeGrid account without the option, both stay at the even split.
+  CedeGrid account without the option, no raise applies while its work runs, and the first-comer
+  rule decides between them as it does without the option.
 
 ## Assumptions
 

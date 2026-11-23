@@ -128,7 +128,11 @@ asked for.
 
 A plain user's CPU share then shrinks while the member's work runs: with one plain user at the
 default weight of 100 and the member at 200, the member gets about two thirds of a contended CPU.
-CedeGrid users keep equal shares among themselves. An account whose unit runs work counts as a
+Where the member's tasks run on more CPUs than the plain user's, the kernel spreads the
+slice's weight over all of them, so the member gets less of the plain user's CPUs: about two
+fifths in the F2c gate, where by hand it gets a fifth.
+Between CedeGrid users the first-comer rule decides, as without the option: the later user's new
+work waits at admission rather than take the first-comer below its demand or its fair share. An account whose unit runs work counts as a
 CedeGrid user even where its processes are hidden from other users.
 
 `cedegrid doctor` shows whether the option is chosen, permitted and in force, and why it is not.

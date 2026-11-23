@@ -791,7 +791,7 @@ and unprotected never raised beside a protected first-comer. The first-comer kep
 | Requirement | Verdict |
 |---|---|
 | SC-009: above the even split by 10 points and above by hand, in 3 of 3 runs of F2c and own work first | pass, with the even split read as what plain Linux gives; two thirds only on one CPU |
-| SC-009: beside a second CedeGrid account without the choice, no raise and the even split | no raise: pass. The even split does not arise: the first-comer rule holds the later account at admission |
+| SC-009: beside a second CedeGrid account without the choice, no raise while its work runs, and the first-comer rule decides (reworded 2026-11-23) | pass |
 | SC-006: above the even split by 10 points, never beside a protected first-comer, back within two monitor intervals | pass: 10–15 points, no raise in the three runs beside a first-comer, back to 100 within 0.3 s |
 
 ## Rules for validation runs
