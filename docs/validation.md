@@ -873,6 +873,31 @@ at or after its own preparation. At 11:46–11:57, three rounds alternating:
 The gate now waits about 200 ms, to the half-interval floor that keeps the CPU reading usable.
 What is left is the start: own work's rate matches by hand.
 
+### The gate set at the merged head (`2f4f335`)
+
+With 001's work through `d2bc6e2` merged, FR-023's rootless gates ran again on 2026-11-23 at
+12:10–13:52, three rounds of each arm, the arms rotating, against the same work by hand:
+
+| Shape | Arm | Own work against by hand | The other side | Verdict |
+|---|---|---|---|---|
+| F2c on CPU | Performance | +1.9% (+1.2 to +2.3) | the second account's rate −4.3% | pass |
+| F2c on CPU | Unprotected (rootless: no raise reaches the other account) | +1.0% | −3.0% | pass |
+| Own work first on CPU | Performance | −0.0% (−0.6 to +0.3) | −0.8% | pass |
+| F2c on GPU compute | Performance | −0.9% (−0.9 to −0.8) | −0.2% | the GPU start (follow-ups) |
+| Own work first on GPU compute | Performance | −0.2% | +0.2% | pass |
+| Fill on an idle scope | Performance | all eight tasks admitted at 0.5 s in every run | | pass |
+| Batch, sixteen tasks | Performance | mean completion 37.7–38.2 s against 59.3–60.7 s by hand (−36%); total 61.5–64.4 s against 60.9–62.1 s | | mean: pass; total: the handoff (follow-ups) |
+| VRAM, six 2048 MiB tasks | Performance | all six ran, three at a time; by hand three of six failed to allocate in every run | | pass |
+| CedeGrid against CedeGrid on GPU, the second account first | Performance, admit immediately | −25.3%, −25.2%: own work held to one task beside the Performance first-comer, admit immediately ignored there; the first-comer +19.8%, +19.2% | | pass |
+| CedeGrid against CedeGrid on GPU, own work first | Performance | −0.1%; the second account's task +0.4% | | pass |
+
+No cap, pause or drain fell on own work in any run (SC-002).
+
+With the owner's go, the RAM shape ran at 14:12–14:40, three rounds alternating: twelve own tasks
+of 4096 MiB for 30 s each, more than the host's RAM and swap. CedeGrid ran all twelve, six at a
+time, in 64.9–66.9 s with no kill; by hand the kernel killed three of the twelve in every run
+(SC-005: pass).
+
 ## Rules for validation runs
 
 - Report these statuses separately:

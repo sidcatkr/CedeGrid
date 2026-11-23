@@ -17,4 +17,6 @@ Lines move to "Done" with a pointer once a later version does them.
 
 ## Done
 
-None yet.
+| Source | What | Where |
+|---|---|---|
+| Release checks (2026-11-23, coordinator) | Three Linux tests failed on the test host and in a Linux container: two still stopped Guaranteed work with the CPU cap the duty cycle's removal took away (057 C2, T616), and the third, the descendant bound, counted the first one's fixture, which its failure left running. The two now kill the supervisor while Guaranteed work runs. | the commit after `2f4f335`; agent and managed supervision suites pass in the container |

@@ -3327,8 +3327,9 @@ impl Service {
     }
 }
 
-/// Kill a Tracked run's supervisor while its family is stopped, with the agent alive or
-/// down at that moment, and record what each member received and how the run ended.
+/// Kill a Tracked run's supervisor while its family is stopped (Opportunistic) or running
+/// (Guaranteed), with the agent alive or down at that moment, and record what each member
+/// received and how the run ended.
 #[cfg(target_os = "linux")]
 async fn supervisor_loss(
     class: AllocationClass,
@@ -3415,19 +3416,18 @@ async fn supervisor_loss(
         spec["control_token"].as_str().unwrap(),
     )
     .unwrap();
-    // A step the agent's own sequence never overtakes: a pause, or for Guaranteed work, which
-    // is never paused, a cap at the minimum duty.
-    let step = if class == AllocationClass::Guaranteed {
-        serde_json::json!({"step":"cap","target":0,"cause":"external_growth"})
-    } else {
-        serde_json::json!({"step":"pause","cause":"external_growth"})
-    };
-    writeln!(
-        stream,
-        "{}",
-        serde_json::json!({"kind":"adjust","sequence":1_000_000,"resources":{"cpu":step}})
-    )
-    .unwrap();
+    // A pause the agent's own sequence never overtakes. Guaranteed work is never paused, and
+    // since the stop-and-resume duty cycle went it has no runtime step in a rootless run
+    // (057 C2, T616), so its supervisor dies while the family runs.
+    let guaranteed = class == AllocationClass::Guaranteed;
+    if !guaranteed {
+        writeln!(
+            stream,
+            "{}",
+            serde_json::json!({"kind":"adjust","sequence":1_000_000,"resources":{"cpu":{"step":"pause","cause":"external_growth"}}})
+        )
+        .unwrap();
+    }
     let leader = members().iter().find(|(r, _)| r == "leader").unwrap().1;
     let supervisor: u32 = fs::read_to_string(format!("/proc/{leader}/stat"))
         .unwrap()
@@ -3439,13 +3439,18 @@ async fn supervisor_loss(
         .unwrap()
         .parse()
         .unwrap();
-    // Kill it in an off phase: every member stopped at once.
+    // Kill it with every member stopped at once, or for Guaranteed work, with every member
+    // alive.
     let end = Instant::now() + Duration::from_secs(10);
     loop {
-        if members()
-            .iter()
-            .all(|(_, pid)| proc_state(*pid) == Some('T'))
-        {
+        if members().iter().all(|(_, pid)| {
+            let state = proc_state(*pid);
+            if guaranteed {
+                state.is_some_and(|s| s != 'Z')
+            } else {
+                state == Some('T')
+            }
+        }) {
             // SAFETY: the test's own run's supervisor, the leader's parent read just above.
             unsafe { libc::kill(supervisor as i32, libc::SIGKILL) };
             break;
@@ -3515,9 +3520,9 @@ async fn supervisor_loss(
     loss
 }
 
-/// Guaranteed work whose supervisor dies in an off phase is never sent SIGHUP and runs again,
-/// family or single process, with the agent alive or started later: the workload finishes with
-/// its output (033 D.1, D.3).
+/// Guaranteed work whose supervisor dies is never sent SIGHUP and runs on, family or single
+/// process, with the agent alive or started later: the workload finishes with its output (033
+/// D.1, D.3).
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn guaranteed_work_survives_its_supervisors_death() {

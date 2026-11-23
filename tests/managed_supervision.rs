@@ -2296,24 +2296,15 @@ struct PauseThenWait {
 #[cfg(target_os = "linux")]
 impl supervision::SupervisorControl for PauseThenWait {
     fn poll(&mut self) -> anyhow::Result<Vec<supervision::SupervisorCommand>> {
-        use cedegrid::contention::{ResourceKey, StepRequest, YieldCause, YieldStep};
+        use cedegrid::contention::YieldStep;
         if !self.paused && self.dir.join("leader.pid").exists() {
             self.paused = true;
             if !self.guaranteed {
                 return Ok(vec![cpu_step(1, YieldStep::Pause)]);
             }
-            return Ok(vec![supervision::SupervisorCommand::Adjust {
-                sequence: 1,
-                resources: BTreeMap::from([(
-                    ResourceKey::Cpu,
-                    StepRequest {
-                        step: YieldStep::Cap,
-                        target: Some(1),
-                        cause: YieldCause::ExternalGrowth,
-                        deadline_ms: None,
-                    },
-                )]),
-            }]);
+            // Guaranteed work has no runtime step in a rootless run since the duty cycle went
+            // (057 C2, T616): it runs on, and the fixture is ready.
+            fs::write(self.dir.join("paused"), "").unwrap();
         }
         Ok(vec![])
     }
@@ -2438,19 +2429,23 @@ fn start_paused_fixture(
         .parse()
         .unwrap();
     let watched = Watched::open(pid);
-    // A pause stops it at once; a cap stops it in each off phase.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while !run_state(pid).contains('T') {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the leader is never stopped"
-        );
+    // A pause stops Opportunistic work at once; Guaranteed work is never stopped.
+    if class == "opportunistic" {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !run_state(pid).contains('T') {
+            if std::time::Instant::now() >= deadline {
+                // The fixture and its run end with the test, so no later test counts them.
+                let _ = fixture.kill();
+                let _ = fixture.wait();
+                panic!("the leader is never stopped");
+            }
+        }
     }
     (fixture, pid, watched)
 }
 
-/// A supervisor that dies while its run is paused takes Opportunistic work with it and lets
-/// Guaranteed work continue, through the gate's parent-death signal (FR-078).
+/// A supervisor that dies takes its paused Opportunistic work with it and lets Guaranteed work
+/// run on, through the gate's parent-death signal (FR-078).
 #[cfg(target_os = "linux")]
 #[test]
 fn a_supervisor_that_dies_kills_opportunistic_work_and_resumes_guaranteed_work() {
