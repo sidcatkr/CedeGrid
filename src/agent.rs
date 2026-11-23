@@ -224,6 +224,9 @@ enum Control {
     Oom { preferred: bool },
     /// Ask the worker to save its progress (FR-075).
     SaveProgress,
+    /// Run the family at this nice value for an unprotected run, or at its launch value
+    /// (006 FR-016). An older supervisor reports the line and ignores it: no raise.
+    Nice { value: Option<i32> },
     /// The agent's latest GPU observation. Supervisors run no collector of
     /// their own; GPU launch rechecks use this (research R1).
     Observation {
@@ -728,6 +731,8 @@ struct ChildSlot {
     sent_allowance: Option<crate::model::ResourceAmounts>,
     /// The OOM preference last sent, unknown for a reattached supervisor (FR-023).
     sent_oom: Option<bool>,
+    /// The nice raise last sent, unknown for a reattached supervisor (006 FR-016).
+    sent_nice: Option<Option<i32>>,
     /// Why it was sent, with own RAM and its fair share, for the evidence line.
     oom_context: Option<serde_json::Value>,
     /// RAM as the agent last saw it while the task ran, to judge an OOM kill (FR-076).
@@ -2711,6 +2716,7 @@ mod drain_tests {
             sent_steps: BTreeMap::new(),
             sent_allowance: None,
             sent_oom: None,
+            sent_nice: None,
             oom_context: None,
             ram_view: None,
             oom_verdict: None,
@@ -2934,6 +2940,24 @@ mod pacing_tests {
         // Already beside the plain principal, or it left.
         assert!(!placement_window_opens(true, true, 0));
         assert!(!placement_window_opens(true, false, 0));
+    }
+
+    /// An unprotected run holds the host's nice raise only where accounts share a CPU cgroup,
+    /// outside a System mode unit, while the raise is wanted and the run is not draining; every
+    /// other run, and every other case, is at its launch value (006 FR-016, FR-018).
+    #[test]
+    fn only_a_wanted_undrained_unprotected_run_gets_the_nice_raise() {
+        use super::service::nice_target;
+        use crate::actuation::Raise;
+        let nice = Raise::Nice(-5);
+        assert_eq!(nice_target(nice, false, true, true, false), Some(-5));
+        assert_eq!(nice_target(nice, true, true, true, false), None);
+        assert_eq!(nice_target(nice, false, false, true, false), None);
+        assert_eq!(nice_target(nice, false, true, false, false), None);
+        assert_eq!(nice_target(nice, false, true, true, true), None);
+        for host in [Raise::AccountSlice, Raise::Unavailable] {
+            assert_eq!(nice_target(host, false, true, true, false), None);
+        }
     }
 
     /// A placed task starts on the scope CPU with the fewest own tasks, the first on a tie.

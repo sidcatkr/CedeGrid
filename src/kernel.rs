@@ -791,6 +791,22 @@ pub fn last_cpu_of(stat: &str) -> Option<u32> {
         .ok()
 }
 
+/// A process's start time in clock ticks since boot, from field 22 of its `/proc/<pid>/stat`;
+/// `None` when it is gone or the line does not parse. Read-only.
+pub fn process_start_time(pid: u32) -> Option<u64> {
+    start_time_of(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
+}
+
+/// Field 22 of a `/proc/<pid>/stat` line: the 20th after the command's closing parenthesis.
+pub fn start_time_of(stat: &str) -> Option<u64> {
+    stat.rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()
+}
+
 pub fn event_count(text: &str, key: &str) -> Option<u64> {
     text.lines().find_map(|line| {
         let (name, value) = line.split_once(' ')?;
@@ -2115,5 +2131,13 @@ mod last_cpu_tests {
         let line = format!("4242 (a (b) c) {}", rest.join(" "));
         assert_eq!(last_cpu_of(&line), Some(39));
         assert_eq!(last_cpu_of("4242 (short) S 1 2"), None);
+    }
+
+    #[test]
+    fn the_start_time_is_field_22() {
+        let rest: Vec<String> = (3..=52).map(|field| field.to_string()).collect();
+        let line = format!("4242 (a (b) c) {}", rest.join(" "));
+        assert_eq!(start_time_of(&line), Some(22));
+        assert_eq!(start_time_of("4242 (short) S 1 2"), None);
     }
 }

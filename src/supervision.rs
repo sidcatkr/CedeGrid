@@ -621,6 +621,11 @@ pub enum SupervisorCommand {
     },
     /// Ask the worker to save its progress now (FR-075).
     SaveProgress,
+    /// Run the family's threads at this nice value for an unprotected run, or return them to
+    /// the launch value (006 FR-016, FR-018).
+    Nice {
+        value: Option<i32>,
+    },
 }
 #[cfg(unix)]
 struct LocalControl;

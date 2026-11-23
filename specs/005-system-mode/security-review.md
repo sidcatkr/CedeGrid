@@ -71,6 +71,13 @@ failed check leaves the thread where it is and reports it. Only the supervisor's
 reached, and the kernel refuses the call on other users' threads
 (`a_placed_task_starts_on_its_cpu_and_goes_back_on_the_scope`).
 
+006's nice raise (FR-016, T041) adds a second one, outside System mode: where accounts share a CPU
+cgroup and the account has a granted `RLIMIT_NICE`, an unprotected run's supervisor sets each
+thread of its verified family to the raise and back (`renice_family`). Each member's start time
+is checked before and after, and each thread is fixed and checked as above; a thread at another
+value than the one moved from is left as the run set it
+(`the_nice_raise_moves_every_thread_and_returns_to_the_launch_value`).
+
 ## Evidence to hand the review
 
 - The container suite (`tools/docker-validation/system-mode/`, module `container`): eighteen

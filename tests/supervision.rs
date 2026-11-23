@@ -1698,6 +1698,71 @@ mod actuation {
         assert_eq!(changes, [(100, 1000), (1000, 100)]);
     }
 
+    /// The unprotected nice raise (006 FR-016): a `nice` line moves every thread of the run to
+    /// the value, and clearing it returns them to the launch value. Lowering nice needs a granted
+    /// `RLIMIT_NICE` (`--ulimit nice=40:40` in a container); without one the test has nothing to
+    /// check and says so.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_nice_raise_moves_every_thread_and_returns_to_the_launch_value() {
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: getrlimit writes into the struct passed.
+        assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NICE, &mut limit) }, 0);
+        let cedegrid::actuation::Raise::Nice(raise) =
+            cedegrid::actuation::Raise::on_host(false, false, Some(limit.rlim_cur))
+        else {
+            eprintln!("skipped: lowering nice needs an RLIMIT_NICE above 20");
+            return;
+        };
+        let temp = TempDir::new().unwrap();
+        let mut req = request(temp.path());
+        req.class = AllocationClass::Opportunistic;
+        let body = "import os, threading, time\nend=time.monotonic()+60\ndef run(i):\n    while time.monotonic()<end and not os.path.exists('stop'):\n        v=os.getpriority(os.PRIO_PROCESS, 0)\n        open(f'n{i}.tmp','w').write(str(v))\n        os.replace(f'n{i}.tmp', f'n{i}')\n        time.sleep(0.02)\nts=[threading.Thread(target=run, args=(i,)) for i in (1, 2)]\nfor t in ts: t.start()\nrun(0)\nfor t in ts: t.join()\n";
+        req.argv = vec![python(), "-c".into(), body.into()];
+        let dir = temp.path().to_path_buf();
+        // Every thread reports the same value, and it is the one wanted.
+        let all = move |want: Box<dyn Fn(i32) -> bool>| {
+            let dir = dir.clone();
+            wait(move |_| {
+                let values: Vec<Option<i32>> = (0..3)
+                    .map(|i| {
+                        fs::read_to_string(dir.join(format!("n{i}")))
+                            .ok()
+                            .and_then(|s| s.trim().parse().ok())
+                    })
+                    .collect();
+                values.iter().all(Option::is_some)
+                    && values.windows(2).all(|w| w[0] == w[1])
+                    && values[0].is_some_and(&want)
+            })
+        };
+        let mut script = Script::new(
+            temp.path(),
+            vec![
+                all(Box::new(move |v| v > raise)),
+                send(SupervisorCommand::Nice { value: Some(raise) }),
+                all(Box::new(move |v| v == raise)),
+                send(SupervisorCommand::Nice { value: None }),
+                // Back at the launch value, above the raise.
+                all(Box::new(move |v| v > raise)),
+            ],
+        );
+        let journal = Journal::new();
+        let outcome = run_controlled(
+            &req,
+            &long_lease(),
+            &journal,
+            &mut Backend::new(),
+            &mut script,
+        )
+        .unwrap();
+        script.check();
+        assert_eq!(outcome.exit_code, Some(0));
+    }
+
     fn adjusted(
         reports: &[SupervisorReport],
         sequence: u64,

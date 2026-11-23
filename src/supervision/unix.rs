@@ -648,6 +648,7 @@ fn apply_control_commands(
             | SupervisorCommand::Query
             | SupervisorCommand::Allowance { .. }
             | SupervisorCommand::Oom { .. }
+            | SupervisorCommand::Nice { .. }
             | SupervisorCommand::SaveProgress) => runtime.push(command),
         }
     }
@@ -806,6 +807,7 @@ fn apply_runtime_commands(
     actuator: &mut dyn Actuator,
     family: &mut OwnedFamily<'_>,
     oom: &mut OomMarks,
+    nice: &mut NiceRaise,
     contention: &mut crate::contention::AllocationContention,
     targets: &mut crate::actuation::TargetChannel,
     directories: &[PathBuf],
@@ -1075,6 +1077,39 @@ fn apply_runtime_commands(
                     changes,
                     detail: details.join("; "),
                 });
+            }
+            SupervisorCommand::Nice { value } => {
+                // The launch value is every member's baseline: the one the gate verified, else
+                // the leader's main thread at the first raise, which the gate left as inherited
+                // (006 FR-016).
+                let baseline = *nice.baseline.get_or_insert_with(|| {
+                    record
+                        .evidence
+                        .iter()
+                        .find(|e| e.control == "cpu.nice")
+                        .and_then(|e| e.effective.as_deref()?.parse::<i32>().ok())
+                        .or_else(|| leader_nice(family.identity))
+                        .unwrap_or(0)
+                });
+                match nice.step(value, baseline) {
+                    Ok(Some((from, to))) => {
+                        let change = renice_family(&family.identities(), from, to);
+                        nice.raised = value;
+                        report(
+                            if value.is_some() {
+                                "nice_raised"
+                            } else {
+                                "nice_restored"
+                            },
+                            &request.assignment_id,
+                            change.describe(to),
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        report("nice_refused", &request.assignment_id, format!("{error:#}"))
+                    }
+                }
             }
             SupervisorCommand::Allowance { allowance } => {
                 if targets.set_allowance(allowance)
@@ -1475,6 +1510,7 @@ pub(super) fn supervise(
     // The family as last reported, and the most processes found outside it at once, and why.
     let mut family_report = FamilyReport::default();
     let mut oom = OomMarks::default();
+    let mut nice = NiceRaise::default();
     let mut outside_reason: Option<OutsideReason> = None;
     // (hint_ready, observes_drain), reported when either changes (FR-062).
     let mut readiness = (false, false);
@@ -2024,6 +2060,7 @@ pub(super) fn supervise(
                         actuator.as_mut(),
                         &mut family,
                         &mut oom,
+                        &mut nice,
                         &mut contention,
                         &mut targets,
                         &directories,
@@ -2858,6 +2895,155 @@ fn read_oom_score_adj(_identity: &ProcessIdentity) -> Result<i32> {
     bail!("oom_score_adj is unavailable on this platform")
 }
 
+/// The unprotected nice raise in force on the run, if any (006 FR-016).
+#[derive(Debug, Default)]
+struct NiceRaise {
+    raised: Option<i32>,
+    /// The launch value, fixed at the first raise.
+    baseline: Option<i32>,
+}
+impl NiceRaise {
+    /// The threads to move for `value`: from the value they run at to the one they get, or
+    /// nothing to do. A raise goes only below the launch value and never below
+    /// `LOWEST_RAISE_NICE`.
+    fn step(&self, value: Option<i32>, baseline: i32) -> Result<Option<(i32, i32)>> {
+        if let Some(value) = value {
+            ensure!(
+                (crate::actuation::LOWEST_RAISE_NICE..baseline).contains(&value),
+                "nice {value} is not a raise from {baseline}"
+            );
+        }
+        Ok(match (self.raised, value) {
+            (None, Some(to)) => Some((baseline, to)),
+            (Some(from), None) => Some((from, baseline)),
+            (Some(from), Some(to)) if from != to => Some((from, to)),
+            _ => None,
+        })
+    }
+}
+
+/// What a renice did across the family's threads (006 FR-016).
+#[derive(Debug, Default, PartialEq, Eq)]
+struct NiceChange {
+    changed: usize,
+    /// Threads at another value than the one moved from, which the run set itself.
+    kept: usize,
+    /// Threads whose identity could not be confirmed around the call.
+    unverified: Vec<u32>,
+    failed: Vec<String>,
+}
+impl NiceChange {
+    fn describe(&self, to: i32) -> String {
+        let mut detail = format!("threads at nice {to}: {}", self.changed);
+        if self.kept > 0 {
+            detail.push_str(&format!("; left at the value the run set: {}", self.kept));
+        }
+        if !self.unverified.is_empty() {
+            detail.push_str(&format!(
+                "; left as they are, as their identity could not be confirmed around the call: {:?}",
+                self.unverified
+            ));
+        }
+        if !self.failed.is_empty() {
+            detail.push_str(&format!("; not changed: {}", self.failed.join("; ")));
+        }
+        detail
+    }
+}
+
+/// Moves every thread of the verified family members that runs at `from` to `to`. Nice is
+/// per thread on Linux, and a thread inherits its creator's, so threads and processes started
+/// during a raise carry it and return with the rest. Each call takes only a thread ID, so the
+/// constitution's rule applies: the member's start time is checked before and after, and each
+/// thread's identity is fixed as for the placement release.
+fn renice_family(members: &[ProcessIdentity], from: i32, to: i32) -> NiceChange {
+    let mut change = NiceChange::default();
+    #[cfg(target_os = "linux")]
+    for member in members {
+        if let Err(error) = renice_member(member, from, to, &mut change) {
+            change.failed.push(format!("pid {}: {error:#}", member.pid));
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (members, from, to);
+        change.failed.push("nice per thread is Linux only".into());
+    }
+    change
+}
+
+#[cfg(target_os = "linux")]
+fn renice_member(
+    member: &ProcessIdentity,
+    from: i32,
+    to: i32,
+    change: &mut NiceChange,
+) -> Result<()> {
+    let pid = member.pid;
+    let same = || crate::kernel::process_start_time(pid) == Some(member.start_time);
+    ensure!(same(), "the member is gone or is no longer this run's");
+    for entry in std::fs::read_dir(format!("/proc/{pid}/task"))? {
+        let Some(tid) = entry?
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Some(thread) = ThreadIdentity::fix(pid, tid) else {
+            continue;
+        };
+        if thread_nice(tid)? != from {
+            change.kept += 1;
+            continue;
+        }
+        // SAFETY: a thread of a verified member whose identity was just fixed.
+        let rc = unsafe { libc::setpriority(libc::PRIO_PROCESS, tid as libc::id_t, to) };
+        if rc != 0 {
+            change
+                .failed
+                .push(format!("thread {tid}: {}", io::Error::last_os_error()));
+        } else if thread.still(pid, tid) && same() {
+            change.changed += 1;
+        } else {
+            change.unverified.push(tid);
+        }
+    }
+    Ok(())
+}
+
+/// The leader's main thread's nice value, while the leader is still this run's.
+fn leader_nice(identity: &ProcessIdentity) -> Option<i32> {
+    #[cfg(target_os = "linux")]
+    {
+        let value = thread_nice(identity.pid).ok()?;
+        (crate::kernel::process_start_time(identity.pid) == Some(identity.start_time))
+            .then_some(value)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = identity;
+        None
+    }
+}
+
+/// A thread's nice value. -1 is a valid one, so errno tells a failure apart.
+#[cfg(target_os = "linux")]
+fn thread_nice(tid: u32) -> Result<i32> {
+    // SAFETY: errno is this thread's; getpriority only reads.
+    unsafe { *libc::__errno_location() = 0 };
+    // SAFETY: a read of one thread's priority.
+    let value = unsafe { libc::getpriority(libc::PRIO_PROCESS, tid as libc::id_t) };
+    // SAFETY: as above.
+    let errno = unsafe { *libc::__errno_location() };
+    ensure!(
+        value != -1 || errno == 0,
+        "{}",
+        io::Error::from_raw_os_error(errno)
+    );
+    Ok(value)
+}
+
 /// The run's OOM preference over time and each member's own baseline (FR-023).
 #[derive(Default)]
 struct OomMarks {
@@ -3093,6 +3279,31 @@ impl Spell {
     /// Records this turn's result; true when it starts a failing spell.
     fn starts(&mut self, failed: bool) -> bool {
         !std::mem::replace(&mut self.0, failed) && failed
+    }
+}
+
+#[cfg(test)]
+mod nice_tests {
+    use super::NiceRaise;
+
+    /// A raise goes only below the launch value and never below -10; it moves threads from the
+    /// launch value to the raise, from one raise to another, and back (006 FR-016).
+    #[test]
+    fn a_nice_raise_moves_between_the_launch_value_and_the_raise() {
+        let fresh = NiceRaise::default();
+        assert_eq!(fresh.step(Some(-5), 0).unwrap(), Some((0, -5)));
+        assert_eq!(fresh.step(Some(4), 10).unwrap(), Some((10, 4)));
+        assert_eq!(fresh.step(None, 0).unwrap(), None);
+        for refused in [0, 3, -11] {
+            assert!(fresh.step(Some(refused), 0).is_err(), "{refused}");
+        }
+        let raised = NiceRaise {
+            raised: Some(-5),
+            baseline: Some(0),
+        };
+        assert_eq!(raised.step(None, 0).unwrap(), Some((-5, 0)));
+        assert_eq!(raised.step(Some(-10), 0).unwrap(), Some((-5, -10)));
+        assert_eq!(raised.step(Some(-5), 0).unwrap(), None);
     }
 }
 

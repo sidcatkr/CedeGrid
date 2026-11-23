@@ -399,12 +399,7 @@ impl Raise {
             Self::AccountSlice => {
                 "your account slice's CPU weight, where the administrator policy permits".into()
             }
-            // The supervisor's per-thread nice step is not built yet (006 T041).
-            Self::Nice(nice) => {
-                format!(
-                    "nice down to {nice} would reach other users; this version does not apply it yet"
-                )
-            }
+            Self::Nice(nice) => format!("nice {nice} on the run's own processes"),
             Self::Unavailable => "none on this host: it only starts work sooner".into(),
         }
     }

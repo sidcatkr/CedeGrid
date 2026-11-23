@@ -76,8 +76,11 @@
   also raises the account slice's CPU weight through the broker where the host splits CPU by
   account (`modes.unprotected_cpu_weight`, 400 by default). The raise never replaces a weight
   the broker did not set, and ends within 5 s of the key turning off or the member leaving the
-  group, and when the broker stops or restarts. A run with either option starts at least the
-  tasks Performance would start for it.
+  group, and when the broker stops or restarts. Where accounts share a CPU cgroup and the
+  account has a granted nice limit (`RLIMIT_NICE`), unprotected instead runs every thread of the
+  run at the lowest nice value the limit allows, never below -10, and back at the launch value
+  within two monitor intervals of the run ending or draining, or of a protected first-comer
+  arriving. A run with either option starts at least the tasks Performance would start for it.
 - **Priority over plain users.** An install option that runs own CPU work above users who run
   no CedeGrid work, never above another CedeGrid user. It needs both the administrator's
   permission in System mode (`modes.plain_priority`, weight `modes.plain_priority_cpu_weight`,

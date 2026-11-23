@@ -90,11 +90,14 @@ this thread's.
   read back; a 30 s lease the agent renews; reset on withdrawal, expiry, the unit's stop, removal
   from the group and broker start (its own drop-in only). The administrator policy's
   `unprotected_cpu_weight` (default 400, 101 to 10000) goes in `src/broker/admin_policy.rs`.
-- [ ] T041 [US3] (open: per-thread nice with Principle I's thread checks, and its withdrawal
-  when a protected first-comer arrives) Test first, then the supervisor's nice raise in
+- [x] T041 [US3] Test first, then the supervisor's nice raise in
   `src/supervision/unix.rs`:
   read `RLIMIT_NICE`, set the lowest permitted value no lower than −10 on the run's verified
   processes, and report none when not permitted.
+  - *Done 2026-11-23:* per thread, under the constitution's thread checks, from the agent's
+    `nice` line, withdrawn on drain, at a protected first-comer's arrival and when the run ends.
+    In a Linux container with `RLIMIT_NICE` 40, three threads went from 10 to -10 and back. The
+    host gate in a shared CPU cgroup goes with T051.
 - [x] T042 [US3] The agent asks for and withdraws the raise per FR-016 and FR-018
   (`src/agent/service.rs`, `src/system_mode.rs`).
 - [x] T043 [US3] Container fixtures for the broker request in `tests/system_mode.rs`, and the

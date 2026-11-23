@@ -58,6 +58,7 @@ impl SupervisorControl for PipeControl {
                 | Control::Query
                 | Control::Allowance { .. }
                 | Control::Oom { .. }
+                | Control::Nice { .. }
                 | Control::SaveProgress => {}
                 Control::Authorize {
                     lease,
@@ -305,6 +306,9 @@ impl PipeControl {
                 }
                 Ok(Incoming::Control(Control::SaveProgress)) => {
                     commands.push(SupervisorCommand::SaveProgress)
+                }
+                Ok(Incoming::Control(Control::Nice { value })) => {
+                    commands.push(SupervisorCommand::Nice { value })
                 }
                 Ok(Incoming::Control(Control::Authorize { .. })) => {}
                 Ok(Incoming::Unknown(detail)) => unknown_control(&detail),

@@ -536,6 +536,26 @@ struct RaiseSteer {
         tokio::task::JoinHandle<crate::system_mode::Outcome>,
     )>,
     plain: crate::system_mode::PlainSteer,
+    /// Whether any run's supervisor was last sent a nice raise (006 FR-016).
+    nice: bool,
+}
+
+/// The nice value an unprotected run's family should run at: the host's nice raise while the
+/// raise is wanted and the run is neither draining nor someone else's; the launch value
+/// (`None`) otherwise (006 FR-016, FR-018).
+pub(super) fn nice_target(
+    host: crate::actuation::Raise,
+    in_unit: bool,
+    wanted: bool,
+    unprotected: bool,
+    draining: bool,
+) -> Option<i32> {
+    match host {
+        crate::actuation::Raise::Nice(value) if !in_unit && wanted && unprotected && !draining => {
+            Some(value)
+        }
+        _ => None,
+    }
 }
 
 /// How long, in monitor intervals, a held priority over plain users stays raised after another
@@ -1675,6 +1695,64 @@ impl AgentLoop<'_> {
     /// off the loop's thread: for unprotected runs (006 FR-016, FR-018) or for priority over
     /// plain users (FR-026), the higher where both apply. Outside a unit, or where no raise
     /// reaches other accounts, nothing is asked.
+    /// Where accounts share a CPU cgroup, each unprotected run's supervisor holds its family
+    /// at the host's nice raise while no protected first-comer is on the CPU, and at its launch
+    /// value otherwise, checked every interval so it ends within two (006 FR-016, FR-018).
+    fn steer_nice(&mut self, snapshot: &crate::model::Snapshot) -> Result<()> {
+        let host = crate::actuation::Raise::current();
+        let in_unit = crate::system_mode::in_unit();
+        let possible = matches!(host, crate::actuation::Raise::Nice(_)) && !in_unit;
+        // Nothing raised and nothing that could be: no journal read.
+        if !possible && self.slots.values().all(|slot| slot.sent_nice == Some(None)) {
+            return Ok(());
+        }
+        // A journal that cannot be read raises nothing.
+        let runs = self.store.unprotected_runs().unwrap_or_default();
+        let unprotected: BTreeSet<&str> =
+            runs.iter().map(|run| run.assignment_id.as_str()).collect();
+        let wanted = crate::system_mode::raise_wanted(
+            runs.len(),
+            self.store
+                .arrivals()
+                .ok()
+                .and_then(|arrivals| arrivals.into_values().min()),
+            snapshot.principals.as_deref().unwrap_or_default(),
+        );
+        let mut raised = false;
+        for (id, slot) in self.slots.iter_mut() {
+            if slot.exited || slot.sequence == 0 {
+                continue;
+            }
+            let target = nice_target(
+                host,
+                in_unit,
+                wanted,
+                unprotected.contains(id.as_str()),
+                slot.drain_sent_at.is_some(),
+            );
+            raised |= target.is_some();
+            if slot.sent_nice == Some(target) {
+                continue;
+            }
+            if send(slot, &Control::Nice { value: target }).is_ok() {
+                slot.sent_nice = Some(target);
+            }
+        }
+        if raised != self.raise.nice {
+            self.raise.nice = raised;
+            emit(&serde_json::json!({
+                "event": if raised { "raise_on" } else { "raise_off" },
+                "detail": match host {
+                    crate::actuation::Raise::Nice(value) if raised => format!(
+                        "warning: an UNPROTECTED run's processes run at nice {value}"
+                    ),
+                    _ => "UNPROTECTED runs' processes are back at their launch nice value".into(),
+                },
+            }))?;
+        }
+        Ok(())
+    }
+
     async fn steer_raise(
         &mut self,
         snapshot: &crate::model::Snapshot,
@@ -3142,6 +3220,7 @@ pub async fn run(
             // Observation charges its own stages.
             let (snapshot, allocations, mut decision) = state.observe(&records).await?;
             crate::supervision::launch_trace("decided", "-");
+            state.steer_nice(&snapshot)?;
             state.steer_raise(&snapshot, &allocations).await?;
             mark = LoopCost::thread_ns();
             state.share_observation(&snapshot);
