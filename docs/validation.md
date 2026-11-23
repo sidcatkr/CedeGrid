@@ -801,7 +801,16 @@ like Performance in two rootless runs on 2026-11-23 at 02:16–02:23, and unprot
 four. `8635f60` places such a run against the larger CPU of the two budgets, as the agent's
 launch capacity already did. At 02:31–02:38, rootless, unprotected started all eight at
 0.46–0.48 s in three of three runs, with own CPU 2,449–2,474 m against 2,500 m under Performance.
-The System mode unprotected rows above predate that change.
+The System mode unprotected rows above predate that change. On 2026-11-23 at 09:12–09:24 they ran
+again from 0.2.0~sys006.2 (built at `81aeb30`), F2c by hand and unprotected beside the plain
+second account, three rounds alternating:
+
+| Arm | Own work against by hand | Second account's rate | Share of its CPUs | Own account slice's weight |
+|---|---|---|---|---|
+| by hand | | | 19.6–23.5% | 100 |
+| Unprotected | +29.8% (+27.0 to +32.6) | −50.8%, p99 6.3 ms against 3.3 ms | 54.0–60.5% | 400 from 0.8–5.5 s after submission until 0.36–0.37 s after the work ended |
+
+All eight tasks started at 0.45–0.46 s in every run. SC-006: pass, 31–40 points over by hand.
 
 ## Rules for validation runs
 
