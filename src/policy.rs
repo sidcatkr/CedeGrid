@@ -349,6 +349,10 @@ pub struct PolicyEngine {
     /// Consecutive intervals in which what no readable principal accounts for stayed at
     /// `principal_min_percent` or above, for Yield First's cooldown (FR-034).
     cpu_unattributed_intervals: u32,
+    /// How far the account list read above the scope's external CPU in recent intervals, by
+    /// time: the list's own error, within which usage it leaves unaccounted stands for no
+    /// principal until it lasts the principal window (FR-021, SC-003).
+    cpu_list_over: std::collections::VecDeque<(u64, u64)>,
     /// RAM's: the level of what no process lists, kernel memory among it, and the consecutive
     /// intervals it has stayed `principal_min_percent` above that level.
     ram_unattributed: Option<(u64, u32)>,
@@ -556,6 +560,10 @@ struct Interval<'a> {
     allocation_modes: BTreeMap<String, BTreeMap<ResourceKind, ContentionMode>>,
     // Measurement and budgets.
     budget: Resources,
+    /// The equal share running own work keeps on CPU while another principal contends, whatever
+    /// room that principal took: whole-task holds never go below it, while admission keeps the
+    /// budget (SC-003). Zero in Yield First, with no contending principal, or with CPU unknown.
+    cpu_kept_running: u64,
     /// The CPU a run with admit immediately may be placed against, where the cap reaches
     /// Performance: the hold counts only protected first-comers (006 FR-013).
     admit_immediately_cpu: Option<u64>,
@@ -582,6 +590,9 @@ struct Interval<'a> {
     cpu_bound: u64,
     /// This interval's external CPU that no listed principal accounts for.
     cpu_unattributed: u64,
+    /// This interval's CPU of every listed account, as `note_cpu_quiet` counts it; None while
+    /// the list cannot be read.
+    cpu_listed: Option<u64>,
     /// This interval's external CPU estimate, beside the window's that sets the budget.
     cpu_interval_external: Option<u64>,
     /// Own CPU usage is over its target without the budget falling, within the dwell: held
@@ -704,6 +715,7 @@ impl<'a> Interval<'a> {
             held_back_cpu: 0,
             allocation_modes: BTreeMap::new(),
             budget: Resources::default(),
+            cpu_kept_running: 0,
             admit_immediately_cpu: None,
             admit_immediately_plain: false,
             admit_immediately_closed: BTreeSet::new(),
@@ -715,6 +727,7 @@ impl<'a> Interval<'a> {
             cpu_held_inconsistent: false,
             cpu_bound: 0,
             cpu_unattributed: 0,
+            cpu_listed: None,
             cpu_interval_external: None,
             cpu_own_hold: false,
             cedegrid_cpu: 0,

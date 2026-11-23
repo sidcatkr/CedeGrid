@@ -1445,6 +1445,9 @@ pub struct ModeInput {
     /// The allocation runs under an unprotected Aggressive grant (004 R5): on compute, with no
     /// unknown activity, admission may take the whole capacity.
     pub unprotected: bool,
+    /// Usage no readable account accounts for that is within the account list's own recent
+    /// error and has not lasted the principal window: it stands for no principal (FR-021).
+    pub unattributed_hold: u64,
 }
 
 /// Work-conserving max-min shares over current demand (research R12). `None`
@@ -1600,7 +1603,10 @@ pub fn contending_principals(
             result.push((principal.uid, *usage));
         }
     }
-    let unattributed = input.external.saturating_sub(accounted);
+    let unattributed = input
+        .external
+        .saturating_sub(accounted)
+        .saturating_sub(input.unattributed_hold);
     if unattributed >= unattributed_floor(input, thresholds) {
         result.push((None, unattributed));
     }
@@ -1974,11 +1980,14 @@ pub fn neutral_share(input: &ModeInput, thresholds: &ResourceThresholds) -> u64 
             demands.push(demand(principal.uid, *usage));
         }
     }
-    let unattributed = input.external.saturating_sub(
-        attributed
-            .saturating_add(owner_unmanaged)
-            .saturating_add(input.background),
-    );
+    let unattributed = input
+        .external
+        .saturating_sub(
+            attributed
+                .saturating_add(owner_unmanaged)
+                .saturating_add(input.background),
+        )
+        .saturating_sub(input.unattributed_hold);
     if unattributed >= unattributed_floor(input, thresholds) {
         demands.push(demand(None, unattributed));
     }

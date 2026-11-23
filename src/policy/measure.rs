@@ -675,6 +675,7 @@ impl<'a> Interval<'a> {
     pub(super) fn unknown_budgets(&mut self) {
         if self.cpu_unknown {
             self.budget.cpu_millicores = 0;
+            self.cpu_kept_running = 0;
             self.admit_immediately_cpu = None;
             self.admit_immediately_plain = false;
             self.unsafe_now = true;
@@ -915,6 +916,7 @@ impl<'a> Interval<'a> {
             self.budget.cpu_millicores = self.budget.cpu_millicores.saturating_sub(cedegrid);
             self.next.cpu_quiet_intervals = self.prev.cpu_quiet_intervals;
             self.next.cpu_unattributed_intervals = self.prev.cpu_unattributed_intervals;
+            self.next.cpu_list_over = self.prev.cpu_list_over.clone();
             self.carry_principals(&ResourceKey::Cpu);
             return;
         }
@@ -956,6 +958,7 @@ impl<'a> Interval<'a> {
             probe: None,
             fair_share_limit: self.fair_share_limit(&ResourceKey::Cpu),
             unprotected: false,
+            unattributed_hold: 0,
         };
         // In Performance and Aggressive own work above its Neutral share can saturate the CPU
         // itself, which is no evidence of hidden external demand: utilization is judged with
@@ -979,6 +982,7 @@ impl<'a> Interval<'a> {
         }
         self.note_fair_share(&ResourceKey::Cpu, &view, &thresholds);
         self.note_cpu_quiet(&view, &thresholds);
+        view.unattributed_hold = self.unattributed_noise(&view);
         self.probe(&ResourceKey::Cpu, &mut view, &thresholds);
         // Own work keeps an equal share while the others keep theirs (user, 2026-11-17). Where
         // the agent runs in a CPU cgroup of the owner's own, the kernel splits CPU between users,
@@ -1002,29 +1006,45 @@ impl<'a> Interval<'a> {
             }),
             ..view.clone()
         });
-        let kept = crate::contention::kept_share(
-            requests_only.as_ref().unwrap_or(&view),
-            &thresholds,
-            self.cpu_capacity
-                .saturating_sub(self.cpu_reserve)
-                .min(self.cpu_ceiling),
-            // The owner's other processes leave the room they use in the owner's slice.
+        let schedulable = self
+            .cpu_capacity
+            .saturating_sub(self.cpu_reserve)
+            .min(self.cpu_ceiling);
+        let kept_with = |room: u64| {
+            let kept = crate::contention::kept_share(
+                requests_only.as_ref().unwrap_or(&view),
+                &thresholds,
+                schedulable,
+                room,
+            );
             if owner_cgroup {
-                self.budget.cpu_millicores.saturating_add(owner_other)
+                kept
             } else {
-                self.budget.cpu_millicores
-            },
-        );
-        let kept = if owner_cgroup {
-            kept
-        } else {
-            kept.saturating_sub(cedegrid)
+                kept.saturating_sub(cedegrid)
+            }
         };
+        // The owner's other processes leave the room they use in the owner's slice.
+        let kept = kept_with(if owner_cgroup {
+            self.budget.cpu_millicores.saturating_add(owner_other)
+        } else {
+            self.budget.cpu_millicores
+        });
+        // Running own work keeps the equal share whatever room the others leave: room it left
+        // by running below the share is not a principal's to keep, so a principal that takes
+        // all it gets cannot hold it below its share (SC-003). Admission still gets only what
+        // is left. With the principal list unreadable no principal is known to have taken it,
+        // so running work keeps what the room leaves, as admission does.
+        let kept_running = if self.snapshot.principals.is_some() {
+            kept_with(schedulable)
+        } else {
+            kept
+        };
+        self.cpu_kept_running = kept_running;
         let mut targets = targets_of(&view, &thresholds, self.budget.cpu_millicores);
         for (mode, target) in targets.iter_mut() {
             *target = target.saturating_sub(cedegrid);
             if *mode != ContentionMode::YieldFirst {
-                *target = (*target).max(kept);
+                *target = (*target).max(kept_running);
             }
         }
         self.mode_targets.insert(ResourceKey::Cpu, targets);
@@ -1258,12 +1278,32 @@ impl<'a> Interval<'a> {
                     }
                     accounted = accounted.saturating_add(usage);
                 }
+                self.cpu_listed = Some(accounted);
                 unattributed = external.saturating_sub(accounted);
                 crate::contention::cpu_quiet(contending, unattributed, floor, self.cpu_bound)
             }
             None => crate::contention::cpu_quiet([], external, floor, self.cpu_bound),
         };
         self.cpu_unattributed = unattributed;
+        // How far the list read above the scope: its own error, kept for four principal
+        // windows so a gap it leaves the other way within that error is not taken for a
+        // principal (FR-021, SC-003).
+        let keep_ms = u64::from(self.config.contention.principal_window_intervals)
+            .saturating_mul(4)
+            .saturating_mul(self.config.monitor.interval_ms);
+        let now = self.now;
+        self.next.cpu_list_over = self
+            .prev
+            .cpu_list_over
+            .iter()
+            .filter(|(at, _)| now.saturating_sub(*at) < keep_ms)
+            .copied()
+            .collect();
+        if let Some(accounted) = self.cpu_listed {
+            self.next
+                .cpu_list_over
+                .push_back((now, accounted.saturating_sub(external)));
+        }
         self.next.cpu_unattributed_intervals = if unattributed >= floor.max(self.cpu_bound) {
             self.prev.cpu_unattributed_intervals.saturating_add(1)
         } else {
@@ -1276,6 +1316,31 @@ impl<'a> Interval<'a> {
         };
         let window = self.config.contention.principal_window_intervals;
         self.cpu_contention_ended = self.next.cpu_quiet_intervals >= window;
+    }
+
+    /// Usage no readable account accounts for that stands for no principal yet: no more than
+    /// the account list's own error, how far it read above the scope in recent intervals or
+    /// the scope's measurement band, and not lasting the principal window. A larger gap, or
+    /// one that lasts, is one more principal at once, as before; an account listed but not
+    /// yet admitted is not part of the gap (FR-021, SC-003).
+    fn unattributed_noise(&self, view: &ModeInput) -> u64 {
+        let Some(listed) = self.cpu_listed else {
+            return 0;
+        };
+        let window = self.config.contention.principal_window_intervals;
+        if self.next.cpu_unattributed_intervals >= window {
+            return 0;
+        }
+        let error = self
+            .next
+            .cpu_list_over
+            .iter()
+            .map(|(_, over)| *over)
+            .max()
+            .unwrap_or(0)
+            .max(self.cpu_bound);
+        let gap = view.external.saturating_sub(listed);
+        if gap <= error { gap } else { 0 }
     }
 
     /// RAM: the mode's target beside the contending principals.
@@ -1314,6 +1379,7 @@ impl<'a> Interval<'a> {
             probe: None,
             fair_share_limit: self.fair_share_limit(&ResourceKey::Ram),
             unprotected: false,
+            unattributed_hold: 0,
         };
         let thresholds = config.contention.thresholds(ResourceKind::Ram);
         self.note_fair_share(&ResourceKey::Ram, &view, &thresholds);
@@ -2479,6 +2545,7 @@ impl<'a> Interval<'a> {
                     probe: None,
                     fair_share_limit,
                     unprotected: false,
+                    unattributed_hold: 0,
                 };
                 let mut averaged_view = view(averaged_total, averaged_members, averaged_background);
                 self.note_fair_share(&compute_key, &averaged_view, &compute_thresholds);
@@ -2538,6 +2605,7 @@ impl<'a> Interval<'a> {
                     probe: None,
                     fair_share_limit: None,
                     unprotected: false,
+                    unattributed_hold: 0,
                 };
                 GpuComputeBudget {
                     share: own_allowance(&view, &compute_thresholds),
@@ -2625,6 +2693,7 @@ impl<'a> Interval<'a> {
                 probe: None,
                 fair_share_limit: self.fair_share_limit(&key),
                 unprotected: false,
+                unattributed_hold: 0,
             };
             let thresholds = config.contention.thresholds(ResourceKind::GpuMemory);
             self.note_fair_share(&key, &view, &thresholds);

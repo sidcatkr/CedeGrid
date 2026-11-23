@@ -190,6 +190,8 @@ impl Interval<'_> {
                     external,
                     principals: Some(kept),
                     background: 0,
+                    // This view's external is only the accounts it counts.
+                    unattributed_hold: 0,
                     ..view.clone()
                 }
             }

@@ -201,6 +201,20 @@ impl<'a> Interval<'a> {
         }
     }
 
+    /// The CPU target running own work is held to: the budget, never below the equal share a
+    /// contending principal leaves own work, whatever room it took, within the envelope
+    /// (SC-003, FR-057). Admission keeps the budget.
+    fn cpu_running_target(&self) -> u64 {
+        let kept = self
+            .input
+            .envelope
+            .as_ref()
+            .map_or(self.cpu_kept_running, |envelope| {
+                self.cpu_kept_running.min(envelope.cpu_millicores)
+            });
+        self.budget.cpu_millicores.max(kept)
+    }
+
     /// Whether this interval's CPU budget fell beyond its per-interval bound since the last
     /// target, by external growth or contention. Without a last target, external usage beyond
     /// the bound counts as having risen.
@@ -319,7 +333,7 @@ impl<'a> Interval<'a> {
         // Running work yields for what it holds, not for its charge: a
         // charge-only shortfall blocks admission and steps nothing.
         let mut usage_excess = if kind == ResourceKind::Cpu {
-            cpu_usage.saturating_sub(self.budget.cpu_millicores)
+            cpu_usage.saturating_sub(self.cpu_running_target())
         } else {
             judged_total.saturating_sub(amount_of(&key, &self.budget))
         };
@@ -431,7 +445,7 @@ impl<'a> Interval<'a> {
         let spare_share = if held_back == 0 {
             0
         } else if kind == ResourceKind::Cpu {
-            self.budget.cpu_millicores.saturating_sub(cpu_usage) / held_back
+            self.cpu_running_target().saturating_sub(cpu_usage) / held_back
         } else {
             amount_of(&key, &self.budget).saturating_sub(judged_total) / held_back
         };
@@ -664,10 +678,8 @@ impl<'a> Interval<'a> {
                     resumed_usage = resumed_usage.saturating_add(state.paused_usage.unwrap_or(0));
                 }
             }
-            let over = |own: u64| {
-                own.saturating_sub(draining)
-                    .saturating_sub(self.budget.cpu_millicores)
-            };
+            let target = self.cpu_running_target();
+            let over = |own: u64| own.saturating_sub(draining).saturating_sub(target);
             // While own usage over its target waits its dwell, only the moved pauses are covered.
             let fresh = if self.cpu_own_hold {
                 0
@@ -1284,7 +1296,7 @@ impl<'a> Interval<'a> {
         let half = state.paused_usage.unwrap_or(0) / 2;
         state.step == YieldStep::Pause
             && state.cause == YieldCause::OwnOverTarget
-            && frame.own_usage.saturating_add(floor.max(half)) > self.budget.cpu_millicores
+            && frame.own_usage.saturating_add(floor.max(half)) > self.cpu_running_target()
     }
 
     /// Steps of allocations that are no longer candidates hold or reverse.
