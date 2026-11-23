@@ -170,9 +170,11 @@ this thread's.
 
 ## Phase 7: Docs and checks
 
-- [ ] T060 Update `docs/guarantees.md` (with T023), the 004 and 005 docs and specs for the
+- [x] T060 Update `docs/guarantees.md` (with T023), the 004 and 005 docs and specs for the
   rename and the new admission, and `CHANGELOG.md`.
-- [ ] T061 Full checks: fmt, clippy, the serial suite, both Python suites, npm, MSRV.
+- [x] T061 Full checks: fmt, clippy, the serial suite, both Python suites, npm, MSRV.
+  - *Done 2026-11-23 at `ed80a4e` on macOS:* all pass; the tools suite's home check needs a
+    Python inside the home directory, as on the test host. Linux-only tests run in CI.
 
 ## Dependencies
 

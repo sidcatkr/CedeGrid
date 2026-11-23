@@ -25,6 +25,14 @@ level reporting. It needs a MAJOR amendment of constitution Principle V
 need one clause that points to it, for what the broker counts as verified own work and for the
 OOM scores it lowers (decisions N6 and N5, pending the user).
 
+**Extended (2026-11-19 to 2026-11-23, constitution 9.x)**: [006-performance-first](../006-performance-first/spec.md)
+adds one request to the broker: the raise of the caller's own account slice weight, at two
+levels with their own policy keys and weights, `modes.unprotected` and
+`modes.unprotected_cpu_weight` for unprotected runs (006 FR-016 to FR-018), and
+`modes.plain_priority` and `modes.plain_priority_cpu_weight` for priority over plain users
+(006 FR-026, FR-027). 004's `modes.unprotected_aggressive` is renamed `modes.unprotected`.
+Where this spec and 006 differ, 006 applies.
+
 ## Dependencies on decisions not yet made
 
 This specification does not build on anything the user has not approved. Where it depends on such
