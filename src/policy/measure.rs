@@ -676,6 +676,7 @@ impl<'a> Interval<'a> {
         if self.cpu_unknown {
             self.budget.cpu_millicores = 0;
             self.admit_immediately_cpu = None;
+            self.admit_immediately_plain = false;
             self.unsafe_now = true;
         }
         if self.ram_unknown {
@@ -1066,6 +1067,7 @@ impl<'a> Interval<'a> {
             held = uids;
         }
         self.admit_immediately_cpu = None;
+        self.admit_immediately_plain = false;
         if self.config.contention.max_mode() >= ContentionMode::Performance {
             let (budget, protected) = self.cpu_budget_for(
                 &ModeInput {
@@ -1075,6 +1077,7 @@ impl<'a> Interval<'a> {
                 thresholds,
                 &first(true),
             );
+            self.admit_immediately_plain = protected.is_none();
             if let Some(protected) = protected.filter(|uids| !uids.is_empty()) {
                 note(
                     &mut self.statuses,
