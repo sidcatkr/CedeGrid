@@ -389,6 +389,10 @@ growth past an equal share, which no mode owes, and readings that close to the s
 move it. Running own work keeps that equal share whatever room the others leave, wherever the
 principal list reads: a principal that took the room own work left by running below its share
 does not hold its paused tasks below it (SC-003), while admission still gets only what is left.
+CPU that no readable account accounts for stands for no principal while it is within how far the
+account list itself read above the scope over the last four principal windows, or the scope's
+measurement band, and has not lasted the principal window; a larger gap, or one that lasts, is one
+more principal at once.
 Otherwise Yield First keeps 15% of capacity free, Neutral 5%, and Performance 2%
 where it holds for a first-comer and nothing elsewhere; the margins are validated as Yield
 First ≥ Neutral ≥ Performance, and Neutral and Performance also differ in how fast they

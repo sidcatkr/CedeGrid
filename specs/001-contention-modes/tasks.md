@@ -937,9 +937,10 @@ each step.
   beside the second account, SC-005, SC-007, SC-014 and SC-015 pass, and no default changes.
   The runner's protected load is the same account's, so it exercises no reclaim; the reclaim
   runs used the second account. SC-003 failed (Neutral held running work below its fair share
-  beside a principal that takes all it gets) and is fixed in `741b6e6`; its native recheck is
-  open. SC-004's contender bullet rests on feature 006's gates; SC-012's GPU memory reclaim has
-  no native result.*
+  beside a principal that takes all it gets) and passes at `7310ad2` (`741b6e6` keeps running
+  work at its equal share; `7310ad2` takes a gap within the account list's own error for no
+  principal). SC-004's contender bullet rests on feature 006's gates; SC-012's GPU memory
+  reclaim has no native result, so T117 stays open for it.*
 - [X] T118 Audit the pressure suite for SC-005, with defaults and again with Performance and a
   confirmed near-minimum floor:
   - run the `tools/pressure.py` scenario with the actuation audit hook;

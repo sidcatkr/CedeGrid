@@ -81,11 +81,10 @@ blocks. Measured results are in [Native gate results](#native-gate-results-featu
   per breach (FR-037).
 - **Hosts.** CedeGrid has run natively on one test host only, with one consumer GPU and no MPS or
   MIG. It has never run on the shared host.
-- **CPU reclaim through the protection runner, and Neutral's convergence.** The protected load of
+- **CPU reclaim through the protection runner.** The protected load of
   `tools/pressure_comparison.py` runs under the account that runs CedeGrid, which shares own
-  work's fair share, so the runner exercises no reclaim (SC-002, SC-003, SC-012); at `2afea97`
-  these were measured beside the second account instead. SC-003 failed there on 2026-11-23 and
-  is fixed in `741b6e6`; its native recheck is open.
+  work's fair share, so the runner exercises no reclaim (SC-002, SC-003, SC-012); CPU reclaim and
+  Neutral's convergence are measured beside the second account instead.
 - **Launch bursts without lease batches.** A node renews each running assignment's lease every
   heartbeat (2 s by default). Each renewal is a synced coordinator write, about 9 ms on the test
   host. Against a coordinator without `lease_batch/1` (FR-032), renewals share half of each
@@ -143,7 +142,7 @@ unmanaged usage. Since `9916e59` each process counts once. The contender and SC-
 | No action outside own work, CPU in each mode and GPU in Neutral and Performance, at the default floor (protection profile) | SC-005 | `2afea97` | 2026-11-23 | 0 actions and 0 drains outside own allocations in 1010–1046 observations per run, protected snapshots unchanged, every protected run completed, 0 OOM lines | pass |
 | Return after the second account's 30 s one-core load, Yield First (4 CPUs, 16 steady tasks of 250 m) | SC-002, SC-012 | `2afea97` | 2026-11-23 | 13 tasks admitted; own work at the contended target 1 interval after the load first showed (bound 2); no drain; the target back 2.0 s and own work 3.01 s after the load stopped, so the harness's 3 s return check reads false by 0.01 s, as on 2026-11-13 | SC-002, SC-012 pass |
 | The same, Neutral (14 tasks admitted) | SC-002, SC-012, FR-034 | `2afea97` | 2026-11-23 | own work at the contended target in the interval that first showed the load; no drain; the target back 2.0 s and own work 3.0 s after the load stopped | pass |
-| Neutral beside the second account's four busy processes for 90 s (4 CPUs, 14 steady tasks of 250 m) | SC-003 | `2afea97` | 2026-11-23 | own work at its 2000 m fair share within 3 s (1963–1987 m); single intervals in which the account list read the other account 25–63 m below the scope's reading counted that gap as a second contender and paused more own tasks each time (4, then 6, then 9). Once 5 ran, own work fell below the share, the busy processes took the rest (2700 m), and running work was held to what they left: 1268 m mean over the last 30 s, against the 50% ± 15 points SC-003 asks | fail. From `741b6e6` running own work keeps its equal share whatever room a principal took (`a_greedy_principal_does_not_keep_running_own_work_below_its_share` reproduces the run); the native recheck is open |
+| Neutral beside the second account's four busy processes for 90 s (4 CPUs, 14 steady tasks of 250 m) | SC-003 | `7310ad2` | 2026-11-23 | own work within 15 points of its 2000 m fair share from the first interval and within half a task after 15 s; 1989 m mean over the last 30 s, never below 1896 m after the first 5 s, at most 6 tasks paused; the second account at most 2111 m; at the target 1 interval after the load showed; no drain; own work back 3.5 s after the load stopped. At `2afea97` the same run failed: single intervals in which the account list read the other account 25–63 m below the scope's reading counted that gap as a second contender and paused more own tasks each time, and once too few ran the busy processes took the rest and running work was held to what they left, 1268 m. `741b6e6` keeps running work at its equal share (1468 m mean, still swinging), `7310ad2` takes a gap within the list's own error for no principal | pass |
 | Return after a 30 s one-core contender, Performance (4 CPUs) | SC-002, FR-034 | `cd077e9` | 2026-10-31 | the target and own usage back 1.0 s after the contender's last usage; no pause | pass |
 | Idle fill, Performance (14 CPUs, 100 m tasks, the steady loop, no login during the run) | SC-014 | `2afea97` | 2026-11-23 | 137 tasks, all admitted after 32 s; own tasks 98.9% of capacity, 99.9% with CedeGrid's 137 m; no step | pass (97%) |
 | Idle fill, Neutral | SC-014 | `2afea97` | 2026-11-23 | 123 tasks, all admitted after 25 min; own tasks 93.6% of capacity, 94.4% with CedeGrid's 123 m; no step | pass (94%) |
