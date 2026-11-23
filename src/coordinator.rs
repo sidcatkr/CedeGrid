@@ -2463,9 +2463,21 @@ fn placement(
                         }))
         }
     };
+    // A granted run gets no less CPU than any other: beside a plain principal the node's budget
+    // already holds every task the task limit allows (006 FR-007a), and the agent's launch
+    // capacity takes the larger of the two as well.
+    let budget = match immediate {
+        Some(immediate) => Resources {
+            cpu_millicores: immediate
+                .cpu_millicores
+                .max(report.managed_budget.cpu_millicores),
+            ..immediate.clone()
+        },
+        None => report.managed_budget.clone(),
+    };
     if !admitted {
         Placement::Closed
-    } else if total.fits(immediate.unwrap_or(&report.managed_budget), resources) {
+    } else if total.fits(&budget, resources) {
         Placement::Fits
     } else {
         Placement::Exhausted

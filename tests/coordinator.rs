@@ -5015,6 +5015,54 @@ fn a_granted_request_is_placed_against_the_admit_immediately_budget() {
     assert_eq!(run(Some(room)), ["granted"]);
 }
 
+/// 006 FR-007a, FR-015: beside a plain principal the node's budget takes every task the task
+/// limit allows, and a granted request gets no less CPU than that, as the agent's own launch
+/// capacity already gives it.
+#[test]
+fn a_granted_request_keeps_the_cpu_a_plain_principal_opened() {
+    use cedegrid::contention::{ContentionMode, ResourceKind};
+    use cedegrid::execution_model::{JobContention, RunGrant};
+    let granted = |id: &str| {
+        let mut t = task(id);
+        t.contention = Some(JobContention {
+            modes: BTreeMap::from([
+                (ResourceKind::Cpu, ContentionMode::Aggressive),
+                (ResourceKind::GpuCompute, ContentionMode::Aggressive),
+            ]),
+            admit_immediately: None,
+            unprotected: Some(RunGrant {
+                confirmed: true,
+                requested_unix_ms: 1,
+            }),
+        });
+        t
+    };
+    let d = dir();
+    let mut c = Coordinator::open(config(d.path())).unwrap();
+    wide_pool(&mut c, 100);
+    let ids: Vec<String> = (0..8).map(|i| format!("granted-{i}")).collect();
+    submit_tasks(
+        &mut c,
+        "job",
+        0,
+        ids.iter().map(|id| granted(id)).collect(),
+        100,
+    );
+    let mut r = negotiated(100, &[]);
+    r.launch_slots = 8;
+    // A plain principal on the scope: the budget is the task limit's, not the four CPUs'.
+    r.managed_budget.cpu_millicores = 8000;
+    r.managed_budget.ram_mib = 8192;
+    r.contention.as_mut().unwrap().admit_immediately_budget = Some(Resources {
+        cpu_millicores: 4000,
+        ram_mib: 8192,
+        gpu_memory_mib: BTreeMap::new(),
+    });
+    let mut placed = placed(&report_reply(&mut c, &r, 100));
+    placed.sort();
+    assert_eq!(placed, ids);
+}
+
 /// 004 FR-016: status marks an allocation unprotected, with its grant, once it was authorized,
 /// which the agent asks for only after its grant check; other allocations are not marked.
 #[test]
