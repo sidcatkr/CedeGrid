@@ -556,6 +556,10 @@ struct Interval<'a> {
     allocation_modes: BTreeMap<String, BTreeMap<ResourceKind, ContentionMode>>,
     // Measurement and budgets.
     budget: Resources,
+    /// The equal share running own work keeps on CPU while another principal contends, whatever
+    /// room that principal took: whole-task holds never go below it, while admission keeps the
+    /// budget (SC-003). Zero in Yield First, with no contending principal, or with CPU unknown.
+    cpu_kept_running: u64,
     /// The CPU a run with admit immediately may be placed against, where the cap reaches
     /// Performance: the hold counts only protected first-comers (006 FR-013).
     admit_immediately_cpu: Option<u64>,
@@ -704,6 +708,7 @@ impl<'a> Interval<'a> {
             held_back_cpu: 0,
             allocation_modes: BTreeMap::new(),
             budget: Resources::default(),
+            cpu_kept_running: 0,
             admit_immediately_cpu: None,
             admit_immediately_plain: false,
             admit_immediately_closed: BTreeSet::new(),

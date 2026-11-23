@@ -675,6 +675,7 @@ impl<'a> Interval<'a> {
     pub(super) fn unknown_budgets(&mut self) {
         if self.cpu_unknown {
             self.budget.cpu_millicores = 0;
+            self.cpu_kept_running = 0;
             self.admit_immediately_cpu = None;
             self.admit_immediately_plain = false;
             self.unsafe_now = true;
@@ -1002,29 +1003,45 @@ impl<'a> Interval<'a> {
             }),
             ..view.clone()
         });
-        let kept = crate::contention::kept_share(
-            requests_only.as_ref().unwrap_or(&view),
-            &thresholds,
-            self.cpu_capacity
-                .saturating_sub(self.cpu_reserve)
-                .min(self.cpu_ceiling),
-            // The owner's other processes leave the room they use in the owner's slice.
+        let schedulable = self
+            .cpu_capacity
+            .saturating_sub(self.cpu_reserve)
+            .min(self.cpu_ceiling);
+        let kept_with = |room: u64| {
+            let kept = crate::contention::kept_share(
+                requests_only.as_ref().unwrap_or(&view),
+                &thresholds,
+                schedulable,
+                room,
+            );
             if owner_cgroup {
-                self.budget.cpu_millicores.saturating_add(owner_other)
+                kept
             } else {
-                self.budget.cpu_millicores
-            },
-        );
-        let kept = if owner_cgroup {
-            kept
-        } else {
-            kept.saturating_sub(cedegrid)
+                kept.saturating_sub(cedegrid)
+            }
         };
+        // The owner's other processes leave the room they use in the owner's slice.
+        let kept = kept_with(if owner_cgroup {
+            self.budget.cpu_millicores.saturating_add(owner_other)
+        } else {
+            self.budget.cpu_millicores
+        });
+        // Running own work keeps the equal share whatever room the others leave: room it left
+        // by running below the share is not a principal's to keep, so a principal that takes
+        // all it gets cannot hold it below its share (SC-003). Admission still gets only what
+        // is left. With the principal list unreadable no principal is known to have taken it,
+        // so running work keeps what the room leaves, as admission does.
+        let kept_running = if self.snapshot.principals.is_some() {
+            kept_with(schedulable)
+        } else {
+            kept
+        };
+        self.cpu_kept_running = kept_running;
         let mut targets = targets_of(&view, &thresholds, self.budget.cpu_millicores);
         for (mode, target) in targets.iter_mut() {
             *target = target.saturating_sub(cedegrid);
             if *mode != ContentionMode::YieldFirst {
-                *target = (*target).max(kept);
+                *target = (*target).max(kept_running);
             }
         }
         self.mode_targets.insert(ResourceKey::Cpu, targets);
