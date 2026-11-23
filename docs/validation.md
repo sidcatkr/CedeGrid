@@ -849,6 +849,30 @@ same cgroup.
 | FR-023 F2c, same cgroup, CPU and GPU | CPU: pass, level with by hand. GPU: −1.3%, within CedeGrid's measured own CPU |
 | SC-006 where accounts share a CPU cgroup (FR-016's nice raise) | pass: 33 points over by hand's mean (58.1%) |
 
+### GPU F2c: where the 1.3% went (`81aeb30`, `b4ca330`)
+
+The GPU gap was not the shared cgroup's. In the usual layout on 2026-11-23 at 10:32–11:27, three
+rounds each, GPU F2c under Performance did 1.1–1.4% less than by hand, and so it did with the
+agent moved off the scope once both tasks ran (−1.3%), with a 1 s monitor interval (−2.0%), with
+the agent's per-task reads skipped (−1.2%), with the single-process PSS read once every 20
+intervals (−1.2%) and with the process scan once every 20 (−1.2%). Once running, own work's
+rate was within 0.2% of by hand; the tasks started 0.6–0.8 s after submission against 0.03 s.
+The launch traces put 430–450 ms of that between the gate's spawn and its preparation: a GPU
+gate waits for a device reading the agent takes after the gate exists, and that came at the
+agent's next regular sample.
+
+`b4ca330` runs the agent's next interval early when a GPU launch's supervisor is up, no sooner
+than half an interval after the last sample, and the gate now takes only a reading whose time is
+at or after its own preparation. At 11:46–11:57, three rounds alternating:
+
+| Arm | Own work against by hand | Last own task start | Rate |
+|---|---|---|---|
+| by hand | | 0.03 s | 791.6–794.6 per second |
+| Performance at `b4ca330` | −0.57% (−0.47 to −0.67) | 0.34–0.37 s | 791.6–793.4 per second |
+
+The gate now waits about 200 ms, to the half-interval floor that keeps the CPU reading usable.
+What is left is the start: own work's rate matches by hand.
+
 ## Rules for validation runs
 
 - Report these statuses separately:
