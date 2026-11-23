@@ -18,7 +18,8 @@ candidate's commit, and this list is updated at that commit.
    nothing.
 4. The unprotected budget exists only under an Aggressive cap and while CPU is known; the agent
    reports it only while the allowance and, in a unit, the key permit it; the coordinator places
-   only granted requests against it (R12).
+   only granted requests against it (R12), with no less CPU than the node's own budget, as the
+   agent's launch capacity has it (006 FR-015, `8635f60`).
 5. A run that started unprotected on this host keeps the allowance it started under for its
    later attempts here, after the allowance is turned off. The cap and the key are still checked
    on every attempt, a database that cannot be read refuses, and a restore forgets every started
@@ -46,7 +47,7 @@ candidate's commit, and this list is updated at that commit.
 | `src/policy/measure.rs`, `src/policy.rs`, `src/model.rs` (`unprotected_budget`) | the grant's budget, only under an Aggressive cap and never while CPU is unknown | `tests/policy.rs` `the_unprotected_budget_exists_only_under_an_aggressive_cap` |
 | `src/agent/report.rs` (`unprotected_permitted`) | the budget is reported only while the allowance reads on and, in a unit, the key permits | `tests/policy.rs` `the_report_carries_the_unprotected_budget_only_under_the_allowance` |
 | `src/main.rs` (`doctor --text`), `src/explain.rs` (`unprotected_text`) | read-only: shows whether a grant could start here and how to fix each missing condition; reads the allowance and, where the policy file exists, the administrator key | `tests/cli.rs` `doctor_marks_aggressive_and_its_caution` |
-| `src/coordinator.rs` (`placement`) | a granted request is placed against the unprotected budget; every other request as before | `tests/coordinator.rs` `a_granted_request_is_placed_against_the_unprotected_budget` |
+| `src/coordinator.rs` (`placement`) | a granted request is placed against the admit immediately budget, with no less CPU than the node's own budget; every other request as before | `tests/coordinator.rs` `a_granted_request_is_placed_against_the_admit_immediately_budget`, `a_granted_request_keeps_the_cpu_a_plain_principal_opened` |
 
 ## Open before the review
 

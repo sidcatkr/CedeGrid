@@ -146,7 +146,7 @@ this thread's.
   units count as CedeGrid work while they run work (FR-028), in `src/telemetry.rs`.
 - [x] T075 [US6] `doctor` and `observe` rows for the option: chosen, permitted, in force, weight,
   reason (`src/main.rs`, `src/explain.rs` with the 001 thread).
-- [ ] T076 [US6] Docs: `docs/system-mode.md`, `docs/guarantees.md` (with the 001 thread),
+- [x] T076 [US6] Docs: `docs/system-mode.md`, `docs/guarantees.md` (with the 001 thread),
   `CHANGELOG.md`, both security review packages.
 - [x] T077 [US6] SC-009 gate on the test host from installed packages: F2c and own-first on CPU
   against a plain account, and against a second CedeGrid account with and without the option,

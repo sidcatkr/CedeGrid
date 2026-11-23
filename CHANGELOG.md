@@ -76,7 +76,8 @@
   also raises the account slice's CPU weight through the broker where the host splits CPU by
   account (`modes.unprotected_cpu_weight`, 400 by default). The raise never replaces a weight
   the broker did not set, and ends within 5 s of the key turning off or the member leaving the
-  group, and when the broker stops or restarts.
+  group, and when the broker stops or restarts. A run with either option starts at least the
+  tasks Performance would start for it.
 - **Priority over plain users.** An install option that runs own CPU work above users who run
   no CedeGrid work, never above another CedeGrid user. It needs both the administrator's
   permission in System mode (`modes.plain_priority`, weight `modes.plain_priority_cpu_weight`,
@@ -86,7 +87,10 @@
   the account slice while own Performance or Aggressive CPU work runs and no other CedeGrid
   user on the CPU is below the weight, and ends it as it ends the unprotected raise. `doctor`
   and `observe` show whether it is chosen, permitted and in force. In System mode, an account
-  whose unit runs work counts as CedeGrid even where its processes are hidden.
+  whose unit runs work counts as CedeGrid even where its processes are hidden. Between CedeGrid
+  users the first-comer rule decides, as without the option. On the test host, own work with
+  the option took two thirds of a CPU shared with a plain user, against half by hand, and did
+  15.5% more than the same work by hand in F2c and 6.0% more in own work first.
 - **Held-back tasks start where plain Linux has them.** In Performance and Aggressive, tasks
   that waited for the scope's capacity and start because a user without CedeGrid began to
   compete each start on the scope CPU with the fewest own tasks, and go back on the whole scope
