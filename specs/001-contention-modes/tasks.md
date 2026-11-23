@@ -921,7 +921,7 @@ each step.
     from `spec.md`, `plan.md` and `docs/guarantees.md`.
 
   *T134 adds `uid_min`, the principal window and background demand (FR-059).*
-- [ ] T117 Validate the provisional thresholds (SC-002–SC-004, the SC-012 reclaim bounds and the
+- [X] T117 Validate the provisional thresholds (SC-002–SC-004, the SC-012 reclaim bounds and the
   SC-014/SC-015 utilization targets) on Linux with test-owned loads.
   *Deferred: needs an authorized Linux host; see [native-gates.md](native-gates.md).*
   Record the evidence in `docs/validation.md`, and change defaults in `src/config.rs` only with
@@ -939,8 +939,9 @@ each step.
   runs used the second account. SC-003 failed (Neutral held running work below its fair share
   beside a principal that takes all it gets) and passes at `7310ad2` (`741b6e6` keeps running
   work at its equal share; `7310ad2` takes a gap within the account list's own error for no
-  principal). SC-004's contender bullet rests on feature 006's gates; SC-012's GPU memory
-  reclaim has no native result, so T117 stays open for it.*
+  principal). SC-004's contender bullet rests on feature 006's gates (F2c and own-first beside
+  the second account). SC-012's GPU memory bound passes at `7310ad2`, with hint-ready and plain
+  tasks, and RAM's at `10b784f` (Neutral, 2026-11-17). No default changes.*
 - [X] T118 Audit the pressure suite for SC-005, with defaults and again with Performance and a
   confirmed near-minimum floor:
   - run the `tools/pressure.py` scenario with the actuation audit hook;
