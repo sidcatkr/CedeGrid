@@ -606,6 +606,8 @@ struct AgentLoop<'a> {
     policy_refused: BTreeSet<String>,
     /// The unprotected raise as last asked of the broker (006 FR-016, FR-018).
     raise: RaiseSteer,
+    /// A GPU launch waits for a device reading taken after its gate was prepared.
+    sample_soon: bool,
     /// Room opened since the last heartbeat: a task ended, the CPU room grew, or the last reply
     /// placed work and more may wait; the next heartbeat comes early.
     heartbeat_prompt: bool,
@@ -722,6 +724,10 @@ impl AgentLoop<'_> {
                 Ok(mut slot) => {
                     if revoked || self.stopping.is_some() {
                         drain(&mut slot, None);
+                    } else if !slot.assignment.request.resources.gpu_memory_mib.is_empty() {
+                        // Its gate waits for a device reading taken after it was prepared: the
+                        // next interval comes early for it (006 SC-001).
+                        self.sample_soon = true;
                     }
                     self.slots.insert(id, slot);
                 }
@@ -3142,6 +3148,7 @@ pub async fn run(
         descriptor_refused: BTreeSet::new(),
         policy_refused: BTreeSet::new(),
         raise: RaiseSteer::default(),
+        sample_soon: false,
         heartbeat_prompt: false,
         last_room: (0, false),
         placement_until: None,
@@ -3306,9 +3313,17 @@ pub async fn run(
         let launched = std::sync::Arc::clone(&state.wakes.prepared);
         let finished = std::sync::Arc::clone(&state.wakes.finished);
         let work = std::sync::Arc::clone(&state.work);
-        // Set when a task ended or new work arrived: the next interval runs then, before the
-        // regular wake.
+        // Set when a task ended, new work arrived or a GPU launch waits for a device reading:
+        // the next interval runs then, before the regular wake.
         let mut early: Option<Instant> = None;
+        if std::mem::take(&mut state.sample_soon) {
+            early = Some(early_wake(
+                state.sampled_at,
+                observation_interval,
+                Instant::now(),
+                next_observation,
+            ));
+        }
         loop {
             let wake = early.unwrap_or(next_observation);
             tokio::select! {
@@ -3357,6 +3372,14 @@ pub async fn run(
                             "event": "launch_pass_deferred",
                             "detail": format!("{error:#}"),
                         }))?;
+                    }
+                    if std::mem::take(&mut state.sample_soon) && early.is_none() {
+                        early = Some(early_wake(
+                            state.sampled_at,
+                            observation_interval,
+                            Instant::now(),
+                            next_observation,
+                        ));
                     }
                 }
             }

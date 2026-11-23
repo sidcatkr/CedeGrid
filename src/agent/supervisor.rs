@@ -21,17 +21,28 @@ struct PipeControl {
     agent_lost: bool,
 }
 
+/// Whether an observation taken at `observed_at` came after the gate prepared at
+/// `prepared_at`: its GPU readings follow its timestamp, so they do too.
+pub(super) fn observed_after(observed_at: u64, prepared_at: u64) -> bool {
+    observed_at >= prepared_at
+}
+
 impl SupervisorControl for PipeControl {
     fn prepared(&mut self, record: &ExecutionRecord) -> Result<()> {
         let deadline =
             Instant::now() + Duration::from_millis(self.config.execution.prepare_timeout_ms);
         let gpu = !self.assignment.request.resources.gpu_memory_mib.is_empty();
         if gpu {
-            // Check against an observation the agent sent after this gate was
-            // prepared; never one from before it.
+            // Check against an observation the agent took after this gate was prepared;
+            // never one from before it, even one that arrives after (006 SC-001).
+            let prepared_at = super::reconcile::now_unix_ms();
             let snapshot = loop {
                 match self.recv_until(deadline)? {
-                    Control::Observation { snapshot } => break *snapshot,
+                    Control::Observation { snapshot }
+                        if observed_after(snapshot.observed_at_unix_ms, prepared_at) =>
+                    {
+                        break *snapshot;
+                    }
                     Control::Drain { .. } => {
                         bail!("drain requested before authorization; gate stays blocked")
                     }

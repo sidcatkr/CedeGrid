@@ -2942,6 +2942,16 @@ mod pacing_tests {
         assert!(!placement_window_opens(true, false, 0));
     }
 
+    /// A GPU gate takes only a reading from its preparation on, never one taken before it,
+    /// even when it arrives after (006 SC-001).
+    #[test]
+    fn a_gpu_gate_takes_only_a_reading_from_after_it_was_prepared() {
+        use super::supervisor::observed_after;
+        assert!(observed_after(1_000, 1_000));
+        assert!(observed_after(1_250, 1_000));
+        assert!(!observed_after(999, 1_000));
+    }
+
     /// An unprotected run holds the host's nice raise only where accounts share a CPU cgroup,
     /// outside a System mode unit, while the raise is wanted and the run is not draining; every
     /// other run, and every other case, is at its launch value (006 FR-016, FR-018).
