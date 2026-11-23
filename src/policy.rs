@@ -559,6 +559,9 @@ struct Interval<'a> {
     /// The CPU a run with admit immediately may be placed against, where the cap reaches
     /// Performance: the hold counts only protected first-comers (006 FR-013).
     admit_immediately_cpu: Option<u64>,
+    /// That CPU is admitted as plain Linux would start work: no protected first-comer holds it,
+    /// so it takes the credit plain admission takes.
+    admit_immediately_plain: bool,
     /// Devices where a protected first-comer holds GPU admission, which carry no VRAM in the
     /// admit immediately budget (006 FR-013).
     admit_immediately_closed: BTreeSet<String>,
@@ -702,6 +705,7 @@ impl<'a> Interval<'a> {
             allocation_modes: BTreeMap::new(),
             budget: Resources::default(),
             admit_immediately_cpu: None,
+            admit_immediately_plain: false,
             admit_immediately_closed: BTreeSet::new(),
             cpu_beside_plain: false,
             unsafe_now: false,
@@ -772,16 +776,31 @@ impl<'a> Interval<'a> {
             status.effective_mode = Some(governing(config, key.kind()));
             status.measurement.get_or_insert(Measurement::Known);
         }
+        // Placement adds back what running work is charged above its usage, or above its
+        // request where admission is plain (FR-034, 006 SC-002); each budget takes the credit
+        // that goes with its own admission.
+        let credit = |plain: bool| {
+            if plain {
+                self.cpu_credit_requests
+            } else {
+                self.cpu_credit
+            }
+        };
+        let managed_credit = credit(self.cpu_plain_admission);
+        let immediate_credit = credit(self.admit_immediately_plain);
         let decision = Decision {
             schema_version: SCHEMA_VERSION,
             node_id: snapshot.node_id.clone(),
             observe_only: true,
             admit_immediately_budget: (config.contention.max_mode() >= ContentionMode::Performance)
                 .then(|| Resources {
-                    cpu_millicores: self
-                        .admit_immediately_cpu
-                        .unwrap_or(0)
-                        .max(self.budget.cpu_millicores),
+                    cpu_millicores: match self.admit_immediately_cpu {
+                        Some(cpu) => {
+                            (i128::from(cpu.max(self.budget.cpu_millicores)) + immediate_credit)
+                                .clamp(0, i128::from(u64::MAX)) as u64
+                        }
+                        None => self.budget.cpu_millicores,
+                    },
                     gpu_memory_mib: self
                         .budget
                         .gpu_memory_mib
@@ -815,12 +834,8 @@ impl<'a> Interval<'a> {
             oom_preferred: self.next.oom_preferred.clone(),
             save_progress: self.save_progress,
             ram_fair_share_mib: self.memory_fair_share.get(&ResourceKey::Ram).copied(),
-            cpu_admission_credit_millicores: if self.cpu_plain_admission {
-                self.cpu_credit_requests
-            } else {
-                self.cpu_credit
-            }
-            .clamp(i128::from(i64::MIN), i128::from(i64::MAX))
+            cpu_admission_credit_millicores: managed_credit
+                .clamp(i128::from(i64::MIN), i128::from(i64::MAX))
                 as i64,
         };
         // Every reported code is in the catalog, so tests fail on a new one (T113).

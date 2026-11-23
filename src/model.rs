@@ -520,7 +520,9 @@ pub struct Decision {
     pub managed_budget: Resources,
     /// The budget a run with admit immediately, alone or through unprotected, is placed
     /// against: admission holds only for protected first-comers, and a device held for one
-    /// carries no VRAM. Wherever the node cap reaches Performance (006 FR-013).
+    /// carries no VRAM. Its CPU includes the admission credit that goes with that admission,
+    /// as `schedulable_budget` adds one to the managed budget. Wherever the node cap reaches
+    /// Performance (006 FR-013).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admit_immediately_budget: Option<Resources>,
     /// Own CPU work in Performance or Aggressive contends with a plain principal and no

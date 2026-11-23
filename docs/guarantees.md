@@ -872,9 +872,11 @@ Priority over plain users. With the administrator's `modes.plain_priority` and t
 broker sets the user's account slice to `modes.plain_priority_cpu_weight` (200 by default)
 while own Performance or Aggressive CPU work runs and every other account with CedeGrid work on
 the CPU runs at that weight or more. A plain user's CPU share then shrinks: one plain user at
-weight 100 against 200 gets about a third of a contended CPU. CedeGrid users keep equal shares
-among themselves, and an account falling below that weight ends the raise within two monitor
-intervals. Rootless hosts never raise.
+weight 100 against 200 gets about a third of a contended CPU. Between CedeGrid users the option
+changes nothing and the first-comer rule decides, as without it: the later user's new work waits
+at admission rather than take the first-comer below the lesser of its demand and its fair share.
+Another account with CedeGrid work on the CPU that falls below that weight ends the raise within
+two monitor intervals. Rootless hosts never raise.
 
 At start the agent raises its own soft `RLIMIT_NOFILE` to its hard limit, and the worker
 gate gives each task back the soft limit the agent started with before the user's command

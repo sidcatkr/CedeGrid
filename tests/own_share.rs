@@ -455,6 +455,78 @@ fn admit_immediately_lifts_the_hold_only_for_an_unprotected_first_comer() {
 
 /// While the principal list cannot be read, no account is known to be plain: Performance holds
 /// as 001 does (Principle III).
+/// The admit immediately budget carries the CPU admission credit that goes with its own
+/// admission, as the managed budget does in placement, so a granted run is placed against no
+/// less than another run beside the same own work (006 FR-013, FR-034).
+#[test]
+fn the_admit_immediately_budget_carries_the_admission_credit() {
+    let run = |other: u64, work: Option<CedeGridWork>| {
+        let mut engine = PolicyEngine::new();
+        let mut last = None;
+        // Past the admission usage window, so the credit applies.
+        for i in 0..130u64 {
+            let (mut snapshot, mut input) = reading_beside(other, 50, 0, Some(true), work);
+            let job = input.allocations[0].clone();
+            // Two tasks requesting 1500 m that use 400 m each.
+            input.allocations = (0..2)
+                .map(|k| Allocation {
+                    id: format!("job-{k}"),
+                    requested: Resources {
+                        cpu_millicores: 1500,
+                        ..job.requested.clone()
+                    },
+                    observed: Some(Resources {
+                        cpu_millicores: 400,
+                        ram_mib: 256,
+                        gpu_memory_mib: BTreeMap::new(),
+                    }),
+                    ..job.clone()
+                })
+                .collect();
+            input.arrivals = (0..2).map(|k| (format!("job-{k}"), OWN_ARRIVAL)).collect();
+            let busy = 800 + 50 + other;
+            snapshot.managed_cpu_lower_millicores = Some(800);
+            snapshot.cpu_busy_millicores = Some(busy);
+            snapshot.kernel.as_mut().unwrap().cpu.busy_millicores = Some(busy);
+            snapshot.observed_at_unix_ms = 100 + i * 500;
+            snapshot.kernel.as_mut().unwrap().monotonic_elapsed_ms = 500 + i * 500;
+            last = Some(
+                engine
+                    .evaluate(
+                        &config(ContentionMode::Performance),
+                        &snapshot,
+                        &input,
+                        i * 500,
+                    )
+                    .unwrap(),
+            );
+        }
+        last.unwrap()
+    };
+    let immediate = |decision: &Decision| {
+        decision
+            .admit_immediately_budget
+            .as_ref()
+            .map(|budget| budget.cpu_millicores)
+            .unwrap()
+    };
+    // Admitted as plain Linux would: both budgets are one, the credit included.
+    let plain = run(0, None);
+    assert!(plain.cpu_admission_credit_millicores > 0, "{plain:?}");
+    assert_eq!(
+        immediate(&plain),
+        cedegrid::policy::schedulable_budget(&plain).cpu_millicores
+    );
+    // Beside a first-comer that only yields, the managed budget holds, and admit immediately
+    // admits as plain Linux would, with the credit the plain decision above has.
+    let beside = run(2000, FIRST);
+    assert!(
+        beside.managed_budget.cpu_millicores < plain.managed_budget.cpu_millicores,
+        "{beside:?}"
+    );
+    assert_eq!(immediate(&beside), immediate(&plain));
+}
+
 #[test]
 fn an_unreadable_principal_list_holds_as_before() {
     let (mut snapshot, input) = reading_beside(2000, 50, 0, Some(true), None);
