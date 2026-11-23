@@ -1871,7 +1871,10 @@ and C1 to C3 are open and have no task.
 - [X] T610 Failing tests: on a time-sliced device in Performance no duty is set and no re-measure window opens, and a third own process is held at admission with `gpu_time_slice_admission_held` while a counted principal is slice-bound; Neutral keeps d0' 643; then `src/policy/measure.rs`, `src/policy/ladder.rs`, `src/policy/admission.rs` and the reason catalog, per FR-021, FR-022, FR-028, R87 (contradicts)
 - [X] T611 Compare the 500 decision-snapshot sequences before and after T607 to T610 by mode, and run the mode-order property test; report every changed Performance decision class, per SC-013, plan "Report 057 Part B" (missing)
 - [X] T612 `docs/guarantees.md`, the data model's mode targets, `contracts/decision-output.md` and `contracts/resource-target-file.md`, and the spec's remaining Performance wording (FR-016, FR-028, FR-034, FR-045, the terms Contended, Margin, Fair share and Over-share task), per the spec delta (partial)
-- [ ] T613 Native at the last commit on the test host: C4's shape in Performance (no own task hinted, drained or sent TERM; the kernel's victim as in the baseline) and the baseline comparisons of SC-018 and SC-019 (one own process against one other on a core; two own probes against a saturating GPU user), at least 3 runs each way, recorded in `docs/validation.md`, per SC-018, SC-019 (missing)
+- [X] T613 Native at the last commit on the test host: C4's shape in Performance (no own task hinted, drained or sent TERM; the kernel's victim as in the baseline) and the baseline comparisons of SC-018 and SC-019 (one own process against one other on a core; two own probes against a saturating GPU user), at least 3 runs each way, recorded in `docs/validation.md`, per SC-018, SC-019 (missing)
+
+  *Passed at `ccc3cd3` on 2026-11-23 (`docs/validation.md`): C4's shape ×3 and its baseline ×3, SC-018's GPU shape ×6
+  in both window orders and its same-core shape ×3, each against the same work without CedeGrid.*
 
 Order: T607, T608, T609, T610, T611, T612, then T613 at the last commit.
 
@@ -1888,6 +1891,9 @@ for runs E1 and E2 and has no code task yet.
 - [X] T619 Compare the 500 decision-snapshot sequences before and after T614 to T618 by mode and level, and run the mode-order property test; report every changed decision class, per SC-013, plan "Report 057 Part C" (missing)
 - [X] T620 `docs/guarantees.md`, `contracts/decision-output.md`, the data model and the user docs for per-job modes, Tracked CPU, GPU sharing, the pause bound and the floor; the known limitation of per-job modes in the release notes' follow-ups, per FR-030, FR-089, FR-090 (partial)
 - [ ] T621 Native at the last commit on the test host: E9 (two own GPU probes in Neutral beside a saturating user; own ÷ alone at least 0.42, the other user at least 753.4 req/s), the floor in Yield First beside a later user, and E8 (CPU, F2's shape in Neutral, Tracked), at least 3 runs each way, recorded in `docs/validation.md`; an E9 miss is reported before another GPU target is chosen, per SC-017, SC-020 (missing)
+
+  *At `ccc3cd3` on 2026-11-23 (`docs/validation.md`): E9 ×3 and E8 ×3 with its baseline ×3 pass. The floor in Yield
+  First was not measurable: the login screen's GPU context, under the greeter's dynamic account, was listed first.*
 
 - [X] T622 Remove the code that no longer runs after T616 and T617: the re-measure window and its state (`remeasuring`, `hold_remeasured`, `RemeasureWindow`, `remeasure_window_allowed`), the Performance recomputed-cap and minimum-duty paths (`cap_at_minimum_duty`, `at_minimum_duty`, `pause_returns_to_cap`), `applied_duty_credit`'s duty wording, and their tests, with the reason catalog and `docs/guarantees.md`, per FR-089 (unrequested)
 - [X] T624 Failing tests, then the change: a whole-task pause still answering its demand at `pause_bound_s` moves to the next task in the order (CPU and GPU compute, both GPU paths), no CPU or GPU compute drain at the bound except for the operator envelope, and a draining task's usage makes no other task hold, per FR-014, FR-089, SC-007 (contradicts, run E8)
