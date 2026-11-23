@@ -794,6 +794,15 @@ and unprotected never raised beside a protected first-comer. The first-comer kep
 | SC-009: beside a second CedeGrid account without the choice, no raise while its work runs, and the first-comer rule decides (reworded 2026-11-23) | pass |
 | SC-006: above the even split by 10 points, never beside a protected first-comer, back within two monitor intervals | pass: 10–15 points, no raise in the three runs beside a first-comer, back to 100 within 0.3 s |
 
+The four-of-eight start was the coordinator's: it placed a run with admit immediately, alone or
+through unprotected, against the node's admit immediately budget, which leaves out the CPU a
+plain principal's arrival opens (FR-007a). Protected Aggressive started all eight F2c tasks
+like Performance in two rootless runs on 2026-11-23 at 02:16–02:23, and unprotected started
+four. `8635f60` places such a run against the larger CPU of the two budgets, as the agent's
+launch capacity already did. At 02:31–02:38, rootless, unprotected started all eight at
+0.46–0.48 s in three of three runs, with own CPU 2,449–2,474 m against 2,500 m under Performance.
+The System mode unprotected rows above predate that change.
+
 ## Rules for validation runs
 
 - Report these statuses separately:
