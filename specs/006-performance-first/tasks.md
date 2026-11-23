@@ -119,8 +119,9 @@ this thread's.
   - *Done in part (2026-11-18, `f13b429`, `05d5c04`):* F2c and own-first on CPU and GPU, fill,
     batch, VRAM, RAM (one plain run: its OOM also killed the account's desktop session, so the
     other two were stopped) and CedeGrid against CedeGrid, with plain arms. The System mode raise
-    ran with T077 on 2026-11-22. Open: the same-cgroup layout (needs the user's sudo steps); the own-first
-    CPU gap (start and reaction latency) and the batch's total time (handoff between tasks).
+    ran with T077 on 2026-11-22, again after the placement fix on 2026-11-23, and the shared CPU
+    cgroup layout with the nice raise on 2026-11-23 (`81aeb30`). Open: the own-first CPU gap
+    (start and reaction latency) and the batch's total time (handoff between tasks).
 
 ## Phase 6b: Priority over plain users (US6, maintainer decisions of 2026-11-19)
 

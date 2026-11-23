@@ -819,6 +819,36 @@ second account, three rounds alternating:
 
 All eight tasks started at 0.45–0.46 s in every run. SC-006: pass, 31–40 points over by hand.
 
+### A shared CPU cgroup (`81aeb30`)
+
+On 2026-11-23 at 09:59–10:28 the host's administrator turned the `cpu` controller off below
+`user.slice` at run time (`DisableControllers=cpu` on `user.slice`, on the first account's user
+manager, and on the login screen's user slice and user manager, which otherwise keep it on), so
+both accounts' processes shared `user.slice`'s CPU and the kernel split it per thread. The first
+account had a nice limit of 30 (`nice -10` in its login limits), and System mode was not
+installed. The second account ran the F2c load and the GPU load as before. Three rounds of each
+arm, the order rotating, from a build of `81aeb30`:
+
+| Shape | Arm | Own work against by hand | Second account's rate | Share of its CPUs |
+|---|---|---|---|---|
+| F2c | by hand | | | 51.0–65.3% |
+| F2c | Performance | +0.4% (−0.0 to +1.2) | −3.4% | 57.1–59.1% |
+| F2c | Unprotected | +21.1% (+20.8 to +21.3) | −83.2%, p99 60 ms against 3.3–6.3 ms | 90.8–91.5% |
+| GPU F2c | Performance | −1.3% (−1.7 to −1.0) | −0.2% | |
+
+By hand, the per-thread split gives own work's eight threads most of the second account's two
+CPUs. Performance starts every task beside the plain principal (FR-007a) and matches it, so the
+layout needs no rule of its own (spec Assumptions). Unprotected ran every own thread at nice -10
+(`raise_on` in the agent's log, `nice_raised` from each supervisor) and back at the launch value
+when the run ended (`raise_off`). On GPU compute own work did 1.3% less, the CPU that CedeGrid's
+own agent (30–33 m, with its device sampling) took from the GPU tasks' launch threads in the
+same cgroup.
+
+| Requirement | Verdict |
+|---|---|
+| FR-023 F2c, same cgroup, CPU and GPU | CPU: pass, level with by hand. GPU: −1.3%, within CedeGrid's measured own CPU |
+| SC-006 where accounts share a CPU cgroup (FR-016's nice raise) | pass: 33 points over by hand's mean (58.1%) |
+
 ## Rules for validation runs
 
 - Report these statuses separately:
