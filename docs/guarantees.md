@@ -386,7 +386,10 @@ beside a first-comer, while another principal contends and the others leave own 
 equal share of the capacity less the operator reserve, within a principal's floor (1% of
 capacity), own work keeps that equal share for admission: the margin is room for others'
 growth past an equal share, which no mode owes, and readings that close to the share do not
-move it. Otherwise Yield First keeps 15% of capacity free, Neutral 5%, and Performance 2%
+move it. Running own work keeps that equal share whatever room the others leave, wherever the
+principal list reads: a principal that took the room own work left by running below its share
+does not hold its paused tasks below it (SC-003), while admission still gets only what is left.
+Otherwise Yield First keeps 15% of capacity free, Neutral 5%, and Performance 2%
 where it holds for a first-comer and nothing elsewhere; the margins are validated as Yield
 First ≥ Neutral ≥ Performance, and Neutral and Performance also differ in how fast they
 scale up: 10 s per step in Neutral; in Performance, one monitor interval on CPU and GPU
