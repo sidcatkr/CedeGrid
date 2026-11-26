@@ -29,7 +29,7 @@
     "THIRD_PARTY_NOTICES.md"
   ],
   "scripts": {
-    "build": "tsc && node build/scripts/build.js",
+    "build": "node -e \"for (const d of ['build', 'dist']) require('node:fs').rmSync(d, { recursive: true, force: true })\" && tsc && node build/scripts/build.js",
     "test": "npm run build && node --test build/tests/*.test.js",
     "pack:release": "npm run build && npm pack --ignore-scripts"
   },
@@ -44,7 +44,6 @@
   },
   "devDependencies": {
     "@types/node": "22.19.2",
-    "typescript": "5.9.3",
-    "verdaccio": "6.10.3"
+    "typescript": "5.9.3"
   }
 }

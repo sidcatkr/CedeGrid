@@ -69,6 +69,7 @@ include = [
     "/docs/release-0.2-spec.md",
     "/docs/release-0.2-gates.json",
     "/docs/release-0.2-evidence.md",
+    "/docs/release-0.3-gates.json",
     "/docs/migration-0.2.md",
     "/docs/migration-registries.md",
     "/docs/worker-protocol.md",

@@ -15,6 +15,8 @@ import shutil
 import subprocess
 import sys
 
+import release_version
+
 ROOT=Path(__file__).resolve().parent.parent
 TARGETS={
  'darwin-arm64':('aarch64-apple-darwin',None),
@@ -105,7 +107,7 @@ os.execv(lld,[lld,'-flavor','gnu','--fix-cortex-a53-843419']+links[0][1:])
    subprocess.run(['strip','--strip-debug',str(destination)],check=True)
   else:raise RuntimeError('cross-built Linux candidates require a target-aware debug stripper')
  sha=hashlib.sha256(destination.read_bytes()).hexdigest()
- record={'version':'0.2.0','target':target,'package_target':args.target,'sha256':sha,'size':destination.stat().st_size,
+ record={'version':release_version.version(),'target':target,'package_target':args.target,'sha256':sha,'size':destination.stat().st_size,
  'path_remapping':True,'linux_glibc_target':'2.35' if args.target.startswith('linux-') else None,
  'macos_deployment_target':'14.0' if args.target.startswith('darwin-') else None,
  'signature':'ad-hoc' if args.target.startswith('darwin-') else 'unsigned',

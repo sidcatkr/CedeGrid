@@ -783,7 +783,8 @@ def installed_sdk(wheel, expected):
     direct_url = distribution.read_text("direct_url.json")
     require(not direct_url or not json.loads(direct_url).get("dir_info", {}).get("editable"),
             "EDITABLE_SDK_FORBIDDEN")
-    require(distribution.version == "0.2.0", "SDK_VERSION_MISMATCH")
+    named = re.fullmatch(r"cedegrid-([0-9]+\.[0-9]+\.[0-9]+)-py3-none-any\.whl", wheel.name)
+    require(named is not None and distribution.version == named.group(1), "SDK_VERSION_MISMATCH")
     expected_paths = set()
     with zipfile.ZipFile(wheel) as archive:
         require(len(archive.infolist()) < 10000, "WHEEL_ENTRY_BOUND_EXCEEDED")
@@ -833,7 +834,8 @@ def preflight(args, root):
     require(worker_check.get("checksum_hex") == reference_checksum(7, BATCHES) and
             worker_check.get("gpu_status") == "NOT_RUN", "WORKER_CPU_REFERENCE_FAILED")
     native_check = subprocess.run([str(native), "--version"], capture_output=True, timeout=5, check=True, cwd=root)
-    require(native_check.stdout.strip() == b"cedegrid 0.2.0", "NATIVE_VERSION_MISMATCH")
+    # The native CLI and the SDK come from one release, so they carry one version.
+    require(native_check.stdout.strip() == b"cedegrid " + sdk_version.encode(), "NATIVE_VERSION_MISMATCH")
     node = toml_file(args.node_config)
     deployment = toml_file(args.agent_deployment)
     require(node.get("config_version") == 1 and deployment.get("config_version") == 1 and
@@ -911,7 +913,8 @@ def run_gate(args):
     configuration = {}
     try:
         module, client, configuration = preflight(args, root)
-        versions = {"native": "0.2.0", "python_sdk": configuration["sdk_version"], "python": sys.version.split()[0]}
+        versions = {"native": configuration["sdk_version"], "python_sdk": configuration["sdk_version"],
+                    "python": sys.version.split()[0]}
         configuration.update(private_dir=str(root), gpu_uuid=args.gpu_uuid, model=args.model,
                              worker_sha256=args.worker_sha256, task_id=task_id, token=uuid.uuid4().hex,
                              node_config=str(Path(args.node_config).resolve()),
