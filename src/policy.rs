@@ -384,6 +384,10 @@ pub struct PolicyEngine {
     last_observed: BTreeMap<String, Resources>,
     /// The yield ladder: the step applied per allocation and resource.
     ladder: BTreeMap<(String, ResourceKey), StepState>,
+    /// The logical CPUs each run with a core lever was last granted (003 FR-043).
+    granted_cores: BTreeMap<String, Vec<u32>>,
+    /// When each run's granted core count last changed.
+    core_changed_at: BTreeMap<String, u64>,
     /// When a resource's measurement became unknown or held (FR-008 window).
     unknown_since: BTreeMap<ResourceKey, u64>,
     /// When an allocation's usage became unknown (R10 window).
@@ -649,6 +653,8 @@ struct Interval<'a> {
     cooled_down: bool,
     // The yield ladder.
     actions: Vec<YieldAction>,
+    /// The logical CPUs each run with a core lever may use (003 FR-043).
+    granted_cores: BTreeMap<String, Vec<u32>>,
     /// The largest amount own work holds above its target, per resource.
     over_target: BTreeMap<ResourceKey, u64>,
     /// The deadline each hint carries to its worker, as the ladder enforces it.
@@ -759,6 +765,7 @@ impl<'a> Interval<'a> {
             first_come: BTreeSet::new(),
             cooled_down: false,
             actions: Vec::new(),
+            granted_cores: BTreeMap::new(),
             over_target: BTreeMap::new(),
             hint_deadlines: BTreeMap::new(),
             breached: BTreeSet::new(),
@@ -780,6 +787,7 @@ impl<'a> Interval<'a> {
     fn finish(mut self) -> (Decision, PolicyEngine) {
         let (config, snapshot) = (self.config, self.snapshot);
         self.next.last_now = Some(self.now);
+        self.next.granted_cores = self.granted_cores.clone();
         self.next.node_id = Some(snapshot.node_id.clone());
         for key in [ResourceKey::Cpu, ResourceKey::Ram] {
             self.statuses.entry(key).or_default();
@@ -840,6 +848,7 @@ impl<'a> Interval<'a> {
             reason_codes: self.reasons,
             resources: self.statuses,
             actions: self.actions,
+            granted_cores: self.granted_cores,
             exceptions: config.caution_options_on(snapshot),
             allocation_modes: self.allocation_modes,
             max_mode: Some(config.contention.max_mode()),

@@ -738,6 +738,7 @@ mod modes {
             fair_share_limit: None,
             unprotected: false,
             unattributed_hold: 0,
+            waiting: Default::default(),
         }
     }
 
@@ -1850,6 +1851,13 @@ mod scenarios {
         /// How many tasks are paused.
         paused: usize,
         drained: bool,
+        /// The most the external user can use, as where it waits for CPUs own work does not
+        /// leave it, and the CPUs its waiting processes may use (003 FR-050, FR-056); with a cap
+        /// its unmet demand is reported as run-queue wait.
+        external_cap: Option<u64>,
+        external_cpus: Option<Vec<u32>>,
+        /// The last decision.
+        last: Option<Decision>,
     }
 
     impl World {
@@ -1869,6 +1877,9 @@ mod scenarios {
                 steps: [YieldStep::None; TASKS],
                 paused: 0,
                 drained: false,
+                external_cap: None,
+                external_cpus: None,
+                last: None,
             }
         }
 
@@ -1887,7 +1898,10 @@ mod scenarios {
                     ((self.own.0 / tasks).max(1), demand)
                 })
                 .collect();
-            claims.push(self.external);
+            let reach = self
+                .external_cap
+                .map_or(self.external.1, |cap| cap.min(self.external.1));
+            claims.push((self.external.0, reach));
             let usage = schedule(&claims);
             let (own, external) = (usage[..TASKS].iter().sum::<u64>(), usage[TASKS]);
             let mut snapshot = snapshot(own + external);
@@ -1900,6 +1914,10 @@ mod scenarios {
                 PrincipalUsage {
                     uid: Some(2000),
                     cpu_millicores: external,
+                    cpu_wait_millicores: self
+                        .external_cap
+                        .map(|_| self.external.1.saturating_sub(external)),
+                    allowed_cpus: self.external_cpus.clone(),
                     ..PrincipalUsage::default()
                 },
             ]);
@@ -1950,6 +1968,7 @@ mod scenarios {
                 .count();
             self.drained |= self.steps.iter().any(|s| *s >= YieldStep::Drain)
                 || !decision.would_drain.is_empty();
+            self.last = Some(decision);
             (own, external)
         }
     }
@@ -2194,6 +2213,7 @@ mod scenarios {
                         fair_share_limit: None,
                         unprotected: false,
                         unattributed_hold: 0,
+                        waiting: Default::default(),
                     },
                     &config.contention.thresholds(ResourceKind::GpuMemory),
                 );
@@ -2380,6 +2400,65 @@ mod scenarios {
             *now += INTERVAL;
         }
         own
+    }
+
+    /// Whether the decision records the external user's demand as satisfied.
+    fn satisfied_user(decision: &Decision) -> bool {
+        decision.resources[&ResourceKey::Cpu]
+            .reasons
+            .iter()
+            .any(|r| r.code == "satisfied_demand" && r.text.contains("uid 2000"))
+    }
+
+    /// A user waiting in the run queue contends without saturation, as the CPUs it waits for can
+    /// be busy while others idle; a step that does not make it grow records it satisfied, so wait
+    /// alone does not keep own work held (003 FR-050).
+    #[test]
+    fn a_waiting_user_is_probed_without_saturation_and_learned_satisfied() {
+        let mut world = World::new(ContentionMode::Neutral, (8, 4000));
+        world.external = (1, 2000);
+        world.external_cap = Some(500);
+        world.external_cpus = Some((0..8).collect());
+        let mut now = 0;
+        let mut learned = None;
+        while now < 60_000 {
+            world.tick(now);
+            let decision = world.last.clone().unwrap();
+            if learned.is_none() && satisfied_user(&decision) {
+                learned = Some(now);
+            }
+            now += INTERVAL;
+        }
+        let learned = learned.expect("the waiting user was never probed");
+        assert!(learned <= 30_000, "learned at {learned} ms");
+        assert!(satisfied_user(world.last.as_ref().unwrap()));
+        assert_eq!(world.paused, 0);
+    }
+
+    /// A user that waits for CPUs own work may use gains nothing from a step elsewhere: it is
+    /// never recorded satisfied while it waits, and own work holds the fair share (003 FR-056).
+    #[test]
+    fn a_user_pinned_to_own_cpus_is_never_learned_satisfied() {
+        let mut world = World::new(ContentionMode::Neutral, (8, 8000));
+        world.external = (1, 2000);
+        world.external_cap = Some(500);
+        world.external_cpus = Some(vec![0, 1]);
+        let mut now = 0;
+        let mut own_at_end = 0;
+        while now < 120_000 {
+            own_at_end = world.tick(now).0;
+            assert!(
+                !satisfied_user(world.last.as_ref().unwrap()),
+                "recorded satisfied at {now} ms"
+            );
+            now += INTERVAL;
+        }
+        // Held to the fair share of two principals, to within one task.
+        assert!(
+            own_at_end <= CAPACITY / 2 + CAPACITY / TASKS as u64,
+            "own {own_at_end}"
+        );
+        assert!(!world.drained);
     }
 
     /// One steady external user at 12.5% gets the fair share at once and is then
@@ -7766,5 +7845,246 @@ mod unprotected {
         let mut protected = input.clone();
         protected.unprotected = false;
         assert_eq!(allowance(&input), allowance(&protected));
+    }
+}
+
+/// Runs with a core lever (003 FR-043): a `run` gives CPU back by the cores it may use, never by
+/// a pause, at least one core, and in Performance never fewer than its scope's.
+mod core_lever {
+    use super::*;
+    use cedegrid::contention::{ContentionMode, ResourceKey, YieldStep};
+
+    /// Four physical cores, each two logical CPUs, as the agent reports a run's lever.
+    fn lever() -> CoreLever {
+        CoreLever {
+            cores: vec![vec![0, 4], vec![1, 5], vec![2, 6], vec![3, 7]],
+        }
+    }
+
+    /// Twelve intervals of one run beside another user, `external` its CPU use, `wait` its
+    /// run-queue wait and `cpus` the CPUs its waiting processes may use; the last decision.
+    fn run_beside(
+        mode: ContentionMode,
+        external: u64,
+        wait: Option<u64>,
+        cpus: Option<Vec<u32>>,
+    ) -> Decision {
+        let mut config = config();
+        config.cpu.reserve_physical_cores = 0;
+        config.contention.default_mode = mode;
+        config
+            .contention
+            .acknowledge_caution
+            .insert("performance_mode".into());
+        let mut engine = PolicyEngine::new();
+        let mut decision = None;
+        for i in 0..12u64 {
+            let own = 8000 - external;
+            let mut snap = snapshot(8000);
+            snap.principals = Some(vec![
+                PrincipalUsage {
+                    uid: Some(1000),
+                    is_owner: true,
+                    ..PrincipalUsage::default()
+                },
+                PrincipalUsage {
+                    uid: Some(2000),
+                    cpu_millicores: external,
+                    cpu_wait_millicores: wait,
+                    allowed_cpus: cpus.clone(),
+                    ..PrincipalUsage::default()
+                },
+            ]);
+            let input = PolicyInput {
+                allocations: vec![allocation(
+                    "run",
+                    AllocationClass::Opportunistic,
+                    1000,
+                    Some(own),
+                )],
+                facts: BTreeMap::from([(
+                    "run".to_string(),
+                    AllocationFacts {
+                        unavailable: BTreeMap::from([(
+                            ResourceKey::Cpu,
+                            [YieldStep::LowerShare, YieldStep::Cap].into(),
+                        )]),
+                        cpu_cores: Some(lever()),
+                        ..AllocationFacts::default()
+                    },
+                )]),
+                ..PolicyInput::default()
+            };
+            decision = Some(engine.evaluate(&config, &snap, &input, i * 500).unwrap());
+        }
+        decision.unwrap()
+    }
+
+    /// Each interval's granted CPU count while the other user's use follows `external(i)`.
+    fn grants_over(
+        mode: ContentionMode,
+        intervals: u64,
+        external: &dyn Fn(u64) -> u64,
+    ) -> Vec<usize> {
+        let mut config = config();
+        config.cpu.reserve_physical_cores = 0;
+        config.contention.default_mode = mode;
+        let mut engine = PolicyEngine::new();
+        let mut counts = vec![];
+        for i in 0..intervals {
+            let external = external(i);
+            let mut snap = snapshot(if external > 0 { 8000 } else { 6000 });
+            snap.principals = Some(vec![
+                PrincipalUsage {
+                    uid: Some(1000),
+                    is_owner: true,
+                    ..PrincipalUsage::default()
+                },
+                PrincipalUsage {
+                    uid: Some(2000),
+                    cpu_millicores: external,
+                    ..PrincipalUsage::default()
+                },
+            ]);
+            let own = if external > 0 { 8000 - external } else { 6000 };
+            let input = PolicyInput {
+                allocations: vec![allocation(
+                    "run",
+                    AllocationClass::Opportunistic,
+                    1000,
+                    Some(own),
+                )],
+                facts: BTreeMap::from([(
+                    "run".to_string(),
+                    AllocationFacts {
+                        cpu_cores: Some(lever()),
+                        ..AllocationFacts::default()
+                    },
+                )]),
+                ..PolicyInput::default()
+            };
+            let decision = engine.evaluate(&config, &snap, &input, i * 500).unwrap();
+            counts.push(granted(&decision).len());
+        }
+        counts
+    }
+
+    /// Fewer cores apply as soon as contention needs them; more return only after the mode's
+    /// scale-up interval, 10 s in Neutral, so the grant does not swing (SC-009).
+    #[test]
+    fn fewer_cores_apply_at_once_and_more_wait_the_scale_up_interval() {
+        // The other user from interval 10 to 30, then gone.
+        let counts = grants_over(ContentionMode::Neutral, 80, &|i| {
+            if (10..30).contains(&i) { 4000 } else { 0 }
+        });
+        assert_eq!(counts[5], 8, "{counts:?}");
+        let fell = counts.iter().position(|c| *c < 8).expect("never fell");
+        assert!((10..=16).contains(&fell), "fell at {fell}: {counts:?}");
+        let rose = (30..80)
+            .find(|i| counts[*i] == 8)
+            .expect("never rose again");
+        assert!(
+            rose >= 30 && rose - fell >= 20,
+            "rose at {rose}: {counts:?}"
+        );
+        // No change between the fall and the rise.
+        assert!(
+            counts[fell..rose].iter().all(|c| *c == counts[fell]),
+            "{counts:?}"
+        );
+    }
+
+    /// Own work that gets less than its fair share while nothing holds it back says so and why;
+    /// CedeGrid never raises its thread count or priority to win it back (003 FR-049).
+    #[test]
+    fn own_work_below_its_fair_share_says_so() {
+        let below = |external: u64| {
+            let mut config = config();
+            config.cpu.reserve_physical_cores = 0;
+            config.contention.default_mode = ContentionMode::Neutral;
+            let mut engine = PolicyEngine::new();
+            let mut decision = None;
+            for i in 0..12u64 {
+                let mut snap = snapshot(8000);
+                snap.principals = Some(vec![
+                    PrincipalUsage {
+                        uid: Some(1000),
+                        is_owner: true,
+                        ..PrincipalUsage::default()
+                    },
+                    PrincipalUsage {
+                        uid: Some(2000),
+                        cpu_millicores: external,
+                        ..PrincipalUsage::default()
+                    },
+                ]);
+                let input = PolicyInput {
+                    allocations: vec![allocation(
+                        "task",
+                        AllocationClass::Opportunistic,
+                        1000,
+                        Some(8000 - external),
+                    )],
+                    ..PolicyInput::default()
+                };
+                decision = Some(engine.evaluate(&config, &snap, &input, i * 500).unwrap());
+            }
+            decision.unwrap().resources[&ResourceKey::Cpu]
+                .reasons
+                .iter()
+                .any(|r| r.code == "below_fair_share")
+        };
+        assert!(below(6000));
+        assert!(!below(3000));
+    }
+
+    fn granted(decision: &Decision) -> Vec<u32> {
+        decision
+            .granted_cores
+            .get("run")
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn paused(decision: &Decision) -> bool {
+        decision
+            .actions
+            .iter()
+            .any(|a| a.allocation_id == "run" && a.step == YieldStep::Pause)
+    }
+
+    /// Neutral beside a saturating user: the run keeps the cores its fair share needs, two of
+    /// four, and is not paused.
+    #[test]
+    fn neutral_grants_the_cores_of_the_fair_share() {
+        let decision = run_beside(ContentionMode::Neutral, 4000, None, None);
+        assert_eq!(granted(&decision), vec![0, 1, 4, 5]);
+        assert!(!paused(&decision), "{:?}", decision.actions);
+    }
+
+    /// Performance never holds the run below what plain Linux would give it: every core.
+    #[test]
+    fn performance_grants_every_core() {
+        let decision = run_beside(ContentionMode::Performance, 4000, None, None);
+        assert_eq!(granted(&decision), vec![0, 1, 2, 3, 4, 5, 6, 7]);
+        assert!(!paused(&decision));
+    }
+
+    /// Yield First gives back first, but no lever goes below one core (FR-048).
+    #[test]
+    fn yield_first_keeps_at_least_one_core() {
+        let decision = run_beside(ContentionMode::YieldFirst, 4000, None, None);
+        let cpus = granted(&decision);
+        assert!(!cpus.is_empty() && cpus.len() <= 4, "{cpus:?}");
+        assert!(!paused(&decision));
+    }
+
+    /// A user waiting for the first core gets it: the granted cores move off the CPUs it may
+    /// use, still the fair share's two cores (FR-056).
+    #[test]
+    fn granted_cores_move_off_a_waiting_users_cpus() {
+        let decision = run_beside(ContentionMode::Neutral, 4000, Some(1000), Some(vec![0, 4]));
+        assert_eq!(granted(&decision), vec![1, 2, 5, 6]);
+        assert!(!paused(&decision));
     }
 }

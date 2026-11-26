@@ -54,6 +54,13 @@
   stay users. A user ID in an `/etc/subuid` range counts as its owner, so a rootless
   container's processes are their owner's (`contention.system_accounts.subordinate_uid_file`;
   empty turns it off). A range beyond the defaults needs `relaxed_detection`.
+- **Run-queue wait and core grants.** Other users' run-queue wait and the CPUs their waiting
+  processes may use are read from `/proc`, at most `evidence.max_threads_per_interval` (4096)
+  threads per interval. A waiting user contends even when the CPU is not saturated, and is
+  recorded satisfied when a step does not help it; one waiting for CPUs own work uses never is.
+  A `cedegrid run` that the agent can steer by affinity gives CPU back by whole cores, never by
+  a pause: at least one core, every core in Performance and Aggressive. Own work that gets less
+  than its fair share says so (`below_fair_share`).
 - **Satisfied demand.** Under saturation, a small external demand is probed and a larger one
   is watched for one response window. A user whose usage stays within its demand is recorded
   as satisfied and no longer contends until its usage grows past it. At most 64 records are

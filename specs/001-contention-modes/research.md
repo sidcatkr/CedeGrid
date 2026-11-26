@@ -1610,3 +1610,19 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
 - **Alternatives**: the same rule on CPU (changed 1153 scripted decisions in Tracked mode, which
   E8 measured as it is); resuming only when the task fits the target (needs the task's part, which
   the ladder does not see).
+
+## R94. Run-queue wait as evidence and whole cores as a run's lever (2026-11-26)
+
+- **Decision**: wait reaching the CPU principal floor makes a user a principal that contends
+  without saturation and enters the probe; a user waiting for own work's CPUs, or with unknown
+  CPUs, is never satisfied. A run with the affinity lever is granted whole cores for its part of
+  the target, at least one, every core in Performance and Aggressive; fewer apply at once, more
+  after the scale-up interval; cores away from waiting users' CPUs go first.
+- **Rationale**: 003 reduces a `run`'s CPU by affinity only, while 001 pauses whole tasks; a per
+  allocation lever keeps both. Wait tells users apart in one cgroup, but a user with more threads
+  than cores always waits, so it only feeds the probe. The principal floor as the wait level
+  avoids a second threshold. 003's placement before a duty cycle (R17) has no duty cycle left in
+  001 to precede, so placement becomes the choice of granted cores.
+- **Alternatives**: pausing a `run` like other tasks (003 forbids stopping a run's processes);
+  a separate wait threshold (one more setting with no evidence for another value); counting
+  unpinned waiting users as never satisfied (wait alone would hold own work).

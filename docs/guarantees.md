@@ -319,7 +319,21 @@ not in the default because directory services map people's IDs into the same num
 operator who runs such containers can add them. A user ID in a range of
 `contention.system_accounts.subordinate_uid_file` (`/etc/subuid`) counts as that range's owner,
 so a rootless container's processes are their owner's; while the file or the owner cannot be
-read, the user ID counts as itself, and an empty path turns this off. The account CedeGrid runs as is one
+read, the user ID counts as itself, and an empty path turns this off.
+
+Run-queue wait is evidence, not a reason to yield on its own. CedeGrid reads other users'
+threads' run-queue wait from `/proc`, at most `evidence.max_threads_per_interval` (4096) threads
+per interval in rotation, and the CPUs each waiting user's processes may use. A user whose wait
+reaches the CPU principal floor contends even when the CPU is not saturated, since the CPUs it
+waits for can be busy while others idle; a step that does not make it grow records it satisfied.
+A waiting user that may use fewer CPUs than the scope and shares them with own work, or whose
+CPUs cannot be read, is never recorded satisfied while it waits, and own work holds the fair
+share. A run whose supervisor has the affinity lever (a `cedegrid run` at the Tracked level)
+gives CPU back by the cores it may use instead of a pause: whole physical cores for its part of
+the target, at least one, chosen away from a waiting user's CPUs first; in Performance and
+Aggressive it keeps every core. Fewer cores apply at once and more after the mode's scale-up
+interval. When own work gets less than its fair share while nothing holds it back, the CPU status
+says so (`below_fair_share`); CedeGrid never raises its thread count or priority to win it back. The account CedeGrid runs as is one
 principal: its unmanaged processes share its fair share with own work and are served as
 own work's margin frees capacity, so the 2-interval reclaim bound applies to other
 principals' demand. Until a user joins, its usage counts
@@ -814,6 +828,8 @@ caution options in `exceptions`, and in the node-wide `reason_codes` beside the 
 | `gpu_time_slice_hold` | Own tasks on the time-sliced device are paused down to the running ones the time-slice rule allows beside the slice-bound principals. |
 | `gpu_first_come_floor` | Own GPU work was on the device before every other principal listed there, so it keeps at least the share that leaves none of them more than half of the device. |
 | `gpu_time_slice_admission_held` | One more own process on the time-sliced device would take a slice-bound principal below its fair share of the busy contexts, so GPU admission holds. |
+| `below_fair_share` | Own work gets less than its fair share while nothing holds it back: the other users' threads get more of the CPU, and CedeGrid does not raise its own thread count or priority. |
+| `cpu_cores_granted` | A run that gives CPU back by the cores it may use is granted whole cores for its part of the target, at least one. |
 | `admitted_as_plain` | No account that arrived first with CedeGrid work contends, so Performance starts new work as plain Linux would. |
 | `held_for_first_comer` | Another account's CedeGrid work arrived first and contends, so admission holds at the fair share for it. |
 | `admit_immediately_ignored_for_protected_first_comer` | An account that arrived first runs Performance or Aggressive work, so admit immediately does not lift the hold for it. |

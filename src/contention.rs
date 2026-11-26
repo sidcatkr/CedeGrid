@@ -392,6 +392,14 @@ pub const REASON_CODES: &[(&str, &str)] = &[
         "One more own process on the time-sliced device would take a slice-bound principal below its fair share of the busy contexts, so GPU admission holds.",
     ),
     (
+        "below_fair_share",
+        "Own work gets less than its fair share while nothing holds it back: the other users' threads get more of the CPU, and CedeGrid does not raise its own thread count or priority.",
+    ),
+    (
+        "cpu_cores_granted",
+        "A run that gives CPU back by the cores it may use is granted whole cores for its part of the target, at least one.",
+    ),
+    (
         "admitted_as_plain",
         "No account that arrived first with CedeGrid work contends, so Performance starts new work as plain Linux would.",
     ),
@@ -1458,6 +1466,9 @@ pub struct ModeInput {
     /// Usage no readable account accounts for that is within the account list's own recent
     /// error and has not lasted the principal window: it stands for no principal (FR-021).
     pub unattributed_hold: u64,
+    /// Principals whose run-queue wait is at the contending level, each with whether its
+    /// waiting processes may run on own work's CPUs or that is unknown (003 FR-050, FR-056).
+    pub waiting: BTreeMap<Option<u32>, bool>,
 }
 
 /// Work-conserving max-min shares over current demand (research R12). `None`
@@ -1609,7 +1620,8 @@ pub fn contending_principals(
     let mut accounted = input.background;
     for (principal, usage) in input.principals.iter().flatten() {
         accounted = accounted.saturating_add(*usage);
-        if !principal.is_owner && *usage >= floor {
+        // A principal waiting in the run queue contends whatever it gets (003 FR-050).
+        if !principal.is_owner && (*usage >= floor || input.waiting.contains_key(&principal.uid)) {
             result.push((principal.uid, *usage));
         }
     }
@@ -1674,7 +1686,8 @@ pub fn kept_share(
 /// Compute is contended when external activity of unknown amount exists, or when
 /// the resource is saturated and an external principal, or the unattributed
 /// usage that stands for one, uses at least the contention floor without its
-/// demand being known to be satisfied.
+/// demand being known to be satisfied. A principal waiting in the run queue contends without
+/// saturation, as the CPUs it waits for can be busy while others are idle (003 FR-050).
 pub fn contended(input: &ModeInput, thresholds: &ResourceThresholds) -> bool {
     if input.kind.is_memory() {
         return false;
@@ -1682,10 +1695,12 @@ pub fn contended(input: &ModeInput, thresholds: &ResourceThresholds) -> bool {
     if input.unknown_activity {
         return true;
     }
-    input.saturated
-        && contending_principals(input, thresholds)
-            .into_iter()
-            .any(|(uid, usage)| satisfied_demand(input, uid, usage).is_none())
+    contending_principals(input, thresholds)
+        .into_iter()
+        .any(|(uid, usage)| {
+            (input.saturated || input.waiting.contains_key(&uid))
+                && satisfied_demand(input, uid, usage).is_none()
+        })
 }
 
 /// Whether own GPU work may be admitted to a device now (FR-026, FR-027, FR-064).
@@ -1808,12 +1823,15 @@ pub fn probe_demand(
             None => Some(input.external.saturating_sub(accounted)),
         }
     };
+    // A principal that waits for CPUs own work may use is never satisfied: a step elsewhere
+    // cannot reach it (003 FR-056).
+    let pinned = |uid: &Option<u32>| input.waiting.get(uid).copied().unwrap_or(false);
     // A record holds while usage stays within it; a principal no longer listed
     // uses nothing.
     let mut satisfied: Vec<(Option<u32>, u64)> = input
         .satisfied
         .iter()
-        .filter(|(uid, demand)| usage_of(*uid).unwrap_or(0) <= *demand)
+        .filter(|(uid, demand)| usage_of(*uid).unwrap_or(0) <= *demand && !pinned(uid))
         .copied()
         .collect();
     if input.kind.is_memory() || input.unknown_activity {
@@ -1824,14 +1842,14 @@ pub fn probe_demand(
     let known = |uid: Option<u32>, satisfied: &[(Option<u32>, u64)]| {
         satisfied.iter().any(|(principal, _)| *principal == uid)
     };
-    let unknown: BTreeMap<Option<u32>, u64> = if input.saturated {
-        contending_principals(input, thresholds)
-            .into_iter()
-            .filter(|(uid, _)| !known(*uid, &satisfied))
-            .collect()
-    } else {
-        BTreeMap::new()
-    };
+    // Under saturation every contending principal is probed, and without it one waiting in the
+    // run queue (003 FR-050). One waiting for own work's CPUs is not: it keeps the fair share
+    // and is never recorded satisfied (FR-056).
+    let unknown: BTreeMap<Option<u32>, u64> = contending_principals(input, thresholds)
+        .into_iter()
+        .filter(|(uid, _)| (input.saturated || input.waiting.contains_key(uid)) && !pinned(uid))
+        .filter(|(uid, _)| !known(*uid, &satisfied))
+        .collect();
     // Under PSI-only saturation the host has room to spare, so every demand is
     // probed: a watch would wait for a saturation that never clears (FR-072).
     let probe = probe.filter(|probe| !(input.psi_only && probe.watch));
@@ -1872,7 +1890,8 @@ pub fn probe_demand(
         if !input.saturated {
             for (uid, before) in &watch.usage_at_step {
                 let usage = usage_of(*uid).unwrap_or(0);
-                if !known(*uid, &satisfied) && usage <= before.saturating_add(floor) {
+                if !known(*uid, &satisfied) && !pinned(uid) && usage <= before.saturating_add(floor)
+                {
                     satisfied.push((*uid, usage.saturating_add(floor)));
                 }
             }
@@ -1939,7 +1958,7 @@ pub fn probe_demand(
     // ended the saturation?
     let mut grown = BTreeMap::new();
     for (uid, before) in probe.usage_at_step.iter().chain(unknown.iter()) {
-        if known(*uid, &satisfied) || grown.contains_key(uid) {
+        if known(*uid, &satisfied) || grown.contains_key(uid) || pinned(uid) {
             continue;
         }
         let usage = usage_of(*uid).unwrap_or(0);

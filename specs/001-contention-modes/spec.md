@@ -1007,6 +1007,13 @@ gates measure the gain ([006](../006-performance-first/spec.md) SC-004, SC-005).
   owner, so a rootless container's processes are their owner's. Nothing is fixed in code: the
   defaults sit in one place and the broker's policy uses the same type (FR-059, FR-090; user,
   2026-11-26).
+- Q: How does 001's policy take 003's run-queue evidence and a `cedegrid run`'s core lever,
+  given that 001's Tracked CPU path pauses whole tasks and 003 reduces a run's CPU by affinity
+  only? → A: The lever is per allocation (FR-091): a run whose supervisor has the affinity lever
+  gets whole cores instead of pauses, at least one, and every core in Performance and
+  Aggressive; other tasks keep whole-task pauses. Run-queue wait feeds the probe only, and a
+  user waiting for own work's CPUs is never recorded satisfied (user, 2026-11-26: all of 003 in
+  this release; interfaces agreed with the other thread).
 
 ## Terms
 
@@ -2301,6 +2308,25 @@ node reports with the expected per-resource values at each step.
     arrival in the same interval as own work's means no floor on that device.
   - The floor never pauses own work or starts it; it only limits what Yield First and Neutral
     hold back. The decision states per device whether the floor applies and, if not, why.
+- **FR-091**: Run-queue wait and core grants (003 FR-043, FR-048 to FR-050, FR-056):
+  - The telemetry MUST read other users' threads' run-queue wait read only, as `schedstat` run
+    delay deltas summed by user, dropping exited threads, at most
+    `evidence.max_threads_per_interval` (default 4096) threads per interval in rotation, and the
+    CPUs each waiting user's processes may use (`Cpus_allowed_list`); unreadable means unknown.
+  - A user whose wait reaches the CPU principal floor MUST join the principals and contend
+    without saturation; the probe records it satisfied when a step does not make it grow, so wait
+    alone never keeps own work held.
+  - A waiting user that may use fewer CPUs than the scope and shares them with own work's granted
+    cores, or with own work that holds no grant, or whose CPUs are unknown, MUST NOT be probed or
+    recorded satisfied while it waits; own work then holds the fair share.
+  - A run the agent reports with a core lever MUST give CPU back by whole physical cores, never by
+    a pause: its equal part of the running CPU target left after other own work, at least one
+    core; in Performance and Aggressive every core. Fewer cores apply at once, more after the
+    mode's scale-up interval, and an unknown measurement keeps the last grant. The cores chosen
+    first avoid a waiting user's CPUs where it may use fewer than the scope's. The decision
+    carries the grant (`granted_cores`, `cpu_cores_granted`).
+  - Own work that gets less than its fair share of a saturated, contended CPU while no step holds
+    it MUST say so (`below_fair_share`); CedeGrid never raises its thread count or priority.
 - **FR-061**: A reclaim episode on a memory resource lasts while it has a floor breach or own
   usage beyond its budget. With n episodes started within the last `memory_peak_window_s`, it adds
   `reclaim_backoff_ms` × 2^(n−1) to that resource's cooldown, at most `reclaim_backoff_max_ms`
