@@ -131,6 +131,7 @@ readers, so it is also tested off Linux):
 
 Then the implementation:
 - [ ] T036 [US6] Implement src/supervision/tracked.rs (research R3): `PR_SET_CHILD_SUBREAPER` before EXEC, the tree walk, member verification, reaping and accounting.
+  - *Exists in part (converge, 2026-11-26):* the subreaper, tree walk, verified families and reaping are in `src/supervision/unix.rs` (001 FR-088); check them against T033–T035's tests rather than writing `tracked.rs` anew.
 - [ ] T037 [US6] Implement src/supervision/full.rs: a transient scope through the user manager, with its subtree handed to the cgroup backend (research R2).
 - [ ] T038 [US6] Select the level for every launch path (run, SDK tasks, cluster assignments) in src/agent/service.rs and src/agent/launch.rs:
   - the Tracked one-line notice;
@@ -145,6 +146,7 @@ Then the implementation:
 
   Each call follows Principle I's thread-ID rule (constitution 5.0.0, research R4); its own tests are T074–T077.
 - [ ] T040 [US6] Implement the affinity actuator in src/supervision/tracked.rs (research R4), with every per-thread call made through T078's thread-ID call.
+  - *Scope (converge, 2026-11-26):* the lever is a launch request flag only `run` sets (001 FR-091); the actuator applies `Decision.granted_cores` and never runs for SDK or cluster tasks.
 - [x] T041 [P] [US6] Test first in tests/runqueue.rs, with a fake `/proc`:
   - per-thread `run_delay` deltas are summed by UID;
   - exited threads are dropped, so no change is negative;
@@ -253,6 +255,7 @@ per-core contention. Tests first; T039 and T040 build on T074–T078.
 - [ ] T076 [P] [US6] Test first in tests/tracked.rs (`thread_id_call_*`), with a fake `/proc`: a TID that the member's `/proc/<pid>/task` does not list, such as one that now belongs to another thread group, is never touched. Per FR-043 and Constitution I (missing)
 - [ ] T077 [P] [US6] Test first in tests/tracked.rs (`thread_id_call_*`): with thread pidfds unavailable (or `CEDEGRID_TEST_FORCE_PROC_THREADS=1`), the `/proc/<pid>/task/<tid>` start-time path skips, reports and refuses exactly as T074–T076 require, and `thread_identity` records `proc_start_time`. Per FR-043 (missing)
 - [ ] T078 [US6] Implement the thread-ID call in src/supervision/tracked.rs (research R4): detect thread pidfd support (`pidfd_open` with `PIDFD_THREAD`) once per agent start; check the member's pidfd before the call; fix the thread's identity (thread pidfd, else task entry and start time); check the same thread after the call; keep `misdirected_tids` per member; honor `CEDEGRID_TEST_FORCE_PROC_THREADS` in tests and gates only. T040 makes every per-thread affinity change through it. Per FR-043, plan: CPU lever (missing)
+  - *Exists (converge, 2026-11-26):* the thread-ID call with its identity checks before and after (`ThreadIdentity`, per-thread `setpriority`) was built for 006's nice raise in `src/supervision/unix.rs`; the affinity actuator reuses it.
 - [ ] T079 [P] [US6] Test first in tests/runqueue.rs, with a fake `/proc`: each contending process's `Cpus_allowed_list` is read read-only into the principal's `allowed_cpus`; unreadable entries leave it unknown, not empty. Per FR-056 and research R15 (missing)
 - [ ] T080 [P] [US6] Test first in tests/contention.rs (`pinned_contender_*`): a principal whose wait stays at the contending level (T043) for the probe's response window and whose `allowed_cpus` overlap own work's granted cores, or are unknown, is not recorded as satisfied, under the saturation probe and under the PSI-only probe; at the Tracked level own work's requested granted cores drop a known overlap but never fall below its fair share in cores, and an unknown overlap moves no core; at the Full level no core request is made; with no overlap the 001 behavior is unchanged. Per FR-056 and 001 FR-021, FR-072 (missing)
   - *In part (001 thread, `bdd6ec3`, 2026-11-26):* the policy half: a contender pinned to own CPUs is never counted satisfied (`pinned_contender_*`).
@@ -272,7 +275,9 @@ failing test first, then the code.
 
 Root refusal (FR-082, SC-011):
 - [ ] T086 [P] [US5] Test first in tests/cli.rs (`root_refusal_*`) and a unit test of the refusal function in src/main.rs: at effective UID 0 every subcommand, the hidden `__worker-gate` and `__assignment-supervisor` included, prints one stderr line saying to run the same command as the user without `sudo` and exits 3; with `--json` it prints `{"error": {"code": "ERR_CEDEGRID_ROOT", ...}}`; at any other UID nothing changes. The refusal is a pure function of the effective UID. Per FR-082, SC-011 (missing)
+  - *In part (converge, 2026-11-26):* `system_mode::root_refusal` refuses at effective UID 0 from `main`, before the hidden dispatch, tested in `tests/system_mode.rs`; the `--json` error object and exit 3 of contracts/cli.md remain.
 - [ ] T087 [US5] Implement one `geteuid` read at the top of `main` in src/main.rs, before the hidden dispatch, which still runs before clap, Tokio, any thread and the launcher terminal handoff, and add `ERR_CEDEGRID_ROOT` to the CLI's error codes, until T086 passes. Per FR-082, research R18 (missing)
+  - *In part (converge, 2026-11-26):* see T086.
 - [ ] T088 [P] [US5] Test first in tests/control_level.rs (`control_level_ignores_sudo`): detection gives the same level with and without `SUDO_UID`, `SUDO_USER` and `SUDO_COMMAND` set and for any install path, and its recorded inputs hold none of them. Per FR-082 (missing)
 - [ ] T089 [US5] Make src/control_level.rs (T011) take only the user manager, delegation and the authorized controls, until T088 passes. Per FR-082 (missing)
 - [ ] T090 [US5] Add a step to .github/workflows/ci.yml on the Ubuntu runner: `sudo -n target/debug/cedegrid <command>` for every subcommand, expecting the one line and exit 3. Per SC-011 (missing)
@@ -334,10 +339,14 @@ Contended-CPU placement (FR-057, SC-013):
 
 Item 048's converge against constitution 7.0.0 and `specs/001-contention-modes/follow-ups.md`. Spec changes go through `/speckit-clarify` first; each code task starts with a failing test.
 
-- [ ] T108 CRITICAL: Bring FR-052 and research R9 in line with Principle II's OOM order by fault: a Tracked member within own memory's fair share keeps the `oom_score_adj` it launched with, and only the members that make up own memory above its fair share are marked as preferred victims, as 001 FR-023 does; then a failing test beside T048 in tests/tracked.rs. Per Constitution II, FR-052 (contradicts)
-- [ ] T109 Make Performance `run`'s default mode in FR-025 and US1 scenario 1 (now "Neutral"), and make T014 and T058 assert it. Per Constitution II, 001 FR-030 (contradicts)
-- [ ] T110 Make US6 scenario 6 and FR-052 depend on the mode and the memory fair share, as 001's ladder does: in Performance and Aggressive own memory within its fair share is not given up for a floor breach others caused; add that case to T048. Per Constitution II (contradicts)
-- [ ] T111 Re-run plan.md's Constitution Check against 7.0.0 (row II: the OOM order and the memory fair share at the floors), and update the version references in spec.md, research.md R3 and R4, and T039. Per Constitution II, plan: Constitution Check (contradicts)
+- [x] T108 CRITICAL: Bring FR-052 and research R9 in line with Principle II's OOM order by fault: a Tracked member within own memory's fair share keeps the `oom_score_adj` it launched with, and only the members that make up own memory above its fair share are marked as preferred victims, as 001 FR-023 does; then a failing test beside T048 in tests/tracked.rs. Per Constitution II, FR-052 (contradicts)
+  - *Done (converge, 2026-11-26):* FR-052 and research R9 follow Principle II's OOM order and floors by mode.
+- [x] T109 Make Performance `run`'s default mode in FR-025 and US1 scenario 1 (now "Neutral"), and make T014 and T058 assert it. Per Constitution II, 001 FR-030 (contradicts)
+  - *Done in the spec (converge, 2026-11-26):* FR-025 and US1 scenario 1 say Performance; T014 and T058 assert it when written.
+- [x] T110 Make US6 scenario 6 and FR-052 depend on the mode and the memory fair share, as 001's ladder does: in Performance and Aggressive own memory within its fair share is not given up for a floor breach others caused; add that case to T048. Per Constitution II (contradicts)
+  - *Done (converge, 2026-11-26):* FR-052, FR-051, FR-056 and FR-057 depend on the mode: Performance and Aggressive keep every core and get no floor hint or drain.
+- [x] T111 Re-run plan.md's Constitution Check against 7.0.0 (row II: the OOM order and the memory fair share at the floors), and update the version references in spec.md, research.md R3 and R4, and T039. Per Constitution II, plan: Constitution Check (contradicts)
+  - *Done (converge, 2026-11-26):* plan.md's Constitution Check re-checked against 9.2.0; the spec cites 9.2.0.
 - [ ] T112 Plan the follow-up "Full moves cores too": whether Full verifies its leaf members per thread through `cgroup.procs` plus a pidfd and takes the core move, through `/speckit-clarify` (FR-056, R15, R17, T080, T081 say Full makes no per-thread call). Per follow-ups "019 analyze C1" (partial)
 - [x] T113 Set and validate the numeric default of the wait level that marks a principal as contending (T003, T043; src/config.rs, research R7), test first in tests/contention.rs. Per FR-050, FR-056, follow-ups "019 analyze A1" (missing)
   - *Done (001 thread, `bdd6ec3`, 2026-11-26):* the contending wait level's default is set and validated in `src/config.rs`, with its test in `tests/contention.rs`.

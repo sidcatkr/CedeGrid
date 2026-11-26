@@ -12,9 +12,10 @@ Linux host, and keep the SDK, the coordinator cluster mode and the agent tooling
 
 This feature builds on [001-contention-modes](../001-contention-modes/spec.md): its modes,
 yield ladder, probing (FR-021, FR-072), setup (user story 7) and observability (user story 8).
-It does not redefine them. The constitution (5.0.0) applies, in particular Principle I's
-verified set for descendants and its rule for calls that take only a thread ID, and
-Principle V's Tracked control level.
+It does not redefine them. The constitution (9.2.0) applies, in particular Principle I's
+verified set for descendants and its rule for calls that take only a thread ID, Principle II's
+rules by mode (Performance and Aggressive never cap, pause or drain running own work, and the
+OOM order), and Principle V's Tracked control level and System mode broker.
 
 ## Clarifications
 
@@ -59,13 +60,28 @@ Principle V's Tracked control level.
 - Q: Does that per-core rule also apply to 001's PSI-only probe? → A: Yes. The plan says whether
   that part lands in 003 or needs a 001 follow-up.
 
+### Session 2026-11-26
+
+Converged with constitution 9.2.0 and the decisions of 001, 004, 005 and 006 before
+implementation (user, through the project chat).
+- Q: Where does `run` send work when this account runs in System mode? → A: To the agent in
+  the broker's ordinary unit when it runs; otherwise `run` starts the local agent rootless. One
+  line says which (FR-040).
+- Q: Does the one-line install script also install the System mode packages? → A: No. It stays
+  user-level; the `.deb` packages are documented for administrators (FR-073).
+- The core lever belongs to `run` launches only, and Performance and Aggressive keep every
+  core; the OOM order and floors follow Principle II (FR-043, FR-051, FR-052, FR-056, FR-057).
+  The built-in default mode is Performance (FR-025). These follow the constitution and 001
+  FR-030 and FR-091, without a new question.
+
 ### Session 2026-11-02
 
 - Q: How does CedeGrid treat a command run as root, and where does the control level come from?
   → A: Every `cedegrid` command run with effective UID 0 refuses with one line that says why and
   what to run instead: the same command as the user, without `sudo`. The only exception is the
-  System broker of feature 005, not yet specified. The control level (Tracked or Full, later
-  System) comes from the host's state, never from `sudo` or from how CedeGrid was installed. A
+  System broker of feature 005 (since specified and built). The control level (Tracked or Full,
+  or System mode's unit) comes from the host's state, never from `sudo` or from how CedeGrid
+  was installed. A
   test covers the refusal, and `doctor` shows a line for it.
 - Q: What is the CLI's install channel? → A: The GitHub Release binaries with a one-line install
   script that installs into `~/.local/bin`, needs no root, pins the version and verifies the
@@ -145,7 +161,7 @@ coordinator before the first run. One command makes CedeGrid usable for everyday
 **Acceptance Scenarios**:
 
 1. **Given** no CedeGrid state for the user, **When** they run `cedegrid run train.py`,
-   **Then** a local agent starts and the script runs under the default mode (Neutral).
+   **Then** a local agent starts and the script runs under the default mode (Performance).
 2. **Given** a running local agent, **When** the user starts a second run, **Then** it uses the
    same agent.
 3. **Given** a job JSON file used with the SDK today, **When** the user runs
@@ -400,7 +416,7 @@ without delegation, and check the output and `--json`.
   only. Environment values MUST be saved only with `--save-env`.
 - **FR-024**: `--explain` MUST show each effective value with its source.
 - **FR-025**: Precedence MUST be flags, then the per-job entry, then the global setup, then the
-  built-in defaults (Neutral).
+  built-in defaults (Performance, 001 FR-030).
 - **FR-026**: A per-job entry MAY set modes, GPU selection, requests, class, retries (`max_attempts`)
   and environment variable names. It MUST NOT set floors, the node cap or margins, which the per-job
   interface shows read-only. A per-job mode MUST NOT exceed the node cap.
@@ -426,7 +442,10 @@ without delegation, and check the output and `--json`.
   login session itself sits outside the user's slice; Tracked otherwise, with no flag needed.
   A Tracked run MUST print one line at start saying it is tracked rather than contained, and
   why. `ps`, `top` and `doctor` MUST label the level, and `--require-containment` MUST refuse
-  to start instead of running Tracked.
+  to start instead of running Tracked. Where this account runs in System mode (feature 005: its
+  agent runs in the broker's ordinary unit), `run` MUST hand the work to that agent, so the run
+  gets the unit's delegated cgroup; otherwise it starts the local agent rootless. Either way it
+  prints one line saying which (Session 2026-11-26).
 - **FR-041**: Full and Tracked MUST each have their own native gates on a test host. A test-only
   switch MUST force Tracked on a host with delegation, so both levels can be measured side by
   side.
@@ -435,10 +454,14 @@ without delegation, and check the output and `--json`.
   and a tree walk, reap orphans and add their resource usage to the run's accounting. It MUST
   act only on verified processes as defined by Principle I, never on a process outside the
   run's tree.
-- **FR-043**: At the Tracked level, the CPU ceiling MUST be the run's granted cores, applied to
-  every thread of every verified process, checked again every monitor interval, changed in
-  whole physical cores (SMT siblings together) and reversible. For a GPU run, the cores nearest
-  the GPU's NUMA node MUST be kept. CPU MUST NOT be reduced by raising nice values, which an
+- **FR-043**: At the Tracked level, a `run` launch carries the core lever (a launch request
+  flag only `run` sets; SDK tasks and cluster assignments keep 001's whole-task pauses, 001
+  FR-091). Its CPU ceiling MUST be the cores 001's policy grants it (`granted_cores`), applied
+  to every thread of every verified process, checked again every monitor interval, changed in
+  whole physical cores (SMT siblings together) and reversible. In Performance and Aggressive the
+  grant is every core of the run's scope, so running own work is never capped (Principle II);
+  fewer cores come only in Yield First and Neutral. For a GPU run, the cores nearest the GPU's
+  NUMA node MUST be kept. A lever run's CPU MUST NOT be reduced by raising nice values, which an
   unprivileged user cannot lower again, or by stopping and resuming processes. A tracked process
   that changes its own CPU affinity MUST be reported, not overridden. Each per-thread change MUST
   follow Principle I's rule for calls that take only a thread ID:
@@ -473,12 +496,16 @@ without delegation, and check the output and `--json`.
   a user whose CPU use does not grow after a yield is recorded as satisfied. Where other users'
   process details are hidden, the host-level signal MUST be used through the same probe, and
   `doctor` MUST say so.
-- **FR-051**: Where users share one CPU cgroup, Neutral and Performance MUST reach the fair share
-  by limiting cores and correcting from measured usage.
+- **FR-051**: Where users share one CPU cgroup, a Neutral lever run MUST reach the fair share
+  by limiting cores and correcting from measured usage. Performance and Aggressive keep every
+  core (Principle II).
 - **FR-052**: At the Tracked level, RAM MUST have no cap, and per-process address-space limits
-  MUST NOT be used, since they break the address-space reservations of GPU frameworks. Own processes MUST stay the preferred
-  OOM victims, SDK hints MUST come earlier than at the Full level, and a drain MUST checkpoint
-  and resume automatically when memory frees.
+  MUST NOT be used, since they break the address-space reservations of GPU frameworks. The OOM
+  order is Principle II's: own work keeps the score it launched with, and only in Yield First
+  and Neutral are the tasks above own memory's fair share marked as preferred victims. In Yield
+  First and Neutral, SDK hints MUST come earlier than at the Full level, and a drain MUST
+  checkpoint and resume automatically when memory frees; in Performance and Aggressive nothing
+  is hinted, drained or sent TERM for a floor breach (floors by mode).
 - **FR-053**: Native gates MUST cover a same-cgroup contender and a cross-cgroup contender, at
   both levels. Any host change a gate needs MUST have the user's approval first.
 - **FR-054**: Work started outside the run's tree, such as through another daemon or a terminal
@@ -491,14 +518,15 @@ without delegation, and check the output and `--json`.
   `/proc/<pid>/status`). While a contender's wait stays at the level that marks it as contending
   (FR-050) for the probe's response window, and its allowed CPUs overlap own work's or are
   unknown, the probe (001 FR-021, and FR-072's PSI-only probe) MUST NOT record it as satisfied.
-  At the Tracked level, own work's affinity MUST then move off a known overlap, on own processes
-  only and under FR-043's thread-ID rule, never below own work's fair share. At the Full level,
+  At the Tracked level, a Yield First or Neutral lever run's affinity MUST then move off a known
+  overlap, on own processes only and under FR-043's thread-ID rule, never below own work's fair
+  share; Performance and Aggressive keep every core. At the Full level,
   no per-thread call is made; own work yields through its cgroup's CPU limit as in 001.
-- **FR-057**: Before a duty cycle caps own work on a CPU a contender also uses, own threads MUST
-  move off that CPU: through affinity at the Tracked level, on own processes only and under
-  FR-043's thread-ID rule, or through `cpu.weight` where the Full level authorizes it. Duty
-  cycles are 001's rootless CPU caps on SDK and cluster tasks and the Full level's `cpu.max`;
-  `run`'s Tracked path has none (FR-043), so affinity is its only lever. Moving off MUST NOT take own work below its fair share. Own work's CPU step
+- **FR-057**: When 001's policy grants a Yield First or Neutral lever run fewer cores than its
+  scope, the cores it keeps MUST be those contenders do not wait on (001 FR-091 chooses them),
+  applied through affinity at the Tracked level, on own processes only and under FR-043's
+  thread-ID rule. 001's rootless duty cycle is gone (001 T616), so SDK and cluster tasks give
+  back through whole-task pauses instead. The grant MUST NOT take own work below its fair share. Own work's CPU step
   changes MUST stay within 001's SC-009 bound, at most one per change in the contender's load.
   A native gate MUST measure the contender's p99 latency beside own work under this rule
   (SC-013).
@@ -525,7 +553,10 @@ without delegation, and check the output and `--json`.
 - **FR-073**: The CLI's main install channel MUST be the GitHub Release binaries with a one-line
   install script. The script MUST install into `~/.local/bin`, need no root, pin the version and
   verify the binary's sha256 before installing it. Homebrew and `cargo install` are secondary
-  channels. The README MUST lead with the script, not with `npm install --global`. No new
+  channels. The script stays user-level: it installs no package that needs root. The System
+  mode packages (`cedegrid` and `cedegrid-system`, `.deb`, in the release with their
+  checksums, 005 FR-033) are documented for administrators (Session 2026-11-26). The README MUST
+  lead with the script, not with `npm install --global`. No new
   version of anything is published to npm or PyPI: not the CLI, its native packages or the SDKs.
   The Python and TypeScript SDKs stay in the repository with their APIs (FR-080) and tests; how
   they are installed without a registry is open (Clarifications, Session 2026-11-14). Versions

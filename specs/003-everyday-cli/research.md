@@ -156,9 +156,13 @@ verify every mechanism on the target kernels. The host check records what each f
 
 ## R9. RAM at the Tracked level
 
-- **Decision**: no cap and no address-space limits. `oom_score_adj` stays set before user code.
-  SDK hints start one hint deadline earlier than at Full. A drain checkpoints, and the run
-  resumes automatically when available memory clears the floor for the calm window.
+- **Decision**: no cap and no address-space limits. Each process keeps the `oom_score_adj` it
+  launched with; only in Yield First and Neutral are the tasks above own memory's fair share
+  marked as preferred victims, through 001's family marks (Principle II's OOM order). In Yield
+  First and Neutral, SDK hints start one hint deadline earlier than at Full, and a drain
+  checkpoints and the run resumes automatically when available memory clears the floor for the
+  calm window. Performance and Aggressive get no hint, drain or TERM for a floor breach (floors
+  by mode; converged 2026-11-26).
 - **Rationale**: there is no unprivileged RAM cap. `RLIMIT_AS` breaks the address-space
   reservations of GPU frameworks.
 - **Alternatives**: `RLIMIT_AS` or `RLIMIT_DATA` (break GPU runtimes); cgroup v1 tricks (need

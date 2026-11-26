@@ -4,6 +4,10 @@ Every command accepts `--json`. It then prints one JSON object (or one per line 
 and `top --json --follow`) and no other text on stdout. Errors go to stderr as
 `{"error": {"code": "...", "message": "..."}}` with a nonzero exit code.
 
+Text output follows the project's terminal rules: a plain title line, then labeled lines or
+aligned columns. No line joins its parts with a middle dot (`·`) or a similar decorative
+separator (user, 2026-11-26).
+
 Every command, the hidden supervisor commands included, refuses at effective UID 0 (FR-082): one
 line on stderr saying to run the same command as the user without `sudo`, or with `--json` the
 error object with code `ERR_CEDEGRID_ROOT`, and exit 3.
@@ -13,8 +17,13 @@ error object with code `ERR_CEDEGRID_ROOT`, and exit 3.
   - `--from-json <file>`: the existing job JSON; flags override its fields;
   - `-p NAME`, `--no-setup`, `--save`, `--save-env`, `--explain`;
   - `--gpu N|auto`, `--threads auto`, `--tty`, `-d`, `--require-containment`.
+  - The schema's 004 and 006 fields keep the SDK's names: `--mode`, `--unprotected` with
+    `--confirm-unprotected`, `--admit-immediately` with `--confirm-admit-immediately`. `--save`
+    never stores either opt-in (004 `ERR_CEDEGRID_UNPROTECTED_NOT_STORABLE`).
 - Prints, in order:
   - the one-line per-job notice when an entry applies;
+  - one line saying whether the run went to this account's System mode agent or a local
+    rootless one (FR-040);
   - the one-line Tracked notice when the run is Tracked;
   - the output tail.
 - Exit codes: the job's exit code once it ends in the foreground; 0 after `-d`; 3 when refused

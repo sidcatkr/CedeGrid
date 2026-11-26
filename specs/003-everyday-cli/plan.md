@@ -75,6 +75,16 @@ hosts with up to tens of thousands of threads.
 
 Result: pass. Constitution 5.0.0 resolved the open item on the Tracked affinity actuator (report 016 Decision 1, row I). Complexity Tracking lists the two new dependencies.
 
+**Re-check against 9.2.0 (2026-11-26, before implementation).** Rows I, III, IV, VI, VII and
+VIII hold as written. Row II changes with the spec (Session 2026-11-26): the core lever belongs
+to `run` launches only (001 FR-091), Performance and Aggressive keep every core, so running own
+work is never capped there, and Tracked RAM follows the OOM order and floors by mode (FR-052:
+launch score kept, Yield First and Neutral over-share tasks marked, nothing hinted or drained in
+Performance and Aggressive). Row V gains System mode: where this account runs in its broker
+unit, `run` hands work to that agent (FR-040), and the install script stays user-level while the
+`.deb` packages go to administrators (FR-073). Own priority stays at or below the default; the
+broker's two raises are 006's and are not reached from `run`. Result: pass.
+
 ## Project Structure
 
 ### Documentation (this feature)

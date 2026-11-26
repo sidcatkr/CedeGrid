@@ -14,7 +14,10 @@
 
 Fields today (from `command_task`): `task_id`, `argv`, `cwd`, `cpu_millicores`, `ram_mib`,
 `gpu_vram_mib`, `env`, `replay_safe`, `allocation_class`, `required_controls`, `single_process`,
-`no_escape`, `managed_child_limit`, `input_artifacts`, `max_attempts` and `contention_modes`.
+`no_escape`, `managed_child_limit`, `input_artifacts`, `max_attempts`, `contention_modes`, and
+the opt-ins of 004 and 006 with their confirmations: `unprotected`, `confirm_unprotected`,
+`admit_immediately` and `confirm_admit_immediately`. A schema field never sets the core lever:
+only `run` sets it on its launch request (FR-043).
 
 New fields:
 - `threads`: `auto` or absent (FR-061);
