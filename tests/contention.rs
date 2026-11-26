@@ -5808,6 +5808,20 @@ mod gpu_demand {
             peer_uid: Option<u32>,
             intervals: u64,
         ) -> Vec<TaskTick> {
+            tasks_run_beside(config, job_mode, own_at, peer_at, peer_uid, intervals, &[])
+        }
+
+        /// `tasks_run` with `quiet` contexts, by PID and UID, listed on the device from the
+        /// first interval and never sampled, as a login screen's.
+        pub(super) fn tasks_run_beside(
+            config: &Config,
+            job_mode: Option<ContentionMode>,
+            own_at: &dyn Fn(u64) -> bool,
+            peer_at: &dyn Fn(u64) -> usize,
+            peer_uid: Option<u32>,
+            intervals: u64,
+            quiet: &[(u32, Option<u32>)],
+        ) -> Vec<TaskTick> {
             let mut engine = PolicyEngine::new();
             let tasks = [("a", OWN_PIDS[0]), ("b", OWN_PIDS[1])];
             let key = ResourceKey::GpuCompute(GPU.into());
@@ -5856,6 +5870,7 @@ mod gpu_demand {
                         *uid = peer_uid;
                     }
                 }
+                contexts.listed.extend(quiet.iter().copied());
                 let input = PolicyInput {
                     allocations: live
                         .iter()
@@ -6422,6 +6437,34 @@ mod gpu_demand {
                 let paused = t.steps.values().filter(|s| **s == YieldStep::Pause).count();
                 assert_eq!(paused, 1, "interval {i}: {:?}", t.steps);
                 assert!(t.own >= 495, "interval {i}: own {}", t.own);
+                assert_eq!(
+                    first_come(&t.decision).as_deref(),
+                    Some("applies"),
+                    "interval {i}"
+                );
+            }
+        }
+
+        /// A display manager's login screen holds a quiet context on the device from before own
+        /// work, under a dynamic account above `uid_max`: a system account, so it is nobody who
+        /// arrived first, and own work keeps half the device beside the later user (FR-090,
+        /// FR-059; user, 2026-11-24).
+        #[test]
+        fn a_login_screen_above_uid_max_does_not_withhold_the_floor() {
+            let config = mode_config(ContentionMode::YieldFirst);
+            let greeter = (4242, Some(config.contention.uid_max + 4321));
+            let run = tasks_run_beside(
+                &config,
+                None,
+                &|_| true,
+                &|i| usize::from(i >= 20),
+                Some(PEER),
+                40,
+                &[greeter],
+            );
+            for (i, t) in run.iter().enumerate().skip(24) {
+                let paused = t.steps.values().filter(|s| **s == YieldStep::Pause).count();
+                assert_eq!(paused, 1, "interval {i}: {:?}", t.steps);
                 assert_eq!(
                     first_come(&t.decision).as_deref(),
                     Some("applies"),

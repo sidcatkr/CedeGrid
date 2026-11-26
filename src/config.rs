@@ -634,6 +634,10 @@ pub struct ContentionConfig {
     pub critical_hint_deadline_s: u64,
     /// User IDs below this are system accounts: background demand (FR-059).
     pub uid_min: u32,
+    /// User IDs above this are system accounts too, as `UID_MAX` in `login.defs` has it: a
+    /// display manager's dynamic greeter accounts, systemd's dynamic users and `nobody`
+    /// (FR-059; user, 2026-11-24).
+    pub uid_max: u32,
     /// Consecutive observations a user needs to join the principals.
     pub principal_window_intervals: u32,
     /// How long a principal's usage must stay below the threshold before it leaves.
@@ -663,6 +667,7 @@ impl Default for ContentionConfig {
             critical_floor_percent: 50,
             critical_hint_deadline_s: 1,
             uid_min: 1000,
+            uid_max: 60000,
             principal_window_intervals: 4,
             principal_leave_s: 60,
             never_share_occupied_gpus: false,
@@ -1002,6 +1007,10 @@ impl ContentionConfig {
             "contention.principal_window_intervals must be at least 1"
         );
         ensure!(
+            self.uid_max >= self.uid_min,
+            "contention.uid_max must be at least contention.uid_min"
+        );
+        ensure!(
             (1..=3600).contains(&self.principal_leave_s),
             "contention.principal_leave_s must be between 1 and 3600"
         );
@@ -1288,12 +1297,21 @@ impl ContentionConfig {
         })
     }
 
+    /// A user account, which can be a principal: from `uid_min` to `uid_max`. Every other user ID
+    /// is a system account, whose usage is background (FR-059).
+    pub fn is_user_uid(&self, uid: u32) -> bool {
+        (self.uid_min..=self.uid_max).contains(&uid)
+    }
+
     /// Detection settings beyond their defaults, which let more external demand
     /// go unseen or be forgotten sooner (constitution II), as key and value.
     fn relaxed_detection(&self) -> Vec<(String, String)> {
         let mut result = Vec::new();
         if self.uid_min > Self::default().uid_min {
             result.push(("contention.uid_min".to_string(), self.uid_min.to_string()));
+        }
+        if self.uid_max < Self::default().uid_max {
+            result.push(("contention.uid_max".to_string(), self.uid_max.to_string()));
         }
         result.extend(self.beyond_defaults(|t| {
             [
@@ -1426,6 +1444,7 @@ pub const KEY_CLASSES: &[(&str, KeyClass)] = {
         // Users not joined yet count toward the unattributed principal, which contends.
         ("contention.principal_window_intervals", Safe),
         ("contention.uid_min", Caution("relaxed_detection")),
+        ("contention.uid_max", Caution("relaxed_detection")),
         ("contention.*.mode", Bounded),
         (
             "contention.*.yield_first_margin_percent",
