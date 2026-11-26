@@ -29,6 +29,7 @@ use std::{
 mod client;
 mod history;
 mod launch;
+pub mod local;
 mod oom;
 mod publishing;
 mod reconcile;

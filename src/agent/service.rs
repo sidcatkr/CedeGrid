@@ -2947,6 +2947,7 @@ pub async fn run(
     config_path: Option<&Path>,
     agent: &AgentConfig,
     executable: &Path,
+    local: Option<std::sync::Arc<super::local::LocalCoordinator>>,
 ) -> Result<()> {
     ensure!(
         config.execution.enabled,
@@ -3067,6 +3068,7 @@ pub async fn run(
         &config.state_dir,
         config.storage_profile,
         namespace_guard.clone(),
+        local,
     )?;
     // The control lane keeps at most one heartbeat interval owed.
     client.lanes.cap = Duration::from_millis(config.lifecycle.heartbeat_interval_ms)

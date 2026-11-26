@@ -669,6 +669,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                 Some(&cli.config),
                 &settings,
                 &std::env::current_exe()?,
+                None,
             )
             .await
         }

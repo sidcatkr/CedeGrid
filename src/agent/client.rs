@@ -2,10 +2,26 @@
 //! shared transfer budget.
 use super::*;
 
+/// Where the node's requests go: a coordinator over mutual TLS, or a local agent's own
+/// in-process coordinator, which needs no network and no certificates (003 R1).
+pub(super) enum Transport {
+    Remote(RpcClient),
+    Local(std::sync::Arc<super::local::LocalCoordinator>),
+}
+
+impl Transport {
+    pub(super) async fn request(&self, request: &Request) -> Result<Response> {
+        match self {
+            Transport::Remote(rpc) => rpc.request(request).await,
+            Transport::Local(local) => local.node_request(request).await,
+        }
+    }
+}
+
 /// Two bounded lanes reserve control traffic so artifact queues cannot starve
 /// authoritative renewals. Their rates sum to the configured per-agent budget.
 pub(super) struct NodeClient {
-    pub(super) rpc: RpcClient,
+    pub(super) transport: Transport,
     pub(super) replay_session: Option<String>,
     pub(super) lanes: Lanes,
     pub(super) cache_dir: PathBuf,
@@ -17,11 +33,14 @@ pub(super) struct NodeClient {
 }
 
 impl NodeClient {
+    /// `local` is the in-process coordinator of a local agent (003 R1); without it the client
+    /// talks to the configured coordinator over mutual TLS.
     pub(super) fn new(
         config: &AgentConfig,
         state_dir: &Path,
         storage_profile: crate::state::StorageProfile,
         namespace_guard: NamespaceGuard,
+        local: Option<std::sync::Arc<super::local::LocalCoordinator>>,
     ) -> Result<Self> {
         ensure!(
             config.max_transfer_bytes_per_second >= 10,
@@ -31,7 +50,15 @@ impl NodeClient {
         let cache_dir = state_dir.join("attempts").join(".input-cache");
         private_dir(&cache_dir)?;
         Ok(Self {
-            rpc: RpcClient::with_settings(&config.coordinator_url, &config.tls, 15.0, 0)?,
+            transport: match local {
+                Some(local) => Transport::Local(local),
+                None => Transport::Remote(RpcClient::with_settings(
+                    &config.coordinator_url,
+                    &config.tls,
+                    15.0,
+                    0,
+                )?),
+            },
             replay_session: None,
             lanes: Lanes {
                 control: RateLimiter::new(control),
@@ -203,7 +230,7 @@ impl NodeClient {
         if !wait.is_zero() {
             tokio::time::sleep(wait).await;
         }
-        let response = self.rpc.request(wire_request).await?;
+        let response = self.transport.request(wire_request).await?;
         if estimated_reply == 0 {
             let wait = self.lanes.wait_at(
                 artifact,
