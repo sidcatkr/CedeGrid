@@ -169,6 +169,7 @@ ALLOWLIST = (
     'src/telemetry/gpu.rs',
     'src/telemetry/managed.rs',
     'src/telemetry/processes.rs',
+    'src/telemetry/subuid.rs',
     'src/upgrade.rs',
     'tests/agent.rs',
     'tests/agent_reconciliation.rs',

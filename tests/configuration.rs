@@ -834,7 +834,14 @@ fn every_configuration_key_is_classified() {
             KeyClass::Caution("relaxed_detection"),
         ),
         ("contention.uid_min", KeyClass::Caution("relaxed_detection")),
-        ("contention.uid_max", KeyClass::Caution("relaxed_detection")),
+        (
+            "contention.system_accounts.uid_ranges",
+            KeyClass::Caution("relaxed_detection"),
+        ),
+        (
+            "contention.system_accounts.subordinate_uid_file",
+            KeyClass::Safe,
+        ),
         (
             "contention.gpu_compute.attribution_tolerance_percent",
             KeyClass::Caution("relaxed_detection"),
@@ -1147,7 +1154,10 @@ fn margins_and_detection_thresholds_beyond_their_defaults_need_acknowledgement()
             "relaxed_detection",
         ),
         ("[contention]\nuid_min = 2000", "relaxed_detection"),
-        ("[contention]\nuid_max = 50000", "relaxed_detection"),
+        (
+            "[contention.system_accounts]\nuid_ranges = [[60578, 60705], [61184, 65535], [70000, 79999]]",
+            "relaxed_detection",
+        ),
         (
             "[contention.ram]\nmemory_peak_window_s = 100",
             "relaxed_detection",
@@ -1188,7 +1198,9 @@ fn margins_and_detection_thresholds_beyond_their_defaults_need_acknowledgement()
         "[contention.cpu]\nsaturation_percent = 90",
         "[contention.gpu_memory]\nnoise_tolerance_mib = 128",
         "[contention]\nuid_min = 500",
-        "[contention]\nuid_max = 65000",
+        "[contention.system_accounts]\nuid_ranges = []",
+        "[contention.system_accounts]\nuid_ranges = [[61184, 65519]]",
+        "[contention.system_accounts]\nsubordinate_uid_file = \"\"",
         "[contention.ram]\nmemory_peak_window_s = 600",
         "[contention.gpu_compute]\nquiet_window_intervals = 40",
         "[contention.gpu_compute]\nattribution_tolerance_percent = 10",
@@ -1220,7 +1232,10 @@ fn contention_validation_rejects_out_of_range_and_unknown_settings() {
         "[contention.cpu]\nnoise_tolerance_mib = 5",
         "[contention]\nacknowledge_caution = [\"something_else\"]",
         "[contention]\nacknowledge_caution = [\"floor_policy_c\"]",
-        "[contention]\nuid_min = 2000\nuid_max = 1999",
+        "[contention.system_accounts]\nuid_ranges = [[65519, 61184]]",
+        "[contention.system_accounts]\nsubordinate_uid_file = \"subuid\"",
+        "[contention.system_accounts]\nbogus = 1",
+        "[contention]\nuid_max = 60000",
     ] {
         assert!(parse_node(bad).is_err(), "accepted: {bad}");
     }

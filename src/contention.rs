@@ -1433,7 +1433,7 @@ pub struct ModeInput {
     /// Unmanaged usage per principal, the owner included; `None` when unobserved.
     /// Users that are not principals yet are left out and count as unattributed.
     pub principals: Option<Vec<(Principal, u64)>>,
-    /// Usage by system accounts (outside `uid_min` to `uid_max`): background demand that comes
+    /// Usage by system accounts (below `uid_min` or in a system range): background demand that comes
     /// off the capacity and never contends (FR-059).
     pub background: u64,
     /// Usage at capacity hides how much more external work wants (CPU).

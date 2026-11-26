@@ -1569,3 +1569,44 @@ plan.md, "Revisions from review items 002–013", supersedes further parts:
 - **Alternatives**: half the device beside any number of later principals (takes more from them
   than the rule needs); per-process arrival (a restarted process of the same user would count as
   new).
+
+## R91. System accounts by systemd's ranges, and subordinate IDs as their owner (2026-11-26)
+
+- **Decision**: a user ID is a person when it is at or above `uid_min` and outside
+  `system_accounts.uid_ranges`, by default systemd's dynamic greeter users (60578–60705), dynamic
+  service users (61184–65519) and `nobody` (65534–65535). A user ID in a subordinate ID range
+  counts as the range's owner. Both are configuration, with their defaults in one place.
+- **Rationale**: the test host's login screen runs under a dynamic greeter account and arrived
+  first on the GPU, withholding the first-come floor. A cutoff at `UID_MAX` (60000) fixed that but
+  also made systemd-homed people (60001–60513) and directory accounts (often above 65535)
+  background. systemd documents its non-human ranges in `UIDS-GIDS.md` but offers no reliable
+  way to read them at run time, so they are defaults an operator can change. Rootless containers
+  run under subordinate IDs (100000+ on Debian, Ubuntu and Fedora); as separate people they
+  would give one user several shares.
+- **Alternatives**: a cutoff at `UID_MAX` (catches people); systemd's container and foreign ranges
+  as background (SSSD's default ID mapping puts directory users in the same numbers; an operator
+  can add them); reading the ranges from the host (no stable source); an unreadable subordinate
+  ID file as background (unknown would count as free).
+
+## R92. A paused own task stays in the time-slice count (2026-11-26)
+
+- **Decision**: while an own task is paused on a time-sliced device, every listed own context
+  counts in m.
+- **Rationale**: a stopped process has no per-process samples, so after one counting window its
+  context stopped counting, m fell by one and the rule read as met while the task was still held.
+- **Alternatives**: counting every listed own context always (an idle context would hold other
+  own tasks back); keeping the last sample per allocation (no allocation-to-process mapping in the
+  policy).
+
+## R93. A GPU pause for unknown activity waits for that activity (2026-11-26)
+
+- **Decision**: a whole-task GPU compute pause whose cause is activity of unknown amount holds
+  while that activity lasts and ends in the interval contention ends, as one for external growth
+  does.
+- **Rationale**: on the test host the per-process samples alternate between inconsistent and
+  unknown, so the pause answers unknown activity; Yield First's 30 s scale-up interval reversed it
+  while the other user was still busy, and the hold paused the next task one or two intervals
+  later. With no cap to rise through, a pause cannot step down gradually.
+- **Alternatives**: the same rule on CPU (changed 1153 scripted decisions in Tracked mode, which
+  E8 measured as it is); resuming only when the task fits the target (needs the task's part, which
+  the ladder does not see).

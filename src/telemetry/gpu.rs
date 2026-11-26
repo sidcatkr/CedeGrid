@@ -398,14 +398,14 @@ pub(super) fn classify_activity(
 }
 
 /// Listed external contexts that are background this interval (FR-021): a system account's user
-/// ID, outside `users` (`uid_min` to `uid_max`), per-process utilization readable from a fresh baseline (the query succeeds or
-/// reports no samples), and the context's average utilization below `min_percent`.
+/// ID, one `is_user` rejects, per-process utilization readable from a fresh baseline (the query
+/// succeeds or reports no samples), and the context's average utilization below `min_percent`.
 pub(super) fn background_contexts(
     external: Option<&[u32]>,
     previous: Option<u64>,
     samples: &std::result::Result<Vec<ProcessUtilizationSample>, NvmlError>,
     uid_of: impl Fn(u32) -> Option<u32>,
-    users: std::ops::RangeInclusive<u32>,
+    is_user: impl Fn(u32) -> bool,
     min_percent: u8,
 ) -> BTreeSet<u32> {
     let (Some(external), Some(previous)) = (external, previous) else {
@@ -419,7 +419,7 @@ pub(super) fn background_contexts(
     external
         .iter()
         .copied()
-        .filter(|pid| uid_of(*pid).is_some_and(|uid| !users.contains(&uid)))
+        .filter(|pid| uid_of(*pid).is_some_and(|uid| !is_user(uid)))
         .filter(|pid| {
             let fresh: Vec<u64> = samples
                 .iter()

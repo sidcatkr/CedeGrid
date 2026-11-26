@@ -19,6 +19,7 @@ use gpu::*;
 mod managed;
 #[cfg(target_os = "linux")]
 mod processes;
+mod subuid;
 pub use managed::{CedegridCpu, ManagedCollector};
 #[cfg(target_os = "linux")]
 pub use managed::{own_process_cpu_ns, supervisor_cpu_ns};
@@ -64,10 +65,12 @@ pub struct Collector {
     gpu_memory_tolerance_mib: u64,
     quiet_window_intervals: u32,
     attribution_tolerance_percent: u8,
-    /// User IDs below this or above `uid_max` are system accounts; their idle GPU contexts are
-    /// background.
+    /// User IDs below this or in a system range are system accounts; their idle GPU contexts
+    /// are background.
     uid_min: u32,
-    uid_max: u32,
+    system_accounts: crate::config::SystemAccounts,
+    /// Subordinate user IDs, each counted as its range's owner (FR-059).
+    subuid: subuid::SubordinateIds,
     /// GPU compute's `principal_min_percent`, below which such a context is idle.
     gpu_principal_min_percent: u8,
     /// Every visible process, for principal aggregation only.
@@ -396,7 +399,8 @@ impl Collector {
             )
             .attribution_tolerance_percent,
             uid_min: crate::config::Config::default().contention.uid_min,
-            uid_max: crate::config::Config::default().contention.uid_max,
+            system_accounts: crate::config::SystemAccounts::default(),
+            subuid: subuid::SubordinateIds::at(crate::config::SUBORDINATE_UID_FILE),
             gpu_principal_min_percent: crate::contention::ResourceThresholds::defaults(
                 crate::contention::ResourceKind::GpuCompute,
             )
@@ -472,9 +476,18 @@ impl Collector {
             self.system.total_memory() / MIB,
         );
         self.tracked_external = external.iter().map(|p| (p.pid, p.start_time)).collect();
+        // A subordinate user ID counts as its range's owner (FR-059).
+        self.subuid.refresh();
+        let accounts: Vec<ProcessSample> = samples
+            .iter()
+            .map(|sample| ProcessSample {
+                uid: sample.uid.map(|uid| self.subuid.owner(uid)),
+                ..sample.clone()
+            })
+            .collect();
         (
             aggregate_principals(
-                samples,
+                &accounts,
                 &self.external_gpu_memory,
                 &self.external_gpu_compute,
                 owner_uid(),
@@ -506,7 +519,9 @@ impl Collector {
             .thresholds(crate::contention::ResourceKind::GpuCompute)
             .attribution_tolerance_percent;
         collector.uid_min = config.contention.uid_min;
-        collector.uid_max = config.contention.uid_max;
+        collector.system_accounts = config.contention.system_accounts.clone();
+        collector.subuid =
+            subuid::SubordinateIds::at(&config.contention.system_accounts.subordinate_uid_file);
         collector.gpu_principal_min_percent = config
             .contention
             .thresholds(crate::contention::ResourceKind::GpuCompute)
@@ -883,8 +898,8 @@ impl Collector {
                 external_process_ids.as_deref(),
                 activity_baseline,
                 &samples,
-                context_uid,
-                self.uid_min..=self.uid_max,
+                |pid| context_uid(pid).map(|uid| self.subuid.owner(uid)),
+                |uid| uid >= self.uid_min && !self.system_accounts.contains(uid),
                 self.gpu_principal_min_percent,
             );
             let active_external: Option<Vec<u32>> =
@@ -947,7 +962,9 @@ impl Collector {
                         .iter()
                         .flatten()
                         .copied()
-                        .filter(|pid| context_uid(*pid) == Some(owner))
+                        .filter(|pid| {
+                            context_uid(*pid).map(|uid| self.subuid.owner(uid)) == Some(owner)
+                        })
                         .collect()
                 })
                 .unwrap_or_default();
@@ -1014,7 +1031,7 @@ impl Collector {
                 &background,
                 activity_baseline,
                 &samples,
-                context_uid,
+                |pid| context_uid(pid).map(|uid| self.subuid.owner(uid)),
                 owner_uid(),
             );
             if let Some(contexts) = compute_contexts.as_mut() {
@@ -1591,7 +1608,7 @@ mod tests {
         }
     }
 
-    /// A system account's context (outside `uid_min` to `uid_max`) is background while per-process
+    /// A system account's context (below `uid_min` or in a system range) is background while per-process
     /// utilization is readable and its own stays below `principal_min_percent`; a user's
     /// context, an unreadable query or one without a fresh baseline never is (FR-021).
     #[test]
@@ -1599,7 +1616,7 @@ mod tests {
         let uid = |pid: u32| match pid {
             10 | 12 => Some(120),
             11 => Some(1000),
-            // A display manager's dynamic greeter account, above `uid_max`.
+            // A dynamic service user, in systemd's range.
             14 => Some(64321),
             _ => None,
         };
@@ -1616,7 +1633,7 @@ mod tests {
                 Some(100),
                 &fresh,
                 uid,
-                1000..=60000,
+                |uid| crate::config::ContentionConfig::default().is_user_uid(uid),
                 5
             ),
             BTreeSet::from([10, 14])
@@ -1628,7 +1645,7 @@ mod tests {
                 Some(100),
                 &Err(NvmlError::NotFound),
                 uid,
-                1000..=60000,
+                |uid| crate::config::ContentionConfig::default().is_user_uid(uid),
                 5
             ),
             BTreeSet::from([10, 12])
@@ -1639,13 +1656,33 @@ mod tests {
                 Some(100),
                 &Err(NvmlError::NotSupported),
                 uid,
-                1000..=60000,
+                |uid| crate::config::ContentionConfig::default().is_user_uid(uid),
                 5
             )
             .is_empty()
         );
-        assert!(background_contexts(Some(&[10]), None, &fresh, uid, 1000..=60000, 5).is_empty());
-        assert!(background_contexts(None, Some(100), &fresh, uid, 1000..=60000, 5).is_empty());
+        assert!(
+            background_contexts(
+                Some(&[10]),
+                None,
+                &fresh,
+                uid,
+                |uid| crate::config::ContentionConfig::default().is_user_uid(uid),
+                5
+            )
+            .is_empty()
+        );
+        assert!(
+            background_contexts(
+                None,
+                Some(100),
+                &fresh,
+                uid,
+                |uid| crate::config::ContentionConfig::default().is_user_uid(uid),
+                5
+            )
+            .is_empty()
+        );
     }
 
     /// Background contexts count as neither external compute nor unknown: own work keeps the

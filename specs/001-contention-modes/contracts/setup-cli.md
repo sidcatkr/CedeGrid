@@ -71,7 +71,7 @@ setup configures client settings only; node and coordinator setup is refused.
 
   | Marker | Appearance | Options |
   |---|---|---|
-  | caution | `[caution]`, yellow (SGR 33) | a floor below twice its minimum; a margin below its default; `saturation_percent`, `principal_min_percent`, `noise_tolerance_mib`, `uid_min` or `attribution_tolerance_percent` above its default, `memory_peak_window_s` or `quiet_window_intervals` below it |
+  | caution | `[caution]`, yellow (SGR 33) | a floor below twice its minimum; a margin below its default; `saturation_percent`, `principal_min_percent`, `noise_tolerance_mib`, `uid_min` or `attribution_tolerance_percent` above its default, a range in `system_accounts.uid_ranges` beyond the default ones, `memory_peak_window_s` or `quiet_window_intervals` below it |
 
 - **No color** when `NO_COLOR` is set to a non-empty value, when output is not a TTY, or when
   `TERM=dumb`. The labels always remain. Without color the interface writes no escape sequence

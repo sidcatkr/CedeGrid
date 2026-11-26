@@ -186,8 +186,8 @@ verified process checked through its pidfd, no MPS is present, device utilizatio
 memory attributed to no listed process has not grown beyond the last measured, own-only or empty
 interval plus the noise tolerance is measured at once with no external compute, so a new own
 process neither restarts the window nor turns the device Unknown. A context of a system account,
-a user ID below `contention.uid_min` (1000) or above `contention.uid_max` (60000), such as a
-display server's or a display manager's login screen, is background rather than activity while per-
+a user ID below `contention.uid_min` (1000) or in a system range, such as a display server's
+or a display manager's login screen, is background rather than activity while per-
 process utilization is readable for the device (the query succeeds or reports no samples) and
 its own utilization stays below `principal_min_percent`: it is neither external compute nor
 unknown activity, its share of device time is nobody's, and its memory still counts as external
@@ -307,11 +307,19 @@ compute are *contended* when they are saturated (busy at or above `saturation_pe
 external principal uses at least
 `principal_min_percent` of them without its demand being known to be satisfied, or when
 external activity of unknown amount exists. Principals are the account CedeGrid runs as,
-whatever its UID, and users from `contention.uid_min` (1000) to `contention.uid_max` (60000),
-as `UID_MIN` and `UID_MAX` in `login.defs` have them, that have used at
+whatever its UID, and user accounts that have used at
 least `principal_min_percent` for `contention.principal_window_intervals` (4)
 observations; they leave after `contention.principal_leave_s` (60 s) below it, and
-meanwhile their unused share goes to the others. The account CedeGrid runs as is one
+meanwhile their unused share goes to the others. A user account is a user ID at or above
+`contention.uid_min` (1000) outside `contention.system_accounts.uid_ranges`, whose default
+holds systemd's ranges with no people in them: dynamic greeter users (60578–60705), dynamic
+service users (61184–65519) and `nobody` (65534–65535). systemd-homed people, host users mapped
+into containers and directory accounts stay people; systemd's container and foreign ranges are
+not in the default because directory services map people's IDs into the same numbers, and an
+operator who runs such containers can add them. A user ID in a range of
+`contention.system_accounts.subordinate_uid_file` (`/etc/subuid`) counts as that range's owner,
+so a rootless container's processes are their owner's; while the file or the owner cannot be
+read, the user ID counts as itself, and an empty path turns this off. The account CedeGrid runs as is one
 principal: its unmanaged processes share its fair share with own work and are served as
 own work's margin frees capacity, so the 2-interval reclaim bound applies to other
 principals' demand. Until a user joins, its usage counts
@@ -691,8 +699,9 @@ capacity within the floors: a floor below twice its minimum, a margin below its 
 and a detection setting beyond its default (`saturation_percent`,
 `principal_min_percent`, `noise_tolerance_mib`, `contention.uid_min`,
 `contention.gpu_compute.attribution_tolerance_percent` or
-`contention.gpu_compute.slice_bound_percent` above it, `contention.uid_max`,
-`memory_peak_window_s` or `quiet_window_intervals` below it). Performance is the default mode and needs no
+`contention.gpu_compute.slice_bound_percent` above it, a range in
+`contention.system_accounts.uid_ranges` beyond the default ones, `memory_peak_window_s` or
+`quiet_window_intervals` below it). Performance is the default mode and needs no
 acknowledgement; a file that still lists `"performance_mode"` loads unchanged. A lower
 margin needs `contention.acknowledge_caution = ["reduced_margin"]` and a higher detection
 threshold needs `"relaxed_detection"`. A floor

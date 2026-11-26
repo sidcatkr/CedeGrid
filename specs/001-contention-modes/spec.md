@@ -992,7 +992,21 @@ gates measure the gain ([006](../006-performance-first/spec.md) SC-004, SC-005).
   count as people? → A: No. User IDs above `uid_max` (default 60000, `UID_MAX` in `login.defs`)
   are system accounts, as those below `uid_min` are: their usage is background, they form no
   principal and they arrive nowhere for the first-come floor (FR-059, FR-090). This covers
-  systemd's dynamic users and `nobody` too (user, 2026-11-24).
+  systemd's dynamic users and `nobody` too (user, 2026-11-24). *Replaced on 2026-11-26.*
+
+### Session 2026-11-26
+
+- Q: Which user IDs at or above `uid_min` are system accounts, now that a cutoff at 60000 also
+  catches people? → A: Only those in `contention.system_accounts.uid_ranges`, by default
+  systemd's non-human ranges: dynamic greeter users (60578–60705), dynamic service users
+  (61184–65519) and `nobody` (65534–65535). systemd-homed people (60001–60513), host users
+  mapped into containers and directory accounts stay people. systemd's container and foreign
+  ranges are not in the default, since directory ID mapping uses the same numbers; an operator
+  can add them. A user ID in a range of the subordinate user ID file (`/etc/subuid`,
+  `contention.system_accounts.subordinate_uid_file`, empty turns it off) counts as that range's
+  owner, so a rootless container's processes are their owner's. Nothing is fixed in code: the
+  defaults sit in one place and the broker's policy uses the same type (FR-059, FR-090; user,
+  2026-11-26).
 
 ## Terms
 
@@ -1000,11 +1014,11 @@ gates measure the gain ([006](../006-performance-first/spec.md) SC-004, SC-005).
 - **External demand**: all other use of the host's CPU, RAM and GPUs. This includes other users'
   processes and unmanaged processes of the account that runs CedeGrid.
 - **Resource**: one of CPU, RAM, GPU compute (per device) or GPU memory (per device).
-- **Principal**: a user ID from `uid_min` to `uid_max` whose usage of a resource has stayed above
+- **Principal**: a user account (FR-059) whose usage of a resource has stayed above
   `principal_min_percent` for the principal window. The account that runs CedeGrid is always one
   principal, whatever its user ID; its share covers own work plus its unmanaged processes. Usage
-  by system accounts, user IDs outside that range, is *background* demand, subtracted from
-  capacity. A change that forms no
+  by system accounts, user IDs below `uid_min` or in a system range, is *background* demand,
+  subtracted from capacity. A change that forms no
   principal does not restart Yield First's scale-up cooldown (FR-034).
 - **Baseline**: the same own work started plainly without CedeGrid in the same place: the same
   account, control group and session layout. Harm to other workloads and loss to own work are
@@ -1368,8 +1382,7 @@ node reports with the expected per-resource values at each step.
 - **Owners of external demand cannot be identified** (for example, process ownership is hidden).
   That demand counts as one additional principal for fair-share purposes. A host that mounts
   `/proc` with `hidepid=2` always takes this path for other accounts.
-- **CedeGrid runs under a user ID outside `uid_min` to `uid_max`.** The account is still the
-  owner principal.
+- **CedeGrid runs under a system account.** The account is still the owner principal.
 - **A new user's demand appears.** Until the user has stayed above `principal_min_percent` for
   the principal window, its usage counts toward the single unattributed principal, so the
   response does not wait for the window.
@@ -1434,7 +1447,7 @@ node reports with the expected per-resource values at each step.
 - **Configuration edited by hand to lower a margin or relax detection.** A margin below its
   default, or a detection setting beyond its default (FR-045: `saturation_percent`,
   `principal_min_percent`, `noise_tolerance_mib`, `uid_min` or `attribution_tolerance_percent`
-  above it, `uid_max`, `memory_peak_window_s` or `quiet_window_intervals` below it), fails to load unless the file contains the entry
+  above it, a system range beyond systemd's non-human ones, `memory_peak_window_s` or `quiet_window_intervals` below it), fails to load unless the file contains the entry
   `reduced_margin` or `relaxed_detection`. With the entry, CedeGrid reports the caution option as
   active.
 - **A floor set near its minimum, or below it.** A floor is "near" its minimum below twice the
@@ -1507,15 +1520,21 @@ node reports with the expected per-resource values at each step.
 - **FR-009**: GPU memory headroom MUST account for memory the device reserves for itself.
 - **FR-010**: Each external GPU context MUST be classified as quiet, active or unknown. Quiet
   requires positive evidence over a sustained, configurable window of healthy observation.
-- **FR-059**: Principals MUST be the CedeGrid account plus user IDs from `uid_min` (default
-  1000) to `uid_max` (default 60000) whose usage of a resource has stayed at or above `principal_min_percent` for
+- **FR-059**: Principals MUST be the CedeGrid account plus user accounts, user IDs at or above
+  `uid_min` (default 1000) in none of `system_accounts.uid_ranges` (default systemd's dynamic
+  greeter users 60578–60705, dynamic service users 61184–65519 and `nobody` 65534–65535), whose
+  usage of a resource has stayed at or above `principal_min_percent` for
   `principal_window_intervals`. Until a user joins, its usage counts toward the single
   unattributed principal, which unreadable owners share; that principal contends once its usage
   reaches `principal_min_percent`, on GPU compute `attribution_tolerance_percent` (FR-021). A
   principal MUST leave only after its usage has stayed below
   that threshold for `principal_leave_s` (default 60 s). Usage by system accounts, user IDs below
-  `uid_min` or above `uid_max`, MUST count as background external demand: it is subtracted from capacity and never forms a
-  principal. CedeGrid's own processes (the agent and supervisors) count toward the CedeGrid
+  `uid_min` or in a system range, MUST count as background external demand: it is subtracted
+  from capacity and never forms a principal. A user ID in a range of the subordinate user ID
+  file (`system_accounts.subordinate_uid_file`, default `/etc/subuid`) MUST count as that
+  range's owner while the file and the owner's user ID can be read, and as itself otherwise.
+  The ranges and the file are configuration, with their defaults in one place shared with the
+  broker's policy; a range beyond the defaults needs `relaxed_detection`. CedeGrid's own processes (the agent and supervisors) count toward the CedeGrid
   account, never toward the unattributed principal. While the principal list cannot be read
   (FR-077), users already counted as principals keep their counts, and own work's fair share on
   each resource MUST NOT exceed the last one computed from a readable list; it is lower when that
@@ -1797,7 +1816,7 @@ node reports with the expected per-resource values at each step.
   utilization is not readable it stays unknown activity. A device MUST switch to the unknown path at once
   and return to the measured path only after `quiet_window_intervals` consecutive measured
   intervals. A measured amount takes the CPU paths: external processes are
-  principals by UID with the same `uid_min`, `uid_max`, `principal_min_percent`, join window and leave
+  principals by UID with the same account classes (FR-059), `principal_min_percent`, join window and leave
   window as CPU, a PID whose UID cannot be read is unattributed, saturation is at
   `saturation_percent` of device utilization, and probing and satisfied records apply;
   admission still follows FR-026 and FR-027. On a time-sliced device a process's reading follows
@@ -1931,7 +1950,7 @@ node reports with the expected per-resource values at each step.
     former duty's step, still loads and has no effect
   - tolerances, windows and deadlines, including the Guaranteed hint deadline, the RAM breach
     window, the critical floor share and hint deadline, the principal window,
-    `principal_leave_s`, `uid_min` and `uid_max`, the memory peak window and the CPU admission usage window
+    `principal_leave_s`, `uid_min` and the system accounts, the memory peak window and the CPU admission usage window
   - convergence targets
   - memory scale-up cooldowns and reclaim backoff
 
@@ -2370,7 +2389,7 @@ node reports with the expected per-resource values at each step.
   | Performance mode (the default) | none | Own work keeps all idle capacity minus a small admission margin and grows quickly. Running own work gives others nothing beyond what the kernel and the GPU driver give them beside it; new own work does not start where another principal is short of its fair share; the floors limit admission, and at a floor breach the kernel decides, as without CedeGrid (FR-022, FR-023). |
   | A floor near its minimum | *caution* (yellow) | Less headroom is kept for other workloads' bursts. The enforced minimum and out-of-memory order by fault still protect them. |
   | A margin below its default (`reduced_margin`) | *caution* (yellow) | Own work leaves less idle capacity for external demand to grow into. Contention handling and floors still hold. |
-  | A detection setting beyond its default (`relaxed_detection`): `saturation_percent`, `principal_min_percent`, `noise_tolerance_mib`, `uid_min` or `attribution_tolerance_percent` above it, `uid_max`, `memory_peak_window_s` or `quiet_window_intervals` below it | *caution* (yellow) | Contention and external growth are recognized later or forgotten sooner, so own work holds capacity longer. Floors still hold. |
+  | A detection setting beyond its default (`relaxed_detection`): `saturation_percent`, `principal_min_percent`, `noise_tolerance_mib`, `uid_min` or `attribution_tolerance_percent` above it, a system range beyond systemd's non-human ones, `memory_peak_window_s` or `quiet_window_intervals` below it | *caution* (yellow) | Contention and external growth are recognized later or forgotten sooner, so own work holds capacity longer. Floors still hold. |
 
 **Setup**
 
@@ -2510,8 +2529,8 @@ node reports with the expected per-resource values at each step.
   default, a job override and a node cap. The effective mode is derived per allocation.
 - **Resource view**: per node and resource, the capacity, own usage, external demand by
   principal, unattributed usage, floor, margin, fair share and admission state.
-- **Principal**: a user ID from `uid_min` to `uid_max` with sustained demand on a resource, or
-  the CedeGrid account.
+- **Principal**: a user account (FR-059) with sustained demand on a resource, or the CedeGrid
+  account.
 - **Yield step**: per allocation and resource, the current ladder level, its cause, when it was
   entered, and which steps are unavailable.
 - **Resource target**: per allocation and resource, the "use less" amount, its sequence number
@@ -2680,7 +2699,8 @@ times assume the default 500 ms monitor interval.
 | Floor minimums | 512 MiB host RAM, 512 MiB per GPU device | Below these, ordinary processes and driver contexts fail to start. The GPU minimum must be at least what a fresh CUDA context takes on the target GPUs, which T088 measures. |
 | Principal leave | 60 s below `principal_min_percent` | Entry stays fast; a principal that pauses briefly keeps its share instead of rejoining the unattributed principal. |
 | `uid_min` | 1000 | The usual first regular user ID (`UID_MIN` in `login.defs`). |
-| `uid_max` | 60000 | The usual last regular user ID (`UID_MAX` in `login.defs`). Above it are a display manager's dynamic login-screen accounts, systemd's dynamic users and `nobody`. |
+| `system_accounts.uid_ranges` | 60578–60705, 61184–65519, 65534–65535 | systemd's ranges with no people in them: dynamic greeter users, dynamic service users and `nobody`. Its container and foreign ranges are left out because directory services map people's IDs into the same numbers. |
+| `system_accounts.subordinate_uid_file` | `/etc/subuid` | Where shadow-utils keeps each user's subordinate IDs, so a rootless container's processes count as their owner. |
 | Principal window | 4 monitor intervals (2 s) | Long enough to ignore short commands, short enough that a new user's own share follows quickly; meanwhile its usage counts toward the unattributed principal. |
 | Memory peak window | 300 s | Covers typical allocation cycles of interactive and batch work, so admission does not fill memory another workload just released. |
 | Memory reclaim backoff | 1 s doubling to 30 s | The coordinator's retry backoff pattern. |
@@ -2704,8 +2724,8 @@ times assume the default 500 ms monitor interval.
   them, such as an explicitly delegated control subtree. Without them, the ladder relies on the
   steps an unprivileged process can apply to its own processes.
 - External demand is attributed to principals by process owner where it is visible. Demand whose
-  owner cannot be determined counts as one additional principal. Demand by user IDs below
-  `uid_min` or above `uid_max` is background, not a principal.
+  owner cannot be determined counts as one additional principal. Demand by system accounts,
+  user IDs below `uid_min` or in a system range, is background, not a principal.
 - The account running CedeGrid is one principal. Own work's fair share is that principal's share
   minus the account's unmanaged usage.
 - Mode settings take effect when the agent restarts or reloads its configuration. A job's

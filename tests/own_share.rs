@@ -437,11 +437,12 @@ fn an_unlisted_load_beyond_the_lists_error_contends_at_once() {
     assert!(budgets[6] <= 2000, "{budgets:?}");
 }
 
-/// An account above `uid_max`, such as a display manager's dynamic greeter account, is a system
-/// account: its CPU is background, as below `uid_min`, never a principal's (FR-059; user,
-/// 2026-11-24).
+/// An account in systemd's non-human ranges, such as a display manager's dynamic greeter account
+/// or a dynamic service user, is a system account: its CPU is background, as below `uid_min`,
+/// never a principal's. A systemd-homed person and a directory account above 65535 are people
+/// (FR-059; user, 2026-11-24 and 2026-11-26).
 #[test]
-fn an_account_above_uid_max_is_background_like_one_below_uid_min() {
+fn only_systemd_non_human_ranges_are_background_above_uid_min() {
     let budget_as = |uid: u32| {
         let (mut snapshot, input) = reading_with(2000, 50, 0, Some(true));
         snapshot.principals.as_mut().unwrap()[1].uid = Some(uid);
@@ -451,9 +452,18 @@ fn an_account_above_uid_max_is_background_like_one_below_uid_min() {
             .managed_budget
             .cpu_millicores
     };
-    let uid_max = config(ContentionMode::Neutral).contention.uid_max;
-    assert_eq!(budget_as(uid_max + 4321), budget_as(999));
-    assert_ne!(budget_as(uid_max + 4321), budget_as(uid_max));
+    let background = budget_as(999);
+    let person = budget_as(1500);
+    assert_ne!(background, person);
+    // A dynamic greeter, a dynamic service user and `nobody`.
+    for uid in [60_650, 63_000, 65_534] {
+        assert_eq!(budget_as(uid), background, "{uid}");
+    }
+    // A systemd-homed person, a host user mapped into a container and directory accounts, one
+    // in the numbers systemd also gives containers.
+    for uid in [60_100, 60_550, 70_000, 1_200_000] {
+        assert_eq!(budget_as(uid), person, "{uid}");
+    }
 }
 
 /// The owner's other processes, such as a shell or the coordinator, share the owner's slice
