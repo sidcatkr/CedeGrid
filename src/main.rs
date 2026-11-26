@@ -90,8 +90,13 @@ enum Command {
     },
     /// Run an explicitly enabled node agent with an operator-approved resource ceiling.
     Agent {
+        /// The coordinator and TLS settings; not used with --local.
+        #[arg(long, required_unless_present = "local", conflicts_with = "local")]
+        deployment: Option<PathBuf>,
+        /// Serve this user's own runs through a private socket, with no coordinator to set up
+        /// (003).
         #[arg(long)]
-        deployment: PathBuf,
+        local: bool,
     },
     /// Send a version-one authenticated JSON RPC request.
     Rpc {
@@ -636,6 +641,12 @@ async fn async_main(cli: Cli) -> Result<()> {
         Some(jobs) => cedegrid::config::load_for_run_with(&cli.config, |table| {
             cedegrid::system_mode::unit_table(table, jobs)
         })?,
+        // A local agent with no configuration file runs with every default (003 US1).
+        None if matches!(&cli.command, Command::Agent { local: true, .. })
+            && !cli.config.exists() =>
+        {
+            (cedegrid::agent::local::default_config()?, Vec::new())
+        }
         None => read_config_reporting(&cli.config)?,
     };
     if let Some(jobs) = unit_jobs {
@@ -659,7 +670,15 @@ async fn async_main(cli: Cli) -> Result<()> {
         | Command::Cancel { .. }
         | Command::Drain { .. }
         | Command::Resume { .. } => unreachable!(),
-        Command::Agent { deployment } => {
+        #[cfg(unix)]
+        Command::Agent { local: true, .. } => {
+            // A local agent exists to run the user's own runs (003).
+            config.execution.enabled = true;
+            cedegrid::agent::local::run_local(&config, Some(&cli.config), &std::env::current_exe()?)
+                .await
+        }
+        Command::Agent { deployment, .. } => {
+            let deployment = deployment.context("--deployment is required without --local")?;
             let settings = cedegrid::config::load_runtime(
                 &deployment,
                 cedegrid::config::RuntimeConfigKind::Agent,

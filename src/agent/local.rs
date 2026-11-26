@@ -38,7 +38,8 @@ pub struct LocalCoordinator {
 }
 
 impl LocalCoordinator {
-    /// Opens the coordinator under `state_dir/local-coordinator` and makes the local pools,
+    /// Opens the coordinator in `<state_dir>-coordinator`, beside the agent's own state, which
+    /// must stay a dedicated directory, and makes the local pools,
     /// each holding the node `node_id` alone with room for `max_workers` tasks.
     pub fn open(
         state_dir: &Path,
@@ -49,7 +50,7 @@ impl LocalCoordinator {
         // Defaults come from the configuration's own serde defaults. The listen address and the
         // TLS files are never used: nothing is served.
         let config: CoordinatorConfig = serde_json::from_value(serde_json::json!({
-            "state_dir": state_dir.join("local-coordinator"),
+            "state_dir": coordinator_dir(state_dir)?,
             "storage_profile": storage_profile,
             "listen": "127.0.0.1:0",
             "tls": {"ca_cert": "", "certificate": "", "private_key": ""},
@@ -158,6 +159,102 @@ impl LocalCoordinator {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .handle(principal, request)
     }
+}
+
+/// Where a local agent's coordinator keeps its state: beside the agent's own state directory.
+pub fn coordinator_dir(state_dir: &Path) -> Result<PathBuf> {
+    let name = state_dir
+        .file_name()
+        .context("the state directory has no name")?
+        .to_string_lossy()
+        .into_owned();
+    Ok(state_dir.with_file_name(format!("{name}-coordinator")))
+}
+
+/// Runs this user's local agent: its own coordinator, the user's socket and the usual agent
+/// loop, with the whole host as its capacity, which the policy then shares out (003 R1).
+#[cfg(unix)]
+pub async fn run_local(
+    config: &crate::config::Config,
+    config_path: Option<&Path>,
+    executable: &Path,
+) -> Result<()> {
+    let host = crate::telemetry::Collector::for_config(config)?.sample()?;
+    let max_workers = std::thread::available_parallelism()
+        .map_or(4, |n| n.get())
+        .clamp(1, 256);
+    let agent = super::AgentConfig {
+        coordinator_url: "local".to_owned(),
+        tls: crate::protocol::TlsIdentity {
+            ca_cert: PathBuf::new(),
+            certificate: PathBuf::new(),
+            private_key: PathBuf::new(),
+        },
+        cpu_affinity: None,
+        max_transfer_bytes_per_second: 10 * 1024 * 1024,
+        capacity: crate::model::Resources {
+            cpu_millicores: host.cpu_capacity_millicores,
+            ram_mib: host.total_ram_mib,
+            gpu_memory_mib: host
+                .gpus
+                .iter()
+                .map(|gpu| (gpu.uuid.clone(), gpu.total_memory_mib))
+                .collect(),
+        },
+        max_workers,
+        max_spool_bytes: 2 * 1024 * 1024 * 1024,
+        max_runtime_seconds: 0,
+    };
+    // The socket's directory first: where the state shares it, it must be made private, not
+    // left at the default mode by the state directory's creation.
+    let socket = socket_path()?;
+    private_socket_dir(
+        socket
+            .parent()
+            .context("the socket path has no directory")?,
+    )?;
+    super::private_dir(&config.state_dir)?;
+    let local = std::sync::Arc::new(LocalCoordinator::open(
+        &config.state_dir,
+        config.storage_profile,
+        &config.node_id,
+        u32::try_from(max_workers)?,
+    )?);
+    // A socket left by an agent that ended answers no connection; a live one means another
+    // agent of this user already serves, and the state lock below would refuse this one.
+    if socket.exists() && std::os::unix::net::UnixStream::connect(&socket).is_err() {
+        std::fs::remove_file(&socket).with_context(|| {
+            format!("the stale socket {} could not be removed", socket.display())
+        })?;
+    }
+    let listener = tokio::net::UnixListener::bind(&socket)
+        .with_context(|| format!("{} could not be bound", socket.display()))?;
+    let server = tokio::spawn(serve(listener, std::sync::Arc::clone(&local)));
+    let result = super::run(config, config_path, &agent, executable, Some(local)).await;
+    server.abort();
+    // The socket is ours; an error removing it leaves only a stale file the next agent clears.
+    let _ = std::fs::remove_file(&socket);
+    result
+}
+
+/// The configuration a local agent runs with when the user has none: every default, with its
+/// state under `~/.local/state/cedegrid/state`. A run needs no setup first (003 US1).
+pub fn default_config() -> Result<crate::config::Config> {
+    let home = PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?);
+    let mut config = crate::config::Config {
+        state_dir: home
+            .join(".local")
+            .join("state")
+            .join("cedegrid")
+            .join("state"),
+        ..crate::config::Config::default()
+    };
+    // A local agent exists to run the user's own runs, which keep their reservations unless a
+    // run asks to be opportunistic.
+    config.execution.enabled = true;
+    config.node_mode = crate::config::NodeMode::Guaranteed;
+    config.validate()?;
+    Ok(config)
 }
 
 /// The user's socket: `$XDG_RUNTIME_DIR/cedegrid/agent.sock`, else

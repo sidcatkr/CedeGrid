@@ -237,6 +237,13 @@ pub(super) async fn start_assignment(
         "guaranteed work on opportunistic node refused"
     );
     let mut assignment = assignment;
+    // A local run's environment values never reached the coordinator's state; they join the
+    // launch here (003 FR-009).
+    if let Transport::Local(local) = &client.transport
+        && let Some(env) = local.take_env(&assignment.request.task_id)
+    {
+        assignment.request.env.extend(env);
+    }
     ensure!(
         !assignment.request.assignment_id.is_empty()
             && assignment
