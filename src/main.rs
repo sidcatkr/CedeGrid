@@ -718,7 +718,10 @@ async fn async_main(cli: Cli) -> Result<()> {
                     #[cfg(not(unix))]
                     euid: None,
                     storage_admitted: role_admitted,
-                    level: None,
+                    level: {
+                        let detected = cedegrid::control_level::detect_now();
+                        Some((detected.level.name().to_owned(), detected.reason))
+                    },
                     proc_hidden: cedegrid::telemetry::proc_hides_other_users(),
                 },
             );

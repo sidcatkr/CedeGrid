@@ -7,6 +7,7 @@ pub mod cgroup;
 pub mod config;
 pub mod config_migration;
 pub mod contention;
+pub mod control_level;
 pub mod coordinator;
 pub mod execution_model;
 mod execution_state;

@@ -58,12 +58,14 @@ only when the user says so.
   - a local agent exits after `local.idle_exit_s` with no runs;
   - a cluster-mode agent serves the socket and never idles out.
 - [ ] T009 Implement src/agent/local.rs per contracts/local-agent.md: socket location, peer-credential check, namespace lock and idle exit, plus the requests `run`, `ps`, `logs`, `stop`, `top` and `explain`.
-- [ ] T010 [P] Test first in tests/control_level.rs, with fake cgroup and user-manager roots:
+- [x] T010 [P] Test first in tests/control_level.rs, with fake cgroup and user-manager roots:
   - Full only when `systemctl --user` answers and the manager delegates `cpu` and `memory`;
   - any error gives Tracked with a one-sentence reason;
   - `CEDEGRID_TEST_FORCE_TRACKED=1` forces Tracked;
   - `contenders_share_cgroup` is `yes`, `no` or `unknown`.
+  - *Done (2026-11-26):* `tests/control_level.rs` with a fake cgroup root: Full only with an answering manager holding cpu and memory, Tracked with its reason otherwise, and `contenders_share_cgroup` from `user.slice`'s subtree control; `CEDEGRID_TEST_FORCE_TRACKED=1` forces Tracked.
 - [ ] T011 Implement src/control_level.rs (research R2) and add the level and its reason to the run record and the snapshot.
+  - *In part (2026-11-26):* `src/control_level.rs` (`detect_now`, `Detected`), with System mode as a third level (Session 2026-11-26), and doctor's checklist line; the run record and the snapshot take it with `run`.
 - [ ] T012 [P] Test first in src/agent/logs.rs unit tests:
   - a writer faster than the disk is never blocked;
   - logs rotate at `logs.max_bytes`, keeping `logs.keep` files;
