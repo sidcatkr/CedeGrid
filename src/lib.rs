@@ -29,4 +29,5 @@ pub mod supervision;
 pub mod system_mode;
 pub mod task_schema;
 pub mod telemetry;
+pub mod tui_style;
 pub mod upgrade;

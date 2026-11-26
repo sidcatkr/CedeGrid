@@ -153,7 +153,7 @@ pub struct State {
 }
 
 impl State {
-    fn new(target: Target, base: Config, flags: Choices, host: Option<Host>) -> Self {
+    pub fn new(target: Target, base: Config, flags: Choices, host: Option<Host>) -> Self {
         let fresh = target.original.is_none();
         let mut values = BTreeMap::new();
         // Start from the file, with any flags already applied.
@@ -282,11 +282,19 @@ mod prompts {
     }
 }
 
-/// The keyboard interface (FR-046 to FR-051): arrow keys move, Enter chooses, Esc or q cancels.
+/// The keyboard interface (003 FR-030, FR-031): a host summary header, the settings grouped
+/// into Modes, Safety floors and Advanced, and a side pane that explains the selected setting
+/// with this host's numbers. Up and Down move, Left and Right change the value in place, Enter
+/// reviews and writes, Esc cancels. A caution value keeps its separate confirmation.
 #[cfg(unix)]
-mod screen {
+pub mod screen {
     use super::*;
-    use terminal::Key;
+    use crate::tui_style::Palette;
+    use ratatui::Frame;
+    use ratatui::layout::{Constraint, Direction, Layout, Rect};
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+    pub use terminal::Key;
 
     pub enum Outcome {
         Done(Choices),
@@ -294,129 +302,92 @@ mod screen {
         Role(Role),
     }
 
-    enum View {
+    /// The setting groups, in order.
+    pub const SECTIONS: [&str; 3] = ["Modes", "Safety floors", "Advanced"];
+
+    /// The group a setting belongs to.
+    pub fn section(field: Field) -> usize {
+        match field {
+            Field::Role
+            | Field::DefaultMode
+            | Field::Mode(_)
+            | Field::MaxMode
+            | Field::PlainPriority => 0,
+            Field::RamFloor | Field::GpuFloor => 1,
+            Field::Margin(..)
+            | Field::HintDeadline
+            | Field::NoiseTolerance
+            | Field::AttributionTolerance => 2,
+        }
+    }
+
+    pub enum View {
         Main,
-        Options {
-            field: Field,
-            options: Vec<Pick>,
-            cursor: usize,
-        },
         Confirm {
             field: Field,
             pick: Pick,
+            kept: Pick,
             option: &'static str,
             cursor: usize,
         },
         Summary(Box<Result<Plan, String>>),
     }
 
-    struct Painter {
-        color: bool,
-        glyphs: Glyphs,
-        out: std::io::Stdout,
+    /// The screen between keys: the settings in group order, the highlighted row (the settings,
+    /// then Review and write, then Cancel) and what is shown.
+    pub struct Screen {
+        pub rows: Vec<Field>,
+        pub row: usize,
+        pub view: View,
+        pub notice: Option<String>,
     }
 
-    impl Painter {
-        fn style(&self) -> Style {
-            Style { color: self.color }
+    impl Screen {
+        pub fn new(state: &State) -> Self {
+            let mut rows = state.rows();
+            rows.sort_by_key(|field| section(*field));
+            Self {
+                rows,
+                row: 0,
+                view: View::Main,
+                notice: None,
+            }
         }
 
-        /// One full frame. Without color the frame is plain text, so no
-        /// escape sequence is written at all.
-        fn frame(&mut self, lines: &[String]) -> Result<()> {
-            let mut text = String::new();
-            if self.color {
-                text.push_str("\x1b[H\x1b[2J");
-            } else {
-                text.push('\n');
-            }
-            for line in lines {
-                text.push_str(line);
-                text.push('\n');
-            }
-            self.out.write_all(text.as_bytes())?;
-            self.out.flush()?;
-            Ok(())
-        }
-    }
-
-    pub fn run(state: &mut State, color: bool, glyphs: Glyphs) -> Result<Outcome> {
-        let _raw = terminal::Raw::enter().context("cannot drive the terminal")?;
-        let mut keys = terminal::Keys::default();
-        let mut painter = Painter {
-            color,
-            glyphs,
-            out: std::io::stdout(),
-        };
-        let rows = state.rows();
-        let mut row = 0usize;
-        let mut view = View::Main;
-        let mut notice: Option<String> = None;
-        loop {
-            let lines = render(state, &painter, &rows, row, &view, notice.as_deref());
-            painter.frame(&lines)?;
-            let key = keys.next()?;
-            if key == Key::Cancel {
-                return Ok(Outcome::Cancelled);
-            }
-            let total = rows.len() + 2;
-            view = match view {
+        /// One key; an outcome ends the screen.
+        pub fn key(&mut self, state: &mut State, key: Key) -> Option<Outcome> {
+            let total = self.rows.len() + 2;
+            let view = std::mem::replace(&mut self.view, View::Main);
+            self.view = match view {
                 View::Main => match key {
+                    Key::Cancel => return Some(Outcome::Cancelled),
                     Key::Up => {
-                        row = (row + total - 1) % total;
+                        self.row = (self.row + total - 1) % total;
                         View::Main
                     }
                     Key::Down => {
-                        row = (row + 1) % total;
+                        self.row = (self.row + 1) % total;
                         View::Main
                     }
-                    Key::Enter if row == rows.len() => {
-                        notice = None;
-                        View::Summary(Box::new(state.plan().map_err(|error| error.to_string())))
-                    }
-                    Key::Enter if row == rows.len() + 1 => return Ok(Outcome::Cancelled),
-                    Key::Enter => {
-                        let field = rows[row];
-                        let config = state.preview();
-                        let options = field.options(&config, state.fresh);
-                        let cursor = options
-                            .iter()
-                            .position(|pick| *pick == state.values[&field])
-                            .unwrap_or(0);
-                        View::Options {
-                            field,
-                            options,
-                            cursor,
-                        }
-                    }
-                    _ => View::Main,
-                },
-                View::Options {
-                    field,
-                    options,
-                    cursor,
-                } => match key {
-                    Key::Up => View::Options {
-                        field,
-                        cursor: cursor.saturating_sub(1),
-                        options,
-                    },
-                    Key::Down => View::Options {
-                        field,
-                        cursor: (cursor + 1).min(options.len() - 1),
-                        options,
-                    },
-                    Key::Enter => {
-                        let pick = options[cursor];
-                        match pick {
-                            Pick::Role(role) if role != Role::Node => {
-                                return Ok(Outcome::Role(role));
+                    Key::Left | Key::Right if self.row < self.rows.len() => {
+                        let field = self.rows[self.row];
+                        let options = field.options(&state.preview(), state.fresh);
+                        let kept = state.values[&field];
+                        let at = options.iter().position(|pick| *pick == kept).unwrap_or(0);
+                        let next = if key == Key::Left {
+                            at.saturating_sub(1)
+                        } else {
+                            (at + 1).min(options.len().saturating_sub(1))
+                        };
+                        match options.get(next).copied() {
+                            Some(Pick::Role(role)) if role != Role::Node => {
+                                return Some(Outcome::Role(role));
                             }
-                            Pick::Role(_) => View::Main,
-                            _ => match state.risk(field, pick) {
+                            Some(pick) if pick != kept => match state.risk(field, pick) {
                                 Some(option) if state.needs_confirmation(option) => View::Confirm {
                                     field,
                                     pick,
+                                    kept,
                                     option,
                                     cursor: 0,
                                 },
@@ -425,23 +396,31 @@ mod screen {
                                     View::Main
                                 }
                             },
+                            _ => View::Main,
                         }
                     }
-                    _ => View::Options {
-                        field,
-                        options,
-                        cursor,
-                    },
+                    Key::Enter if self.row == self.rows.len() => {
+                        self.notice = None;
+                        View::Summary(Box::new(state.plan().map_err(|error| error.to_string())))
+                    }
+                    Key::Enter if self.row == self.rows.len() + 1 => {
+                        return Some(Outcome::Cancelled);
+                    }
+                    _ => View::Main,
                 },
                 View::Confirm {
                     field,
                     pick,
+                    kept,
                     option,
                     cursor,
                 } => match key {
-                    Key::Up | Key::Down => View::Confirm {
+                    // Esc keeps the value; only Esc on the main screen cancels setup.
+                    Key::Cancel => View::Main,
+                    Key::Up | Key::Down | Key::Left | Key::Right => View::Confirm {
                         field,
                         pick,
+                        kept,
                         option,
                         cursor: 1 - cursor,
                     },
@@ -455,195 +434,109 @@ mod screen {
                     _ => View::Confirm {
                         field,
                         pick,
+                        kept,
                         option,
                         cursor,
                     },
                 },
                 View::Summary(plan) => match (key, *plan) {
-                    (Key::Enter, Ok(_)) => return Ok(Outcome::Done(state.choices())),
+                    (Key::Enter, Ok(_)) => return Some(Outcome::Done(state.choices())),
                     (Key::Enter, Err(error)) => {
-                        notice = Some(error);
+                        self.notice = Some(error);
                         View::Main
                     }
+                    (Key::Cancel, _) => View::Main,
                     (_, plan) => View::Summary(Box::new(plan)),
                 },
             };
+            None
         }
     }
 
-    fn render(
-        state: &State,
-        painter: &Painter,
-        rows: &[Field],
-        row: usize,
-        view: &View,
-        notice: Option<&str>,
-    ) -> Vec<String> {
+    /// The host summary line: its CPU, memory and each GPU's memory.
+    pub fn host_line(host: Option<&Host>) -> String {
+        let Some(host) = host else {
+            return "Host: not measured".into();
+        };
+        let mut parts = vec![
+            format!("{} CPUs", group(host.cpu_millicores / 1000)),
+            format!("{} MiB RAM", group(host.ram_mib)),
+        ];
+        if host.gpus.is_empty() {
+            parts.push("no GPU".into());
+        }
+        for (uuid, total) in &host.gpus {
+            parts.push(format!("{uuid} with {} MiB", group(*total)));
+        }
+        format!("Host: {}", parts.join(", "))
+    }
+
+    /// One frame.
+    pub fn draw(frame: &mut Frame, state: &State, screen: &Screen, color: bool, glyphs: Glyphs) {
+        let palette = Palette { color };
+        let area = frame.area();
+        let [header, body, footer] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(4),
+                Constraint::Length(2),
+            ])
+            .areas(area);
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::styled("CedeGrid setup", palette.title()),
+                Line::raw(host_line(state.host.as_ref())),
+                Line::raw(format!("Configuration: {}", state.target.path.display())),
+            ]),
+            header,
+        );
         let config = state.preview();
-        let style = painter.style();
-        let glyphs = painter.glyphs;
-        let (height, width) = terminal::size().map_or((40, 80), |(rows, columns)| {
-            (usize::from(rows), usize::from(columns))
-        });
-        let pointer = |selected: bool| {
-            if selected {
-                format!("{} ", glyphs.pointer)
-            } else {
-                "  ".to_owned()
-            }
-        };
-        let marker = |risky: bool| {
-            if risky {
-                format!("  {}", style.caution(CAUTION))
-            } else {
-                String::new()
-            }
-        };
-        let title = |text: &str| style.bold(text);
-        let hint = |action: &str| {
-            style.dim(&format!(
-                "{} to move, Enter to {action}, Esc to cancel",
+        let hint = match &screen.view {
+            View::Main => format!(
+                "{} move, Left/Right change, Enter on Review writes, Esc cancels",
                 glyphs.arrows
-            ))
+            ),
+            View::Confirm { .. } => "Up/Down choose, Enter applies, Esc keeps the value".into(),
+            View::Summary(_) => "Enter writes, Esc goes back".into(),
         };
-        let mut lines = Vec::new();
-        match view {
-            View::Main => {
-                lines.push(title("CedeGrid setup"));
-                lines.push(format!("Config: {}", state.target.path.display()));
-                lines.push(String::new());
-                let label_width = rows
-                    .iter()
-                    .map(|field| field.label().chars().count())
-                    .max()
-                    .unwrap_or(0)
-                    + 3;
-                // A short terminal shows the rows around the highlight, with what is hidden
-                // counted above and below.
-                let fixed = 8 + if notice.is_some() { 2 } else { 0 };
-                let visible = height.saturating_sub(fixed).max(3);
-                let (start, end) = if rows.len() <= visible {
-                    (0, rows.len())
-                } else {
-                    let inner = visible - 2;
-                    let start = window_start(rows.len(), inner, row.min(rows.len() - 1));
-                    (start, start + inner)
-                };
-                if start > 0 {
-                    lines.push(style.dim(&format!("  {start} more above")));
-                }
-                for (index, field) in rows.iter().enumerate().take(end).skip(start) {
-                    let pick = state.values[field];
-                    // Floors also show what applies on this host.
-                    let host = match (field, state.host.as_ref()) {
-                        (Field::RamFloor, Some(host)) => format!(
-                            " ({} MiB on this host)",
-                            group(config.ram_floor_mib(host.ram_mib))
-                        ),
-                        (Field::GpuFloor, Some(host)) => host
-                            .gpus
-                            .first()
-                            .map(|(uuid, total)| {
-                                format!(" ({} MiB on {uuid})", group(config.vram_floor_mib(*total)))
-                            })
-                            .unwrap_or_else(|| " (no GPU on this host)".into()),
-                        // Priority says when this host cannot apply it (006 FR-025).
-                        (Field::PlainPriority, Some(host)) if pick == Pick::Flag(true) => {
-                            match host.plain_priority {
-                                PlainPriorityHost::Permitted(weight) => {
-                                    format!(" (weight {weight} on this host)")
-                                }
-                                _ => " (no effect on this host)".into(),
-                            }
-                        }
-                        _ => String::new(),
-                    };
-                    let label = format!("{:<label_width$}", field.label());
-                    lines.push(format!(
-                        "{}{}{}{}{}",
-                        pointer(index == row),
-                        if index == row {
-                            style.bold(&label)
-                        } else {
-                            label
-                        },
-                        field.show(pick, &config),
-                        style.dim(&host),
-                        marker(state.risk(*field, pick).is_some())
-                    ));
-                }
-                if end < rows.len() {
-                    lines.push(style.dim(&format!("  {} more below", rows.len() - end)));
-                }
-                lines.push(String::new());
-                lines.push(format!("{}Review and write", pointer(row == rows.len())));
-                lines.push(format!("{}Cancel", pointer(row == rows.len() + 1)));
-                if let Some(notice) = notice {
-                    lines.push(String::new());
-                    lines.push(format!("{} {notice}", style.refusal("Cannot write:")));
-                }
-                lines.push(String::new());
-                lines.push(hint("open"));
-            }
-            View::Options {
-                field,
-                options,
-                cursor,
-            } => {
-                lines.push(title(&field.label()));
-                if let Some(note) = field.note() {
-                    lines.push(style.dim(note));
-                }
-                lines.push(String::new());
-                let current = state.values[field];
-                let rows: Vec<OptionRow> = options
-                    .iter()
-                    .enumerate()
-                    .map(|(index, option)| OptionRow {
-                        prefix: format!(
-                            "  {} ",
-                            if index == *cursor {
-                                glyphs.chosen
-                            } else {
-                                glyphs.other
-                            }
-                        ),
-                        label: field.show(*option, &config),
-                        description: format!(
-                            "{}{}",
-                            consequence(*field, *option, &config, state.host.as_ref()),
-                            if *option == current { " (current)" } else { "" }
-                        ),
-                        caution: state.risk(*field, *option).is_some(),
-                        selected: index == *cursor,
-                    })
-                    .collect();
-                lines.extend(option_lines(&rows, style, Some(width)));
-                lines.push(String::new());
-                lines.push(hint("choose"));
-            }
+        let mut footer_lines = Vec::new();
+        if let Some(notice) = &screen.notice {
+            footer_lines.push(Line::from(vec![
+                Span::styled("Cannot write: ", palette.refusal()),
+                Span::raw(notice.clone()),
+            ]));
+        }
+        footer_lines.push(Line::styled(hint, palette.dim()));
+        frame.render_widget(Paragraph::new(footer_lines), footer);
+        match &screen.view {
+            View::Main => main(frame, body, state, screen, &config, palette, glyphs),
             View::Confirm {
                 field,
                 pick,
+                kept,
                 option,
                 cursor,
             } => {
-                let kept = state.values[field];
-                lines.push(title("Confirm a caution option"));
-                lines.push(String::new());
-                lines.push(format!(
-                    "  {} {}: {}",
-                    style.caution(CAUTION),
-                    field.label(),
-                    field.show(*pick, &config)
-                ));
-                lines.push(String::new());
-                lines.extend(confirmation_rows(
-                    state, &config, *field, *pick, option, width,
-                ));
-                lines.push(String::new());
+                let mut lines = vec![
+                    Line::styled("Confirm a caution option", palette.title()),
+                    Line::raw(""),
+                ];
+                lines.extend(
+                    confirmation_rows(
+                        state,
+                        &config,
+                        *field,
+                        *pick,
+                        option,
+                        usize::from(body.width),
+                    )
+                    .into_iter()
+                    .map(Line::raw),
+                );
+                lines.push(Line::raw(""));
                 for (index, text) in [
-                    format!("No, keep {}", field.show(kept, &config)),
+                    format!("No, keep {}", field.show(*kept, &config)),
                     format!(
                         "Yes, use {} and record {option}",
                         field.show(*pick, &config)
@@ -652,35 +545,262 @@ mod screen {
                 .into_iter()
                 .enumerate()
                 {
-                    lines.push(if *cursor == index {
-                        format!("  {} {}", glyphs.chosen, style.bold(&text))
+                    let mark = if index == *cursor {
+                        glyphs.chosen
                     } else {
-                        format!("  {} {text}", glyphs.other)
-                    });
+                        glyphs.other
+                    };
+                    let style = if index == *cursor {
+                        palette.selected()
+                    } else {
+                        Default::default()
+                    };
+                    lines.push(Line::from(vec![
+                        Span::raw(format!("  {mark} ")),
+                        Span::styled(text, style),
+                    ]));
                 }
-                lines.push(String::new());
-                lines.push(hint("choose"));
+                frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), body);
             }
             View::Summary(plan) => {
-                lines.push(title("Review before writing"));
-                lines.push(String::new());
+                let mut lines = vec![
+                    Line::styled("Review before writing", palette.title()),
+                    Line::raw(""),
+                ];
                 match plan.as_ref() {
                     Ok(plan) => {
-                        for line in summary_lines(plan, state.host.as_ref()) {
-                            lines.push(line.replace(CAUTION, &style.caution(CAUTION)));
-                        }
-                        lines.push(String::new());
-                        lines.push(style.dim("Enter to write, Esc to cancel"));
+                        lines.extend(summary_lines(plan, state.host.as_ref()).into_iter().map(
+                            |line| {
+                                if line.contains(CAUTION) {
+                                    Line::styled(line, palette.caution())
+                                } else {
+                                    Line::raw(line)
+                                }
+                            },
+                        ))
                     }
-                    Err(error) => {
-                        lines.push(format!("{} {error}", style.refusal("Cannot write:")));
-                        lines.push(String::new());
-                        lines.push(style.dim("Enter to go back, Esc to cancel"));
-                    }
+                    Err(error) => lines.push(Line::from(vec![
+                        Span::styled("Cannot write: ", palette.refusal()),
+                        Span::raw(error.clone()),
+                    ])),
                 }
+                frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), body);
             }
         }
+    }
+
+    /// The grouped settings on the left and the side pane on the right.
+    fn main(
+        frame: &mut Frame,
+        body: Rect,
+        state: &State,
+        screen: &Screen,
+        config: &Config,
+        palette: Palette,
+        glyphs: Glyphs,
+    ) {
+        let [list, pane] = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+            .areas(body);
+        let label_width = screen
+            .rows
+            .iter()
+            .map(|field| field.label().chars().count())
+            .max()
+            .unwrap_or(0)
+            + 2;
+        // Each line with the row it shows, so the window can keep the highlight in view.
+        let mut lines: Vec<(Option<usize>, Line)> = Vec::new();
+        let mut last = None;
+        for (index, field) in screen.rows.iter().enumerate() {
+            let group = section(*field);
+            if last != Some(group) {
+                if last.is_some() {
+                    lines.push((None, Line::raw("")));
+                }
+                lines.push((None, Line::styled(SECTIONS[group], palette.title())));
+                last = Some(group);
+            }
+            let pick = state.values[field];
+            let selected = index == screen.row;
+            let mut spans = vec![
+                Span::raw(if selected {
+                    format!("{} ", glyphs.pointer)
+                } else {
+                    "  ".into()
+                }),
+                Span::styled(
+                    format!("{:<label_width$}", field.label()),
+                    if selected {
+                        palette.selected()
+                    } else {
+                        Default::default()
+                    },
+                ),
+                Span::raw(field.show(pick, config)),
+            ];
+            if state.risk(*field, pick).is_some() {
+                spans.push(Span::raw("  "));
+                spans.push(Span::styled(CAUTION, palette.caution()));
+            }
+            lines.push((Some(index), Line::from(spans)));
+        }
+        lines.push((None, Line::raw("")));
+        for (index, text) in [
+            (screen.rows.len(), "Review and write"),
+            (screen.rows.len() + 1, "Cancel"),
+        ] {
+            let selected = index == screen.row;
+            lines.push((
+                Some(index),
+                Line::from(vec![
+                    Span::raw(if selected {
+                        format!("{} ", glyphs.pointer)
+                    } else {
+                        "  ".into()
+                    }),
+                    Span::styled(
+                        text,
+                        if selected {
+                            palette.selected()
+                        } else {
+                            Default::default()
+                        },
+                    ),
+                ]),
+            ));
+        }
+        let height = usize::from(list.height);
+        let at = lines
+            .iter()
+            .position(|(row, _)| *row == Some(screen.row))
+            .unwrap_or(0);
+        let start = window_start(lines.len(), height, at);
+        frame.render_widget(
+            Paragraph::new(
+                lines
+                    .into_iter()
+                    .skip(start)
+                    .take(height)
+                    .map(|(_, line)| line)
+                    .collect::<Vec<_>>(),
+            ),
+            list,
+        );
+        frame.render_widget(
+            Paragraph::new(side_pane(state, screen, config, palette))
+                .wrap(Wrap { trim: false })
+                .block(
+                    Block::default()
+                        .borders(Borders::LEFT)
+                        .title(" About this setting "),
+                ),
+            pane,
+        );
+    }
+
+    /// What the side pane says about the highlighted row, with this host's numbers.
+    pub fn side_pane(
+        state: &State,
+        screen: &Screen,
+        config: &Config,
+        palette: Palette,
+    ) -> Vec<Line<'static>> {
+        let Some(field) = screen.rows.get(screen.row).copied() else {
+            let text = if screen.row == screen.rows.len() {
+                "Shows every change and caution before anything is written; Enter there writes the file."
+            } else {
+                "Leaves the configuration as it is."
+            };
+            return vec![Line::raw(text)];
+        };
+        let pick = state.values[&field];
+        let mut lines = vec![Line::styled(field.label(), palette.title())];
+        if let Some(note) = field.note() {
+            lines.push(Line::raw(note));
+        }
+        lines.push(Line::raw(""));
+        lines.push(Line::raw(format!("Value: {}", field.show(pick, config))));
+        lines.push(Line::raw(capitalize(&consequence(
+            field,
+            pick,
+            config,
+            state.host.as_ref(),
+        ))));
+        if let Some(option) = state.risk(field, pick) {
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(
+                format!("{CAUTION} {}", justification(option)),
+                palette.caution(),
+            ));
+        }
         lines
+    }
+
+    pub fn run(state: &mut State, color: bool, glyphs: Glyphs) -> Result<Outcome> {
+        let _raw = terminal::Raw::enter().context("cannot drive the terminal")?;
+        let mut keys = terminal::Keys::default();
+        // The window's size only: asking the terminal for the cursor would race the key reader.
+        let (columns, rows) = crossterm::terminal::size().unwrap_or((80, 40));
+        let area = ratatui::layout::Rect::new(0, 0, columns, rows);
+        let mut screen = Screen::new(state);
+        if color {
+            let mut terminal = ratatui::Terminal::with_options(
+                ratatui::backend::CrosstermBackend::new(std::io::stdout()),
+                ratatui::TerminalOptions {
+                    viewport: ratatui::Viewport::Fixed(area),
+                },
+            )
+            .context("cannot drive the terminal")?;
+            // Cleared directly: ratatui's clear asks the terminal for the cursor first.
+            crossterm::execute!(
+                std::io::stdout(),
+                crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+                crossterm::cursor::MoveTo(0, 0)
+            )?;
+            let outcome = loop {
+                terminal.draw(|frame| draw(frame, state, &screen, true, glyphs))?;
+                if let Some(outcome) = screen.key(state, keys.next()?) {
+                    break outcome;
+                }
+            };
+            drop(terminal);
+            crossterm::execute!(
+                std::io::stdout(),
+                crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+                crossterm::cursor::MoveTo(0, 0),
+                crossterm::cursor::Show
+            )?;
+            return Ok(outcome);
+        }
+        // Without color no escape sequence is written: each screen is printed as plain text
+        // after a blank line (001 setup contract).
+        let mut memory = ratatui::Terminal::with_options(
+            ratatui::backend::TestBackend::new(columns, rows),
+            ratatui::TerminalOptions {
+                viewport: ratatui::Viewport::Fixed(area),
+            },
+        )?;
+        let mut out = std::io::stdout();
+        loop {
+            memory.draw(|frame| draw(frame, state, &screen, false, glyphs))?;
+            let buffer = memory.backend().buffer();
+            let mut text = String::from("\n");
+            for y in 0..buffer.area.height {
+                let line: String = (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect();
+                text.push_str(line.trim_end());
+                text.push('\n');
+            }
+            out.write_all(text.trim_end_matches('\n').as_bytes())?;
+            out.write_all(b"\n")?;
+            out.flush()?;
+            if let Some(outcome) = screen.key(state, keys.next()?) {
+                return Ok(outcome);
+            }
+        }
     }
 }
 
@@ -758,17 +878,12 @@ pub(super) mod terminal {
         }
     }
 
-    /// The terminal's rows and columns.
-    pub fn size() -> Option<(u16, u16)> {
-        let mut size: libc::winsize = unsafe { std::mem::zeroed() };
-        (unsafe { libc::ioctl(1, libc::TIOCGWINSZ, &mut size) } == 0 && size.ws_row > 0)
-            .then_some((size.ws_row, size.ws_col))
-    }
-
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Key {
         Up,
         Down,
+        Left,
+        Right,
         Space,
         Enter,
         Cancel,
@@ -826,6 +941,8 @@ pub(super) mod terminal {
                             match code {
                                 b'A' => Key::Up,
                                 b'B' => Key::Down,
+                                b'C' => Key::Right,
+                                b'D' => Key::Left,
                                 _ => Key::Other,
                             }
                         }

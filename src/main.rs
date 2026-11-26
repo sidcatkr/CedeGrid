@@ -707,6 +707,21 @@ async fn async_main(cli: Cli) -> Result<()> {
             );
             // System mode's level and why, its effective policy and limits (005 FR-010, FR-014).
             let system_mode = cedegrid::system_mode::system_mode_status_now();
+            // The checklist (003 FR-071): the control level joins it with its detection (T011).
+            let checks = cedegrid::explain::doctor_checks(
+                &config,
+                &snapshot,
+                &cedegrid::explain::CheckInputs {
+                    #[cfg(unix)]
+                    // SAFETY: geteuid has no preconditions and cannot fail.
+                    euid: Some(unsafe { libc::geteuid() }),
+                    #[cfg(not(unix))]
+                    euid: None,
+                    storage_admitted: role_admitted,
+                    level: None,
+                    proc_hidden: cedegrid::telemetry::proc_hides_other_users(),
+                },
+            );
             if text {
                 // Unprotected is shown where the configuration names Aggressive or the
                 // allowance is on; on a System mode host the administrator key applies too.
@@ -757,9 +772,13 @@ async fn async_main(cli: Cli) -> Result<()> {
                 } else {
                     String::new()
                 };
+                let doctor =
+                    cedegrid::explain::doctor_text(&config, &snapshot, &decision, &config_warnings);
+                // The checklist follows the title line.
+                let (title, rest) = doctor.split_once('\n').unwrap_or((doctor.as_str(), ""));
                 let text = format!(
-                    "{}{unprotected}{priority}{}{}{}",
-                    cedegrid::explain::doctor_text(&config, &snapshot, &decision, &config_warnings),
+                    "{title}\n{}{rest}{unprotected}{priority}{}{}{}",
+                    cedegrid::explain::checks_text(&checks, cedegrid::explain::plain_marks()),
                     cedegrid::system_mode::system_mode_text(&system_mode),
                     cedegrid::explain::derived_text(&config),
                     cedegrid::explain::descendants_text(cedegrid::supervision::descendant_lists())
@@ -796,6 +815,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                 "legacy_gpu": config.legacy_gpu(),
                 "floors": config.floors(&snapshot),
                 "caution_options": config.caution_details(&snapshot),
+                "checks": checks,
                 "max_mode": decision.max_mode,
                 "resources": decision.resources,
                 "actions": decision.actions,

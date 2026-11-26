@@ -557,3 +557,164 @@ pub fn doctor_text(
     }
     out
 }
+
+/// One `doctor` check (003 FR-071): passed or failed, what was found, and for a failure a
+/// one-line fix.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Check {
+    pub name: String,
+    pub passed: bool,
+    pub detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix: Option<String>,
+}
+
+impl Check {
+    fn new(name: &str, passed: bool, detail: impl Into<String>, fix: Option<&str>) -> Self {
+        Self {
+            name: name.to_owned(),
+            passed,
+            detail: detail.into(),
+            fix: (!passed).then(|| fix.unwrap_or("see the line above").to_owned()),
+        }
+    }
+}
+
+/// What `doctor`'s checks read besides the sample: the effective user ID (None where the
+/// platform has none), whether the state directory admits the storage profile, the control
+/// level with its reason once detected, and whether `/proc` hides other users' processes.
+#[derive(Debug, Clone, Default)]
+pub struct CheckInputs {
+    pub euid: Option<u32>,
+    pub storage_admitted: bool,
+    pub level: Option<(String, String)>,
+    pub proc_hidden: Option<bool>,
+}
+
+/// `doctor`'s checklist (003 FR-071, SC-010): the user it runs as (FR-082), the control level and
+/// why, the state storage, the contention evidence this host gives (FR-050) and GPU telemetry.
+pub fn doctor_checks(config: &Config, snapshot: &Snapshot, inputs: &CheckInputs) -> Vec<Check> {
+    let mut checks = vec![match inputs.euid {
+        Some(0) => Check::new(
+            "runs as a user other than root",
+            false,
+            "it runs as root",
+            Some("run the same command as your own user, without sudo"),
+        ),
+        Some(uid) => Check::new(
+            "runs as a user other than root",
+            true,
+            format!("user ID {uid}"),
+            None,
+        ),
+        None => Check::new(
+            "runs as a user other than root",
+            true,
+            "this platform has no root account check",
+            None,
+        ),
+    }];
+    if let Some((level, reason)) = &inputs.level {
+        checks.push(Check::new(
+            "control level",
+            true,
+            format!("{level}: {reason}"),
+            None,
+        ));
+    }
+    checks.push(Check::new(
+        "state storage",
+        inputs.storage_admitted,
+        format!(
+            "{} with the {} storage profile",
+            config.state_dir.display(),
+            serde_json::to_value(config.storage_profile)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_default()
+        ),
+        Some("set storage_profile to one this file system supports, or move state_dir to a local disk"),
+    ));
+    let pressure = snapshot
+        .kernel
+        .as_ref()
+        .and_then(|kernel| kernel.cpu_pressure.as_ref())
+        .is_some_and(|pressure| pressure.status == crate::kernel::CpuPressureStatus::Available);
+    checks.push(match (cfg!(target_os = "linux"), inputs.proc_hidden) {
+        (true, Some(false)) => Check::new(
+            "contention evidence",
+            true,
+            "per user: each user's run-queue wait and CPU",
+            None,
+        ),
+        (true, Some(true)) if pressure => Check::new(
+            "contention evidence",
+            true,
+            "host level: /proc hides other users' processes, so CPU pressure stands in",
+            None,
+        ),
+        (true, _) => Check::new(
+            "contention evidence",
+            false,
+            "none: other users' processes cannot be read and CPU pressure is not available",
+            Some("ask the administrator to mount /proc without hidepid, or use a kernel with PSI"),
+        ),
+        (false, _) => Check::new(
+            "contention evidence",
+            false,
+            "not read on this platform",
+            Some("run CedeGrid on Linux to read other users' CPU demand"),
+        ),
+    });
+    checks.push(match snapshot.gpu_inventory {
+        crate::model::CapabilityStatus::Available => Check::new(
+            "GPU telemetry",
+            true,
+            format!("{} device(s) through NVML", snapshot.gpus.len()),
+            None,
+        ),
+        crate::model::CapabilityStatus::Unsupported => {
+            Check::new("GPU telemetry", true, "no NVIDIA GPU on this host", None)
+        }
+        _ => Check::new(
+            "GPU telemetry",
+            false,
+            "NVML cannot be read",
+            Some("install the NVIDIA driver, which provides the NVML library"),
+        ),
+    });
+    checks
+}
+
+/// The checklist as text: ✓ or ✗ per check, or `[ok]` and `[fail]` where `plain`, with each
+/// failure's fix on the next line.
+pub fn checks_text(checks: &[Check], plain: bool) -> String {
+    let mut out = String::from("\nChecks\n");
+    for check in checks {
+        let mark = match (check.passed, plain) {
+            (true, false) => "\u{2713}",
+            (false, false) => "\u{2717}",
+            (true, true) => "[ok]",
+            (false, true) => "[fail]",
+        };
+        let _ = writeln!(out, "  {mark} {}: {}", check.name, check.detail);
+        if let Some(fix) = &check.fix {
+            let _ = writeln!(out, "      fix: {fix}");
+        }
+    }
+    out
+}
+
+/// Whether check marks fall back to `[ok]` and `[fail]`: under `NO_COLOR`, or where the locale
+/// does not say UTF-8.
+pub fn plain_marks() -> bool {
+    let no_color = std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty());
+    let utf8 = ["LC_ALL", "LC_CTYPE", "LANG"]
+        .into_iter()
+        .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()))
+        .is_some_and(|value| {
+            let value = value.to_ascii_lowercase();
+            value.contains("utf-8") || value.contains("utf8")
+        });
+    no_color || !utf8
+}
