@@ -1908,6 +1908,9 @@ for runs E1 and E2 and has no code task yet.
   `login.defs`) are system accounts as those below `uid_min` are: background on CPU, RAM and GPU, never a principal,
   no arrival for the first-come floor and not in its E_max or E; a lower `uid_max` is `relaxed_detection`, per FR-059,
   FR-090, spec Session 2026-11-24 (user; a login screen's dynamic account withheld the floor on the test host)
+- [X] T633 Failing test, then the change: while an own task is paused on a time-sliced device, every listed own
+  context counts in m, so a stopped task's context does not age out of the counting window and the hold does not
+  release it for one or two intervals every 30 s, per FR-021, FR-089 (the floor runs at `d8053d6` on the test host)
 - [ ] T623 Just before release, a read-only Tracked-mode sanity check on the shared GPU server: no stress, no global setting changed, nothing that touches other users; record the result in `docs/validation.md` (user, 2026-11-17)
 
 Order: T614, T615, T616, T617, T618, T619, T620, then T621 at the last commit; T622 before the security review; T623 last, just before release.

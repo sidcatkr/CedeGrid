@@ -135,7 +135,9 @@ work started by hand. The counts are the
 processes sampled busy within the counting window, and own work's processes also from the
 interval the device first lists them, before their first sample. An own process stops counting
 once 60 intervals with readable samples (30 s at the default interval) pass without a sample for
-it, from its listing or its last sample. So an own task that holds a GPU context without computing
+it, from its listing or its last sample. While CedeGrid keeps one of its tasks paused on the
+device, every own process still listed there counts: a stopped process has no samples, but it
+computes again once released. So an own task that holds a GPU context without computing
 counts toward the tasks left running beside a slice-bound user for at most that long after its
 listing or an agent restart; no other workload pays. The owner's unmanaged processes and
 other users' processes count only while sampled busy in that window, so an idle one never counts.

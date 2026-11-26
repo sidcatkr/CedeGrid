@@ -2177,18 +2177,32 @@ impl<'a> Interval<'a> {
                 self.now.saturating_sub(at) <= self.config.gpu_sample_max_age_ms()
             });
         let mut own_counted = Vec::new();
+        // A task paused on the device has no samples while it is stopped, yet runs again once
+        // released, so while one is paused every listed own context counts, each task one (FR-089).
+        let key = ResourceKey::GpuCompute(gpu.uuid.clone());
+        let paused_here = self.input.allocations.iter().any(|allocation| {
+            self.prev
+                .ladder
+                .get(&(allocation.id.clone(), key.clone()))
+                .is_some_and(|state| state.step == YieldStep::Pause)
+        });
         let (own, mut principals, source) = if readable {
             let seen = |pid: &u32| demand.seen.get(pid).filter(|context| context.counts());
             for pid in &contexts.own {
-                if let Some(context) = seen(pid) {
-                    own_counted.push(OwnCounted {
+                match seen(pid) {
+                    Some(context) => own_counted.push(OwnCounted {
                         pid: *pid,
                         by: if context.sampled {
                             CountedBy::Sample
                         } else {
                             CountedBy::Listing
                         },
-                    });
+                    }),
+                    None if paused_here => own_counted.push(OwnCounted {
+                        pid: *pid,
+                        by: CountedBy::Listing,
+                    }),
+                    None => {}
                 }
             }
             let owner = contexts

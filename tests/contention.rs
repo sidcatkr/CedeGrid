@@ -6445,6 +6445,39 @@ mod gpu_demand {
             }
         }
 
+        /// A task paused by the hold has no samples, and it stays counted in m for as long as it is
+        /// paused: past one counting window (60 intervals) the hold keeps the same task paused, with
+        /// no interval in which both run beside the user (FR-021, FR-089, FR-090).
+        #[test]
+        fn a_paused_task_stays_counted_past_the_counting_window() {
+            let mut config = mode_config(ContentionMode::YieldFirst);
+            // The pause bound past the run, as on the test host, so no pause moves at its bound.
+            config.contention.gpu_compute.pause_bound_s = Some(60);
+            let run = tasks_run(
+                &config,
+                None,
+                &|_| true,
+                &|i| usize::from(i >= 20),
+                Some(PEER),
+                140,
+            );
+            let paused_ids = |t: &TaskTick| -> Vec<String> {
+                t.steps
+                    .iter()
+                    .filter(|(_, s)| **s == YieldStep::Pause)
+                    .map(|(id, _)| id.clone())
+                    .collect()
+            };
+            let first = paused_ids(&run[24]);
+            assert_eq!(first.len(), 1, "{:?}", run[24].steps);
+            // Up to the pause bound, 120 intervals after the pause.
+            for (i, t) in run.iter().enumerate().take(140).skip(24) {
+                assert_eq!(paused_ids(t), first, "interval {i}: {:?}", t.steps);
+                let slice = slice_of(&t.decision);
+                assert_eq!((slice.own, slice.hold), (2, Some(1)), "interval {i}");
+            }
+        }
+
         /// A display manager's login screen holds a quiet context on the device from before own
         /// work, under a dynamic account above `uid_max`: a system account, so it is nobody who
         /// arrived first, and own work keeps half the device beside the later user (FR-090,
