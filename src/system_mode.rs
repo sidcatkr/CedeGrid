@@ -734,6 +734,214 @@ pub fn reply_outcome(line: &[u8]) -> Outcome {
     }
 }
 
+/// Whether this account runs in System mode, as `doctor` shows it (FR-014).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Level {
+    Rootless,
+    System,
+    /// The broker did not give a usable answer.
+    Unknown,
+}
+
+impl Level {
+    pub fn name(self) -> &'static str {
+        match self {
+            Level::Rootless => "rootless",
+            Level::System => "System mode",
+            Level::Unknown => "unknown",
+        }
+    }
+}
+
+/// One effective administrator policy value and where it came from (FR-010).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct PolicyValue {
+    pub key: String,
+    pub value: String,
+    /// `policy file` or `default`.
+    pub source: &'static str,
+}
+
+/// System mode as `doctor` shows it: the level and why, the effective policy and the limits in
+/// force on this account's units (FR-010, FR-014).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct SystemModeStatus {
+    pub level: Level,
+    /// Why, in one sentence.
+    pub why: String,
+    /// This account's units as the broker lists them.
+    pub units: Vec<UnitStatus>,
+    /// The administrator policy's effective values; empty where System mode is not installed or
+    /// the policy cannot be read.
+    pub policy: Vec<PolicyValue>,
+    /// Why the policy cannot be read.
+    pub policy_error: Option<String>,
+    /// The limits in force on this account's units, as a label and a value.
+    pub limits: Vec<(String, String)>,
+}
+
+/// The status from the broker's answer to a `status` request and the policy, which is read only
+/// where System mode is installed.
+pub fn system_mode_status(
+    answer: Outcome,
+    policy: Option<anyhow::Result<crate::broker::admin_policy::AdminPolicy>>,
+) -> SystemModeStatus {
+    let (level, why, units) = match answer {
+        Outcome::NotInstalled => (
+            Level::Rootless,
+            "cedegrid-system is not installed on this host".to_owned(),
+            Vec::new(),
+        ),
+        Outcome::Units(units) => {
+            let running = units.iter().any(|unit| {
+                unit.kind == crate::broker::units::UnitKind::Ordinary && unit.state == "active"
+            });
+            if running {
+                (
+                    Level::System,
+                    "this account's units run under the System mode broker".to_owned(),
+                    units,
+                )
+            } else {
+                (
+                    Level::Rootless,
+                    "System mode is installed, but this account's units are not running; run cedegrid system start".to_owned(),
+                    units,
+                )
+            }
+        }
+        Outcome::Refused(refusal) => match refusal.code {
+            RefusalCode::NotAMember | RefusalCode::RefusedAccount => {
+                (Level::Rootless, refusal.message, Vec::new())
+            }
+            _ => (Level::Unknown, refusal.message, Vec::new()),
+        },
+        Outcome::NoAnswer(reason) => (Level::Unknown, format!("the broker {reason}"), Vec::new()),
+    };
+    let (policy, policy_error, limits) = match policy {
+        None => (Vec::new(), None, Vec::new()),
+        Some(Err(error)) => (Vec::new(), Some(format!("{error:#}")), Vec::new()),
+        Some(Ok(policy)) => {
+            let entries = policy.entries();
+            let value = |key: &str| {
+                entries
+                    .iter()
+                    .find(|(name, _, _)| *name == key)
+                    .map(|(_, value, _)| value.clone())
+                    .unwrap_or_default()
+            };
+            // Under a PAM session the session's limits apply instead of the policy's (N3).
+            let session = (policy.pam_session.value != crate::broker::units::PamSession::None)
+                .then(|| format!("from the PAM session ({})", value("units.pam_session")));
+            let process_limit = |key: &str| session.clone().unwrap_or_else(|| value(key));
+            let limits = vec![
+                ("Tasks per user".to_owned(), value("limits.tasks_per_user")),
+                ("Tasks per unit".to_owned(), value("limits.tasks_max")),
+                ("Open files".to_owned(), process_limit("limits.open_files")),
+                ("Processes".to_owned(), process_limit("limits.processes")),
+                (
+                    "Locked memory (MiB)".to_owned(),
+                    process_limit("limits.locked_memory_mib"),
+                ),
+            ];
+            let policy = entries
+                .into_iter()
+                .map(|(key, value, source)| PolicyValue {
+                    key: key.to_owned(),
+                    value,
+                    source: match source {
+                        crate::broker::admin_policy::Source::File => "policy file",
+                        crate::broker::admin_policy::Source::Default => "default",
+                    },
+                })
+                .collect();
+            (policy, None, limits)
+        }
+    };
+    SystemModeStatus {
+        level,
+        why,
+        units,
+        policy,
+        policy_error,
+        limits,
+    }
+}
+
+/// The status on this host now: one `status` request to the broker, and the policy where
+/// System mode is installed.
+pub fn system_mode_status_now() -> SystemModeStatus {
+    let answer = ask(
+        Path::new(crate::broker::SOCKET_PATH),
+        &Request::Status,
+        CLIENT_TIMEOUT,
+    );
+    let policy = (answer != Outcome::NotInstalled).then(crate::broker::admin_policy::load);
+    system_mode_status(answer, policy)
+}
+
+/// `doctor`'s System mode section.
+pub fn system_mode_text(status: &SystemModeStatus) -> String {
+    let mut out = String::from("\nSystem mode\n");
+    let mut rows = vec![
+        ("Level", status.level.name().to_owned()),
+        ("Why", status.why.clone()),
+    ];
+    if !status.units.is_empty() {
+        let units = status
+            .units
+            .iter()
+            .map(|unit| format!("{} {}", unit.name, unit.state))
+            .collect::<Vec<_>>()
+            .join(", ");
+        rows.push(("Units", units));
+    }
+    for line in crate::setup::key_values(&rows, 2) {
+        out.push_str(&line);
+        out.push('\n');
+    }
+    if let Some(error) = &status.policy_error {
+        out.push_str(&format!("\n  Policy cannot be read: {error}\n"));
+    }
+    if !status.policy.is_empty() {
+        out.push_str(&format!(
+            "\n  Policy ({}/{})\n",
+            crate::broker::admin_policy::POLICY_DIR,
+            crate::broker::admin_policy::POLICY_FILE
+        ));
+        let mut rows = vec![vec![
+            "KEY".to_owned(),
+            "VALUE".to_owned(),
+            "SOURCE".to_owned(),
+        ]];
+        rows.extend(status.policy.iter().map(|entry| {
+            vec![
+                entry.key.clone(),
+                entry.value.clone(),
+                entry.source.to_owned(),
+            ]
+        }));
+        for line in crate::explain::table(&rows, 4) {
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
+    if !status.limits.is_empty() {
+        out.push_str("\n  Limits in force\n");
+        let rows: Vec<(&str, String)> = status
+            .limits
+            .iter()
+            .map(|(label, value)| (label.as_str(), value.clone()))
+            .collect();
+        for line in crate::setup::key_values(&rows, 4) {
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
 /// What `cedegrid system` prints.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct SystemReport {
@@ -955,6 +1163,99 @@ mod tests {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
             self.reply.read(buf)
         }
+    }
+
+    fn unit(kind: crate::broker::units::UnitKind, state: &str) -> UnitStatus {
+        UnitStatus {
+            kind,
+            name: format!("cedegrid-{kind:?}"),
+            state: state.to_owned(),
+            cgroup: String::new(),
+        }
+    }
+
+    /// FR-014: the level and why, from the broker's answer.
+    #[test]
+    fn the_level_and_why_follow_the_brokers_answer() {
+        use crate::broker::units::UnitKind::{Idle, Ordinary};
+        let level = |answer| system_mode_status(answer, None).level;
+        assert_eq!(level(Outcome::NotInstalled), Level::Rootless);
+        let running = Outcome::Units(vec![unit(Ordinary, "active"), unit(Idle, "active")]);
+        assert_eq!(level(running), Level::System);
+        let stopped = system_mode_status(
+            Outcome::Units(vec![unit(Ordinary, "absent"), unit(Idle, "absent")]),
+            None,
+        );
+        assert_eq!(stopped.level, Level::Rootless);
+        assert!(
+            stopped.why.contains("cedegrid system start"),
+            "{}",
+            stopped.why
+        );
+        let refused = |code| Outcome::Refused(Refusal::new(code, "why"));
+        assert_eq!(level(refused(RefusalCode::NotAMember)), Level::Rootless);
+        assert_eq!(level(refused(RefusalCode::RefusedAccount)), Level::Rootless);
+        assert_eq!(level(refused(RefusalCode::RateLimited)), Level::Unknown);
+        let silent =
+            system_mode_status(Outcome::NoAnswer("did not answer within 2 s".into()), None);
+        assert_eq!(silent.level, Level::Unknown);
+        assert_eq!(silent.why, "the broker did not answer within 2 s");
+    }
+
+    /// FR-010: each effective value with its source, and the limits in force, which a PAM
+    /// session replaces (N3).
+    #[test]
+    fn the_policy_shows_each_value_its_source_and_the_limits_in_force() {
+        use crate::broker::admin_policy::AdminPolicy;
+        let installed = || Outcome::Units(Vec::new());
+        let status = system_mode_status(
+            installed(),
+            Some(AdminPolicy::parse("[limits]\ntasks_per_user = 8\n", 1000)),
+        );
+        let source = |key: &str| {
+            status
+                .policy
+                .iter()
+                .find(|entry| entry.key == key)
+                .map(|entry| (entry.value.clone(), entry.source))
+        };
+        assert_eq!(
+            source("limits.tasks_per_user"),
+            Some(("8".into(), "policy file"))
+        );
+        assert_eq!(source("limits.tasks_max"), Some(("4096".into(), "default")));
+        let limit = |status: &SystemModeStatus, label: &str| {
+            status
+                .limits
+                .iter()
+                .find(|(name, _)| name == label)
+                .map(|(_, value)| value.clone())
+        };
+        assert_eq!(limit(&status, "Tasks per user").as_deref(), Some("8"));
+        assert_eq!(
+            limit(&status, "Open files").as_deref(),
+            Some("systemd default")
+        );
+        let session = system_mode_status(
+            installed(),
+            Some(AdminPolicy::parse(
+                "[units]\npam_session = \"cedegrid\"\n",
+                1000,
+            )),
+        );
+        assert_eq!(
+            limit(&session, "Open files").as_deref(),
+            Some("from the PAM session (cedegrid)")
+        );
+        let broken =
+            system_mode_status(installed(), Some(Err(anyhow::anyhow!("not owned by root"))));
+        assert!(broken.policy.is_empty() && broken.limits.is_empty());
+        assert_eq!(broken.policy_error.as_deref(), Some("not owned by root"));
+        let text = system_mode_text(&status);
+        for part in ["System mode", "Level", "KEY", "SOURCE", "Limits in force"] {
+            assert!(text.contains(part), "{part}: {text}");
+        }
+        assert!(!text.contains('\u{b7}'), "{text}");
     }
 
     /// A rate-limited broker answers and closes before reading, so the client's write breaks;

@@ -707,6 +707,8 @@ async fn async_main(cli: Cli) -> Result<()> {
                 config.contention.priority_over_plain,
                 snapshot.principals.as_deref().unwrap_or_default(),
             );
+            // System mode's level and why, its effective policy and limits (005 FR-010, FR-014).
+            let system_mode = cedegrid::system_mode::system_mode_status_now();
             if text {
                 // Unprotected is shown where the configuration names Aggressive or the
                 // allowance is on; on a System mode host the administrator key applies too.
@@ -758,8 +760,9 @@ async fn async_main(cli: Cli) -> Result<()> {
                     String::new()
                 };
                 let text = format!(
-                    "{}{unprotected}{priority}{}{}",
+                    "{}{unprotected}{priority}{}{}{}",
                     cedegrid::explain::doctor_text(&config, &snapshot, &decision, &config_warnings),
+                    cedegrid::system_mode::system_mode_text(&system_mode),
                     cedegrid::explain::derived_text(&config),
                     cedegrid::explain::descendants_text(cedegrid::supervision::descendant_lists())
                 );
@@ -802,6 +805,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                 "reason_codes": decision.reason_codes,
                 "available_steps": cedegrid::explain::available_steps(&config),
                 "priority_over_plain": priority,
+                "system_mode": system_mode,
                 "descendant_lists": cedegrid::supervision::descendant_lists(),
                 "derived": config.derived_settings()
                 }))?;
@@ -830,6 +834,9 @@ async fn async_main(cli: Cli) -> Result<()> {
             let mut engine = PolicyEngine::new();
             let start = Instant::now();
             let mut count = 0u64;
+            // Whether this account runs in System mode, read once (005 FR-014).
+            let system_mode = cedegrid::system_mode::system_mode_status_now();
+            let system_mode = json!({"level": system_mode.level, "why": system_mode.why});
             let shutdown = shutdown_signal();
             tokio::pin!(shutdown);
             loop {
@@ -856,6 +863,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                     .map(|s| s.append_observation(&snapshot, &decision))
                     .transpose()?;
                 let mut observation = cedegrid::explain::observation(&snapshot, &decision, id);
+                observation["system_mode"] = system_mode.clone();
                 // Runs started under an unprotected grant, until they end (004 FR-016).
                 observation["unprotected"] = serde_json::to_value(
                     store
