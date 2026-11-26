@@ -12,6 +12,9 @@ import re
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSION_FORM = re.compile(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z')
+# Where a release's files are downloaded from. tools/install.sh, a standalone POSIX script, spells
+# out the same address.
+RELEASE_URL = 'https://github.com/sidcatkr/CedeGrid/releases/download/v{version}'
 
 
 def table_value(text: str, table: str, key: str) -> str:
@@ -37,6 +40,10 @@ def version(root: Path = ROOT) -> str:
     if not VERSION_FORM.fullmatch(value):
         raise ValueError(f'Cargo.toml version {value!r} is not MAJOR.MINOR.PATCH')
     return value
+
+
+def release_url(value: str) -> str:
+    return RELEASE_URL.format(version=value)
 
 
 def series(value: str) -> str:

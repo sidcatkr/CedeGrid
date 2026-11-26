@@ -2,8 +2,9 @@
 """Freeze or verify exact release bytes and enforce every stable qualification gate.
 
 The release version is Cargo.toml's; its gates file is docs/release-MAJOR.MINOR-gates.json. The
-release ships as files on GitHub Releases only: the standalone CLI archives, install.sh, the SDK
-files and the Debian packages, with one SHA256SUMS whose names are the release's file names.
+release ships as files on GitHub Releases only: the standalone CLI archives, install.sh, the
+Homebrew formula, the SDK files and the Debian packages, with one SHA256SUMS whose names are the
+release's file names.
 """
 from __future__ import annotations
 import argparse
@@ -34,6 +35,7 @@ NATIVE = {'darwin-arm64','darwin-x64','linux-arm64-gnu','linux-x64-gnu','win32-x
 # The Debian packages for System mode (005 FR-033): the CLI package holds the native binary.
 DEB_ARCH = {'linux-x64-gnu': 'amd64', 'linux-arm64-gnu': 'arm64'}
 INSTALL_SCRIPT = 'install/install.sh'
+HOMEBREW_FORMULA = 'homebrew/cedegrid.rb'
 SHA256 = re.compile(r'[0-9a-f]{64}\Z')
 
 
@@ -50,7 +52,7 @@ def sdk_files(version=None):
 
 def expected(version=None):
     version = version or VERSION
-    names = sdk_files(version) | {INSTALL_SCRIPT} | {standalone(target, version) for target in NATIVE}
+    names = sdk_files(version) | {INSTALL_SCRIPT, HOMEBREW_FORMULA} | {standalone(target, version) for target in NATIVE}
     names |= {'deb/' + name + '_' + version + '_' + arch + '.deb'
               for arch in DEB_ARCH.values() for name in ('cedegrid', 'cedegrid-system')}
     return names
@@ -179,6 +181,20 @@ def verify_native_members(packages, manifest, artifact_paths):
                     if stream_digest(stream) != native['sha256']:
                         raise ValueError('native input hash does not match packaged bytes')
 
+def verify_homebrew(packages, artifacts):
+    """The formula installs each macOS and Linux tarball of this release by that tarball's sha256."""
+    paths = {item['path']: item['sha256'] for item in artifacts}
+    if HOMEBREW_FORMULA not in paths:
+        raise ValueError('the candidate has no Homebrew formula')
+    text = member(packages, HOMEBREW_FORMULA).read_text()
+    pairs = re.findall(r'url "([^"]+)"\s*\n\s*sha256 "([0-9a-f]{64})"', text)
+    expected = {release_version.release_url(VERSION) + '/' + Path(standalone(target)).name: paths.get(standalone(target))
+                for target in NATIVE if not target.startswith('win32')}
+    if dict(pairs) != expected or len(pairs) != len(expected) or re.search(r'@[A-Z0-9_]+@', text):
+        raise ValueError('the Homebrew formula does not install these tarballs by their sha256')
+    if 'version "' + VERSION + '"' not in text:
+        raise ValueError('the Homebrew formula names another version')
+
 def relevant_hashes(gate_id, artifacts, native):
     paths = {item['path']: item['sha256'] for item in artifacts}
     platform = {'PLATFORM-LINUX-X64': 'linux-x64-gnu', 'PLATFORM-LINUX-ARM64': 'linux-arm64-gnu',
@@ -252,6 +268,8 @@ def validate(packages, gates, require_stable=False):
         if digest(path) != artifact['sha256'] or path.stat().st_size != artifact['size']:
             raise ValueError('artifact hash or size mismatch: ' + artifact['path'])
     verify_native_members(packages, package_manifest, {item['path'] for item in artifacts})
+    if HOMEBREW_FORMULA in {item['path'] for item in artifacts}:
+        verify_homebrew(packages, artifacts)
     records = gates['required_gates']
     if len(records) != len(REQUIRED) or {r['id'] for r in records} != REQUIRED:
         raise ValueError('the complete fixed qualification gate set is required')

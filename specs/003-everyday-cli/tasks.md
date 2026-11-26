@@ -303,7 +303,7 @@ Contended-CPU placement (FR-057, SC-013):
 - [ ] T104 [US6] Add "Contended-CPU placement" to specs/003-everyday-cli/native-gates.md with exact commands: report 029 run 4's shape beside CedeGrid and beside a fixed `taskset` allocation of the same own share, in the same run, recording the contender's p50 and p99 and own work's step changes. It passes when the contender's p99 beside Tracked caps is at most 1.2× its p99 beside the fixed allocation. Per SC-013 (missing)
 - [ ] T105 [US6] Gate: run "Contended-CPU placement" on the test host and record the p99 ratio against the 1.2× bound and the step changes in native-gates.md and docs/validation.md. Per SC-013 (missing)
 
-- [ ] T107 [US5] Add the secondary channels: a Homebrew formula kept in packaging/homebrew/cedegrid.rb that installs the release tarball by its sha256, and a crates.io publish step in .github/workflows/release.yml for `cargo install --locked cedegrid`. Both publish only on the user's release go. Per FR-073 (missing)
+- [X] T107 [US5] Add the secondary channels: a Homebrew formula kept in packaging/homebrew/cedegrid.rb that installs the release tarball by its sha256, and a crates.io publish step in .github/workflows/release.yml for `cargo install --locked cedegrid`. Both publish only on the user's release go. Per FR-073 (missing)
 - [ ] T106 Update docs/guarantees.md, README.md, the CLAUDE.md layout map, `ALLOWLIST` and Cargo `include` for FR-057, FR-073 and FR-082. Per Constitution VIII (missing)
 
 ## Dependencies and execution order

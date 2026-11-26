@@ -84,6 +84,7 @@ ALLOWLIST = (
     'packaging/deb/postinst',
     'packaging/deb/postrm',
     'packaging/deb/prerm',
+    'packaging/homebrew/cedegrid.rb',
     'python/LICENSE',
     'python/MANIFEST.in',
     'python/NOTICE',

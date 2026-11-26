@@ -16,6 +16,7 @@ import zipfile
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY / 'tools'))
+import build_packages
 import release_manifest as release
 import release_version
 
@@ -90,6 +91,9 @@ class CandidateFixture(unittest.TestCase):
                 (self.root / name).write_bytes(('original ' + name).encode())
         (self.root / 'install').mkdir()
         (self.root / release.INSTALL_SCRIPT).write_text('#!/bin/sh\nversion=${CEDEGRID_VERSION:-' + V + '}\n')
+        (self.root / 'homebrew').mkdir()
+        (self.root / release.HOMEBREW_FORMULA).write_text(build_packages.homebrew_formula(
+            V, {target: release.digest(self.root / release.standalone(target)) for target in build_packages.HOMEBREW_TARGETS}))
         tar(self.root / release.source_archive(), {'CedeGrid/source.txt': b'candidate source\n'})
         artifacts = [{'path': name, 'sha256': release.digest(self.root / name), 'size': (self.root / name).stat().st_size}
                      for name in sorted(release.expected() | {release.source_archive()})]
@@ -271,6 +275,57 @@ class ReleaseFileTests(CandidateFixture):
             self.validate()
 
 
+class HomebrewFormulaTests(CandidateFixture):
+    """003 T107: the formula installs this release's tarballs by their sha256."""
+
+    def formula(self):
+        return (self.root / release.HOMEBREW_FORMULA).read_text()
+
+    def replace_formula(self, text):
+        path = self.root / release.HOMEBREW_FORMULA
+        path.write_text(text)
+        for item in self.manifest['artifacts']:
+            if item['path'] == release.HOMEBREW_FORMULA:
+                item['sha256'], item['size'] = release.digest(path), path.stat().st_size
+        self.write_manifest()
+        (self.root / 'SHA256SUMS').write_text(release.checksums(self.manifest['artifacts']))
+        self.gates['candidate']['artifacts'] = copy.deepcopy(self.manifest['artifacts'])
+
+    def test_the_formula_names_each_tarball_with_its_sha256(self):
+        text = self.formula()
+        for target in build_packages.HOMEBREW_TARGETS:
+            name = Path(release.standalone(target)).name
+            self.assertIn('url "' + release_version.release_url(V) + '/' + name + '"\n      sha256 "'
+                          + release.digest(self.root / release.standalone(target)) + '"', text)
+        self.assertIn('version "' + V + '"', text)
+        self.assertNotRegex(text, r'@[A-Z0-9_]+@')
+        self.assertIn('cedegrid.rb', (self.root / 'SHA256SUMS').read_text())
+
+    def test_a_formula_with_another_sha256_is_refused(self):
+        linux = release.digest(self.root / release.standalone('linux-x64-gnu'))
+        self.replace_formula(self.formula().replace(linux, '0' * 64))
+        with self.assertRaisesRegex(ValueError, 'Homebrew formula does not install'):
+            self.validate()
+
+    def test_the_formula_needs_every_macos_and_linux_tarball(self):
+        digests = {target: '0' * 64 for target in build_packages.HOMEBREW_TARGETS}
+        del digests['darwin-x64']
+        with self.assertRaisesRegex(RuntimeError, 'needs the darwin-x64 tarball'):
+            build_packages.homebrew_formula(V, digests)
+
+    def test_a_template_value_nothing_writes_is_refused(self):
+        digests = {target: '0' * 64 for target in build_packages.HOMEBREW_TARGETS}
+        template = self.base / 'template.rb'
+        template.write_text((REPOSITORY / 'packaging/homebrew/cedegrid.rb').read_text() + '# @SHA256_WIN32_X64@\n')
+        with patch.object(build_packages, 'HOMEBREW_TEMPLATE', template):
+            with self.assertRaisesRegex(RuntimeError, 'values nothing writes'):
+                build_packages.homebrew_formula(V, digests)
+
+    def test_install_sh_downloads_from_the_same_release_address(self):
+        script = (REPOSITORY / 'tools/install.sh').read_text()
+        self.assertIn('base=${CEDEGRID_RELEASE_URL:-' + release_version.release_url('$version') + '}', script)
+
+
 class ReleaseVersionTests(unittest.TestCase):
     def root(self, cargo, python, npm):
         directory = tempfile.TemporaryDirectory()
@@ -337,6 +392,19 @@ class WorkflowTests(unittest.TestCase):
                               'twine', 'NPM_TOKEN', 'NODE_AUTH_TOKEN'):
                 with self.subTest(workflow=path.name, forbidden=forbidden):
                     self.assertFalse(forbidden in source, forbidden + ' in ' + path.name)
+
+    def test_crates_io_publishes_only_when_asked(self):
+        # 003 T107: the second channel runs only on the owner's release go, after the release.
+        source = (REPOSITORY / '.github/workflows/release.yml').read_text()
+        self.assertRegex(source, r'publish_crate:\n(?:\s+\w+: .*\n)*?\s+default: false\n')
+        steps = source.split('\n      - ')
+        crate = [step for step in steps if 'cargo +' in step and ' publish' in step]
+        self.assertEqual(len(crate), 1)
+        self.assertIn('if: inputs.publish && inputs.publish_crate', crate[0])
+        self.assertIn('publish --locked', crate[0])
+        release = [index for index, step in enumerate(steps) if "'gh','release','create'" in step]
+        self.assertEqual(len(release), 1)
+        self.assertGreater(steps.index(crate[0]), release[0])
 
     def test_release_workflows_take_the_version_from_cargo_toml(self):
         for name in ('release.yml', 'release-candidate.yml'):

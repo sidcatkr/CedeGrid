@@ -41,7 +41,15 @@ cedegrid run python3 train.py
 Other ways to install the same version:
 
 - **Homebrew:** each release carries `cedegrid.rb`, a formula that installs the release tarball
-  by its sha256: `brew install --formula ./cedegrid.rb`.
+  for your Mac or Linux machine by its sha256. Homebrew installs formulae only from a tap, so put
+  it in a local one:
+
+  ```sh
+  brew tap-new --no-git local/cedegrid
+  curl -fsSLo "$(brew --repository local/cedegrid)/Formula/cedegrid.rb" \
+    https://github.com/sidcatkr/CedeGrid/releases/download/v<version>/cedegrid.rb
+  brew install local/cedegrid/cedegrid
+  ```
 - **Cargo:** `cargo install --locked cedegrid` builds it from source with Rust 1.88 or later and
   a C compiler.
 - **Release files:** each release has a tarball per platform; check it against `SHA256SUMS`

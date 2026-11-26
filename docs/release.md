@@ -25,6 +25,7 @@ together and run `cargo check` so Cargo.lock follows. The release's gates file i
 | File | What it holds |
 | --- | --- |
 | `install.sh` | The user-level installer, with the release version written in |
+| `cedegrid.rb` | The Homebrew formula, with each macOS and Linux tarball's sha256 written in |
 | `cedegrid-VERSION-linux-x64-gnu.tar.gz`, `cedegrid-VERSION-linux-arm64-gnu.tar.gz` | The CLI for Linux, glibc 2.35 and kernel 5.15 or newer |
 | `cedegrid-VERSION-darwin-arm64.tar.gz`, `cedegrid-VERSION-darwin-x64.tar.gz` | The CLI for macOS 14 or newer |
 | `cedegrid-VERSION-win32-x64.zip` | The Windows client, which refuses to run work |
@@ -57,8 +58,10 @@ LLVM. Windows cross builds may use cargo-xwin with an isolated SDK/CRT cache. Na
 on the minimum OS is still required after cross compilation.
 
 `tools/build_packages.py --out NEW_DIRECTORY --binary TARGET=PATH ...` builds the wheel and
-sdist, the TypeScript SDK tarball, one standalone archive per target and `install.sh` with the
-version written in. It refuses an SDK tarball that declares a command, an optional native
+sdist, the TypeScript SDK tarball, one standalone archive per target, `install.sh` with the
+version written in, and `cedegrid.rb` from [the formula template](../packaging/homebrew/cedegrid.rb)
+once all four macOS and Linux archives exist; `tools/release_manifest.py` checks that the formula
+names exactly those archives with their sha256. It refuses an SDK tarball that declares a command, an optional native
 package or an install hook, verifies embedded binary bytes, and scans extracted archive members,
 including printable native strings, for accidental private data. The candidate job then builds
 the System mode Debian packages, `cedegrid` and `cedegrid-system` for amd64 and arm64, with
@@ -105,6 +108,12 @@ repository's release environment, it attests the files and creates the GitHub Re
 registry credentials, and stops without overwriting anything when the release already exists.
 The default dispatch verifies only. Attestations follow the
 [official provenance guidance](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations).
+
+Two second channels install the same version. Homebrew takes `cedegrid.rb` from the release;
+Homebrew installs formulae only from a tap, so the README shows a local tap until there is a
+published one. crates.io gets this commit's crate for `cargo install --locked cedegrid` when the
+`publish_crate` input is also set, after the GitHub Release exists; it needs the
+`CARGO_REGISTRY_TOKEN` secret in the release environment and the crate name on crates.io.
 
 ## Migration and retained limits
 

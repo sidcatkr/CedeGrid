@@ -2,7 +2,8 @@
 """Build immutable release file candidates; never upload anything.
 
 The candidate holds the SDK files (a Python wheel and sdist, a TypeScript SDK tarball), one
-standalone archive per native target, and install.sh with the release version written in. Native
+standalone archive per native target, install.sh with the release version written in, and the
+Homebrew formula cedegrid.rb with each macOS and Linux tarball's sha256 written in. Native
 input files must already be built and signed as intended; this tool copies those bytes unchanged.
 It records missing targets and leaves platform qualification NOT_RUN; successful packaging is not
 platform or release acceptance.
@@ -31,6 +32,9 @@ TARGETS = {
 }
 INSTALL_SCRIPT = ROOT / 'tools' / 'install.sh'
 VERSION_PLACEHOLDER = '@VERSION@'
+HOMEBREW_TEMPLATE = ROOT / 'packaging' / 'homebrew' / 'cedegrid.rb'
+# The targets the Homebrew formula installs: macOS and Linux, each by its tarball's sha256.
+HOMEBREW_TARGETS = ('darwin-arm64', 'darwin-x64', 'linux-arm64-gnu', 'linux-x64-gnu')
 
 def run(args, cwd=ROOT):
     subprocess.run([str(arg) for arg in args], cwd=cwd, check=True)
@@ -58,7 +62,7 @@ def native_notices(cargo):
     return ''.join(lines)
 
 def scan_archive(path):
-    if path.suffix=='.sh':members=[(path.name,path.read_bytes())]
+    if path.suffix in ('.sh','.rb'):members=[(path.name,path.read_bytes())]
     elif path.suffix=='.whl' or path.suffix=='.zip':
         with zipfile.ZipFile(path) as archive:members=[(item.filename,archive.read(item)) for item in archive.infolist() if not item.is_dir()]
     else:
@@ -104,6 +108,23 @@ def install_script(version):
     if text.count(VERSION_PLACEHOLDER) != 1:
         raise RuntimeError('install.sh must hold its version placeholder exactly once')
     return text.replace(VERSION_PLACEHOLDER, version)
+
+def homebrew_formula(version, digests):
+    """The formula with the release URL, the version and each tarball's sha256 written in."""
+    text = HOMEBREW_TEMPLATE.read_text(encoding='utf-8')
+    values = {'@RELEASE_URL@': release_version.release_url(version), VERSION_PLACEHOLDER: version}
+    for target in HOMEBREW_TARGETS:
+        if not re.fullmatch(r'[0-9a-f]{64}', digests.get(target, '')):
+            raise RuntimeError(f'the Homebrew formula needs the {target} tarball')
+        values['@SHA256_' + target.upper().replace('-', '_') + '@'] = digests[target]
+    for placeholder, value in values.items():
+        if placeholder not in text:
+            raise RuntimeError(f'the Homebrew template lacks {placeholder}')
+        text = text.replace(placeholder, value)
+    left = re.findall(r'@[A-Z0-9_]+@', text)
+    if left:
+        raise RuntimeError(f'the Homebrew template has values nothing writes: {sorted(set(left))}')
+    return text
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
@@ -174,8 +195,16 @@ def main():
     for target in TARGETS:
         if (out/'standalone'/standalone_name(version,target)).exists() and target not in binaries:
             raise RuntimeError('resume must include every previously frozen native target')
+    if all(target in binaries for target in HOMEBREW_TARGETS):
+        formula=homebrew_formula(version,{target:digest(out/'standalone'/standalone_name(version,target)) for target in HOMEBREW_TARGETS})
+        destination=out/'homebrew'/'cedegrid.rb'
+        if destination.exists():
+            if destination.read_text(encoding='utf-8')!=formula:raise RuntimeError('cedegrid.rb differs from the immutable existing candidate')
+        else:
+            destination.parent.mkdir(exist_ok=True)
+            destination.write_text(formula,encoding='utf-8')
     artifacts=[]
-    for directory in ('install','npm','pypi','standalone'):
+    for directory in ('homebrew','install','npm','pypi','standalone'):
         for path in sorted((out/directory).rglob('*')):
             if path.is_file():artifacts.append({'path':path.relative_to(out).as_posix(),'sha256':digest(path),'size':path.stat().st_size,'scan':scan_archive(path)})
     record={'schema_version':1,'version':version,'publication':'NOT_RUN','platform_qualification':'NOT_RUN','missing_native_targets':sorted(set(TARGETS)-set(binaries)),'native_inputs':{target:{'sha256':digest(binary),'size':binary.stat().st_size} for target,binary in binaries.items()},'artifacts':artifacts}

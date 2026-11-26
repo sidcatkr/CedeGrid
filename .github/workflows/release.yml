@@ -13,6 +13,11 @@ on:
         required: true
         default: false
         type: boolean
+      publish_crate:
+        description: After the GitHub Release, publish this commit's crate to crates.io (needs the CARGO_REGISTRY_TOKEN secret)
+        required: true
+        default: false
+        type: boolean
 permissions:
   contents: read
 concurrency:
@@ -81,6 +86,7 @@ jobs:
         with:
           subject-path: |
             candidate/install/install.sh
+            candidate/homebrew/cedegrid.rb
             candidate/standalone/*
             candidate/deb/*.deb
             candidate/npm/*.tgz
@@ -110,3 +116,13 @@ jobs:
               raise SystemExit('Release already exists; compare its asset hashes before an explicit retry. No assets are overwritten.')
           subprocess.run(['gh','release','create',tag,'--target',os.environ['GITHUB_SHA'],'--title','CedeGrid '+version,'--notes-file','docs/release.md',*artifacts,str(root/'SHA256SUMS')],check=True)
           PY
+      # The second channel for `cargo install --locked cedegrid` (003 T107). It packages this
+      # verified commit's source; the release files above are untouched.
+      - name: Publish the crate to crates.io
+        if: inputs.publish && inputs.publish_crate
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          test -n "$CARGO_REGISTRY_TOKEN" || { echo 'CARGO_REGISTRY_TOKEN is not set for the release environment' >&2; exit 1; }
+          rustup toolchain install 1.98.1 --profile minimal
+          cargo +1.98.1 publish --locked
