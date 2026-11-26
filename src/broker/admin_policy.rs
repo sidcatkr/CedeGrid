@@ -23,6 +23,30 @@ const MAX_POLICY_BYTES: u64 = 64 * 1024;
 /// The first ordinary user ID when `/etc/login.defs` gives none.
 pub const DEFAULT_UID_MIN: u32 = 1000;
 
+/// The last ordinary user ID when `/etc/login.defs` gives none, as 001's `contention.uid_max`.
+pub const DEFAULT_UID_MAX: u32 = 60000;
+
+/// The host's ordinary user IDs, `UID_MIN` to `UID_MAX` in `/etc/login.defs`. Every other user ID
+/// is a system account (001 FR-059).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HostUsers {
+    pub uid_min: u32,
+    pub uid_max: u32,
+}
+
+impl HostUsers {
+    /// The range when `/etc/login.defs` sets neither bound.
+    pub const DEFAULTS: HostUsers = HostUsers {
+        uid_min: DEFAULT_UID_MIN,
+        uid_max: DEFAULT_UID_MAX,
+    };
+
+    /// Whether `uid` is an ordinary user; nothing is when the range is empty.
+    pub fn contains(&self, uid: u32) -> bool {
+        (self.uid_min..=self.uid_max).contains(&uid)
+    }
+}
+
 const DEFAULT_TASKS_PER_USER: u32 = 64;
 const DEFAULT_TASKS_MAX: u32 = 4096;
 const DEFAULT_PRINCIPAL_MIN_PERCENT: u8 = 1;
@@ -68,6 +92,7 @@ struct UnitsSection {
 #[serde(default, deny_unknown_fields)]
 struct PrincipalsSection {
     uid_min: Option<u32>,
+    uid_max: Option<u32>,
     principal_min_percent: Option<u8>,
 }
 
@@ -139,7 +164,9 @@ pub struct AdminPolicy {
     pub processes: Setting<Option<u64>>,
     /// `LimitMEMLOCK=` in MiB; `None` keeps systemd's default.
     pub locked_memory_mib: Setting<Option<u64>>,
+    /// The memory shares' users run from `uid_min` to `uid_max` (001 FR-059).
     pub uid_min: Setting<u32>,
+    pub uid_max: Setting<u32>,
     pub principal_min_percent: Setting<u8>,
     /// Whether the units open a PAM session (N3); `none` by default.
     pub pam_session: Setting<PamSession>,
@@ -148,19 +175,20 @@ pub struct AdminPolicy {
 }
 
 impl AdminPolicy {
-    /// The policy without a file. `uid_min` is the host's first ordinary user ID.
-    pub fn defaults(uid_min: u32) -> Result<Self> {
-        Self::from_file(PolicyFile::default(), uid_min)
+    /// The policy without a file. `host` gives the defaults for `principals.uid_min` and `uid_max`.
+    pub fn defaults(host: HostUsers) -> Result<Self> {
+        Self::from_file(PolicyFile::default(), host)
     }
 
-    /// Parses a policy file's text. `host_uid_min` is the default for `principals.uid_min`.
-    pub fn parse(text: &str, host_uid_min: u32) -> Result<Self> {
+    /// Parses a policy file's text. `host` gives the defaults for `principals.uid_min` and
+    /// `uid_max`.
+    pub fn parse(text: &str, host: HostUsers) -> Result<Self> {
         let file: PolicyFile =
             toml::from_str(text).context("the administrator policy could not be read")?;
-        Self::from_file(file, host_uid_min)
+        Self::from_file(file, host)
     }
 
-    fn from_file(file: PolicyFile, host_uid_min: u32) -> Result<Self> {
+    fn from_file(file: PolicyFile, host: HostUsers) -> Result<Self> {
         let policy_version = file.policy_version.unwrap_or(POLICY_VERSION);
         ensure!(
             policy_version == POLICY_VERSION,
@@ -203,8 +231,13 @@ impl AdminPolicy {
             value: file.limits.locked_memory_mib.filter(|&value| value != 0),
             source: source_of(file.limits.locked_memory_mib.is_some()),
         };
-        let uid_min = Setting::pick(file.principals.uid_min, host_uid_min);
+        let uid_min = Setting::pick(file.principals.uid_min, host.uid_min);
         ensure!(uid_min.value >= 1, "principals.uid_min must be at least 1");
+        let uid_max = Setting::pick(file.principals.uid_max, host.uid_max);
+        ensure!(
+            uid_max.value >= uid_min.value,
+            "principals.uid_max must be at least principals.uid_min"
+        );
         let principal_min_percent = Setting::pick(
             file.principals.principal_min_percent,
             DEFAULT_PRINCIPAL_MIN_PERCENT,
@@ -245,6 +278,7 @@ impl AdminPolicy {
             processes,
             locked_memory_mib,
             uid_min,
+            uid_max,
             principal_min_percent,
             pam_session,
             ordinary_slice: Setting::pick(file.units.ordinary_slice, SliceChoice::Auto),
@@ -323,6 +357,11 @@ impl AdminPolicy {
                 self.uid_min.source,
             ),
             (
+                "principals.uid_max",
+                self.uid_max.value.to_string(),
+                self.uid_max.source,
+            ),
+            (
                 "principals.principal_min_percent",
                 self.principal_min_percent.value.to_string(),
                 self.principal_min_percent.source,
@@ -351,6 +390,15 @@ fn source_of(in_file: bool) -> Source {
 
 /// `UID_MIN` from the text of `/etc/login.defs`, if it sets one.
 pub fn uid_min_from_login_defs(text: &str) -> Option<u32> {
+    login_defs_number(text, "UID_MIN")
+}
+
+/// `UID_MAX` from the text of `/etc/login.defs`, if it sets one.
+pub fn uid_max_from_login_defs(text: &str) -> Option<u32> {
+    login_defs_number(text, "UID_MAX")
+}
+
+fn login_defs_number(text: &str, key: &str) -> Option<u32> {
     // The last setting wins, as in login.defs readers.
     text.lines()
         .rev()
@@ -358,32 +406,32 @@ pub fn uid_min_from_login_defs(text: &str) -> Option<u32> {
         .filter(|line| !line.starts_with('#'))
         .filter_map(|line| {
             let mut words = line.split_whitespace();
-            (words.next() == Some("UID_MIN"))
-                .then(|| words.next())
-                .flatten()
+            (words.next() == Some(key)).then(|| words.next()).flatten()
         })
         .find_map(|value| value.parse::<u32>().ok())
 }
 
-/// The host's first ordinary user ID: `UID_MIN` from `/etc/login.defs`, else 1000.
-pub fn host_uid_min() -> u32 {
-    std::fs::read_to_string("/etc/login.defs")
-        .ok()
-        .and_then(|text| uid_min_from_login_defs(&text))
-        .unwrap_or(DEFAULT_UID_MIN)
+/// The host's ordinary user IDs: `UID_MIN` and `UID_MAX` from `/etc/login.defs`, else 1000 and
+/// 60000.
+pub fn host_users() -> HostUsers {
+    let text = std::fs::read_to_string("/etc/login.defs").unwrap_or_default();
+    HostUsers {
+        uid_min: uid_min_from_login_defs(&text).unwrap_or(HostUsers::DEFAULTS.uid_min),
+        uid_max: uid_max_from_login_defs(&text).unwrap_or(HostUsers::DEFAULTS.uid_max),
+    }
 }
 
 /// Loads the policy from `POLICY_DIR`, which root must own.
 #[cfg(unix)]
 pub fn load() -> Result<AdminPolicy> {
-    load_from(std::path::Path::new(POLICY_DIR), 0, host_uid_min())
+    load_from(std::path::Path::new(POLICY_DIR), 0, host_users())
 }
 
 /// Loads the policy from `dir`, which `owner` must own and only `owner` may write.
 ///
 /// The broker passes root's user ID; tests pass their own to reach the same checks.
 #[cfg(unix)]
-pub fn load_from(dir: &std::path::Path, owner: u32, host_uid_min: u32) -> Result<AdminPolicy> {
+pub fn load_from(dir: &std::path::Path, owner: u32, host: HostUsers) -> Result<AdminPolicy> {
     use std::io::Read;
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
@@ -404,7 +452,7 @@ pub fn load_from(dir: &std::path::Path, owner: u32, host_uid_min: u32) -> Result
     {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return AdminPolicy::defaults(host_uid_min);
+            return AdminPolicy::defaults(host);
         }
         Err(error) => {
             return Err(error).with_context(|| {
@@ -432,7 +480,7 @@ pub fn load_from(dir: &std::path::Path, owner: u32, host_uid_min: u32) -> Result
         "the policy file {} is larger than {MAX_POLICY_BYTES} bytes",
         path.display()
     );
-    AdminPolicy::parse(&text, host_uid_min)
+    AdminPolicy::parse(&text, host)
         .with_context(|| format!("the policy file {} was refused", path.display()))
 }
 

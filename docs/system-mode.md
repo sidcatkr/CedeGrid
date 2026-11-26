@@ -71,6 +71,7 @@ tasks_max = 4096
 
 [principals]
 uid_min = 1000
+uid_max = 60000
 principal_min_percent = 1
 
 [units]
@@ -89,6 +90,7 @@ ordinary_slice = "auto"
 | `limits.tasks_max` | 4096 | `TasksMax=` on each unit |
 | `limits.open_files`, `processes`, `locked_memory_mib` | systemd defaults | `LimitNOFILE=`, `LimitNPROC=`, `LimitMEMLOCK=` when `pam_session = "none"` |
 | `principals.uid_min` | `UID_MIN` from `/etc/login.defs`, else 1000 | lowest user ID counted as a user for memory shares |
+| `principals.uid_max` | `UID_MAX` from `/etc/login.defs`, else 60000 | highest user ID counted as a user for memory shares; higher ones, such as a display manager's greeter account or `nobody`, are system accounts |
 | `principals.principal_min_percent` | 1 | memory share of the host above which a user counts |
 | `units.pam_session` | `none` | `none`: no PAM session; `cedegrid`: `PAMName=cedegrid`, a service you provide with only `pam_limits`; `login`: the host's `login` stack |
 | `units.ordinary_slice` | `auto` | `auto`: `user-<uid>.slice` when `user.slice` passes the cpu controller to account slices, else `cedegrid.slice`; `user` or `cedegrid` forces one |

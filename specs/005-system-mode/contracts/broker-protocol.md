@@ -50,7 +50,7 @@ Each `message` is one sentence that says what to do.
 |---|---|
 | `protocol_mismatch` | `protocol` differs; the message names which side to upgrade |
 | `not_a_member` | the caller is not in the `cedegrid` group now |
-| `refused_account` | user ID 0, or below `UID_MIN` |
+| `refused_account` | user ID 0, or below `UID_MIN` or above `UID_MAX` |
 | `request_too_large`, `request_timeout`, `malformed` | framing |
 | `unknown_field`, `identity_in_request`, `unknown_kind` | content |
 | `mode_not_allowed`, `task_limit` | administrator policy |

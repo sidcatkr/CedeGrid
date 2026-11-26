@@ -3,7 +3,7 @@
 //! Request parsing (T006), the administrator policy (T007), the unit builder (T008) and the score
 //! function (T042). The container fixtures that need root and systemd come later and are opt-in.
 
-use cedegrid::broker::admin_policy::{self, AdminPolicy, Source};
+use cedegrid::broker::admin_policy::{self, AdminPolicy, HostUsers, Source};
 use cedegrid::broker::request::{
     JobId, MAX_REQUEST_BYTES, RaiseLevel, RefusalCode, Reply, Request, parse_frame,
 };
@@ -366,11 +366,12 @@ fn replies_are_one_json_line() {
 
 #[test]
 fn policy_defaults() {
-    let policy = AdminPolicy::defaults(1000).unwrap();
+    let policy = AdminPolicy::defaults(HostUsers::DEFAULTS).unwrap();
     assert_eq!(policy.policy_version, 1);
     assert_eq!(policy.tasks_per_user.value, 64);
     assert_eq!(policy.tasks_max.value, 4096);
     assert_eq!(policy.uid_min.value, 1000);
+    assert_eq!(policy.uid_max.value, 60000);
     assert_eq!(policy.principal_min_percent.value, 1);
     assert_eq!(policy.open_files.value, None);
     assert_eq!(policy.processes.value, None);
@@ -385,17 +386,26 @@ fn policy_defaults() {
             .iter()
             .all(|(_, _, source)| *source == Source::Default)
     );
-    // The host's UID_MIN is the default for principals.uid_min.
-    assert_eq!(AdminPolicy::defaults(500).unwrap().uid_min.value, 500);
-    assert_eq!(AdminPolicy::parse("", 1000).unwrap(), policy);
+    // The host's UID_MIN and UID_MAX are the defaults for principals.uid_min and uid_max.
+    let host = AdminPolicy::defaults(HostUsers {
+        uid_min: 500,
+        uid_max: 59999,
+    })
+    .unwrap();
+    assert_eq!((host.uid_min.value, host.uid_max.value), (500, 59999));
+    assert_eq!(AdminPolicy::parse("", HostUsers::DEFAULTS).unwrap(), policy);
 }
 
 /// 006 FR-016: the raise's weight is the administrator's, 400 by default, between 101 and 10000.
 #[test]
 fn the_raise_weight_is_the_administrators_and_bounded() {
-    let policy = AdminPolicy::parse("", 1000).unwrap();
+    let policy = AdminPolicy::parse("", HostUsers::DEFAULTS).unwrap();
     assert_eq!(policy.unprotected_cpu_weight.value, 400);
-    let policy = AdminPolicy::parse("[modes]\nunprotected_cpu_weight = 2000\n", 1000).unwrap();
+    let policy = AdminPolicy::parse(
+        "[modes]\nunprotected_cpu_weight = 2000\n",
+        HostUsers::DEFAULTS,
+    )
+    .unwrap();
     assert_eq!(policy.unprotected_cpu_weight.value, 2000);
     assert!(
         policy
@@ -407,7 +417,7 @@ fn the_raise_weight_is_the_administrators_and_bounded() {
         assert!(
             AdminPolicy::parse(
                 &format!("[modes]\nunprotected_cpu_weight = {weight}\n"),
-                1000
+                HostUsers::DEFAULTS
             )
             .is_err(),
             "{weight}"
@@ -423,12 +433,12 @@ fn the_host_offers_priority_over_plain_users_where_the_policy_permits_it() {
     assert_eq!(
         plain_priority_host(true, || AdminPolicy::parse(
             "[modes]\nplain_priority = true\nplain_priority_cpu_weight = 300\n",
-            1000
+            HostUsers::DEFAULTS
         )),
         PlainPriorityHost::Permitted(300)
     );
     assert_eq!(
-        plain_priority_host(true, || AdminPolicy::parse("", 1000)),
+        plain_priority_host(true, || AdminPolicy::parse("", HostUsers::DEFAULTS)),
         PlainPriorityHost::NotPermitted
     );
     assert_eq!(
@@ -445,12 +455,12 @@ fn the_host_offers_priority_over_plain_users_where_the_policy_permits_it() {
 /// weight is the administrator's, 200 by default, between 101 and 10000.
 #[test]
 fn priority_over_plain_users_is_the_administrators_to_permit() {
-    let policy = AdminPolicy::parse("", 1000).unwrap();
+    let policy = AdminPolicy::parse("", HostUsers::DEFAULTS).unwrap();
     assert!(!policy.plain_priority.value);
     assert_eq!(policy.plain_priority_cpu_weight.value, 200);
     let policy = AdminPolicy::parse(
         "[modes]\nplain_priority = true\nplain_priority_cpu_weight = 300\n",
-        1000,
+        HostUsers::DEFAULTS,
     )
     .unwrap();
     assert!(policy.plain_priority.value);
@@ -462,7 +472,7 @@ fn priority_over_plain_users_is_the_administrators_to_permit() {
         assert!(
             AdminPolicy::parse(
                 &format!("[modes]\nplain_priority_cpu_weight = {weight}\n"),
-                1000
+                HostUsers::DEFAULTS
             )
             .is_err(),
             "{weight}"
@@ -492,13 +502,14 @@ locked_memory_mib = 64
 
 [principals]
 uid_min = 2000
+uid_max = 50000
 principal_min_percent = 5
 
 [units]
 pam_session = "cedegrid"
 ordinary_slice = "cedegrid"
 "#,
-        1000,
+        HostUsers::DEFAULTS,
     )
     .unwrap();
     assert!(policy.allows(ModeName::Aggressive));
@@ -512,6 +523,7 @@ ordinary_slice = "cedegrid"
     assert_eq!(policy.processes.source, Source::File);
     assert_eq!(policy.locked_memory_mib.value, Some(64));
     assert_eq!(policy.uid_min.value, 2000);
+    assert_eq!(policy.uid_max.value, 50000);
     assert_eq!(policy.principal_min_percent.value, 5);
     assert!(
         policy
@@ -535,19 +547,33 @@ fn policy_refusals() {
         "[limits]\ntasks_per_user = -1",
         "[limits]\nnice = 5",
         "[principals]\nuid_min = 0",
+        "[principals]\nuid_min = 2000\nuid_max = 1999",
+        "[principals]\nuid_max = 999",
         "[principals]\nprincipal_min_percent = 0",
         "[principals]\nprincipal_min_percent = 51",
         "[extra]\nx = 1",
         "not toml at all [",
     ] {
-        assert!(AdminPolicy::parse(text, 1000).is_err(), "{text}");
+        assert!(
+            AdminPolicy::parse(text, HostUsers::DEFAULTS).is_err(),
+            "{text}"
+        );
     }
 }
 
 #[test]
-fn uid_min_comes_from_login_defs() {
+fn the_user_id_range_comes_from_login_defs() {
     let text = "# UID_MIN 5\nMAIL_DIR /var/mail\nUID_MIN\t\t\t 1000\nUID_MAX 60000\n";
     assert_eq!(admin_policy::uid_min_from_login_defs(text), Some(1000));
+    assert_eq!(admin_policy::uid_max_from_login_defs(text), Some(60000));
+    assert_eq!(
+        admin_policy::uid_max_from_login_defs("UID_MIN 1000\n#UID_MAX 5\n"),
+        None
+    );
+    assert_eq!(
+        admin_policy::uid_max_from_login_defs("UID_MAX 60000\nUID_MAX 59000\n"),
+        Some(59000)
+    );
     assert_eq!(
         admin_policy::uid_min_from_login_defs("UID_MAX 60000\n"),
         None
@@ -600,15 +626,15 @@ mod policy_files {
     #[test]
     fn missing_file_gives_defaults() {
         let dir = Dir::new("missing");
-        let policy = admin_policy::load_from(&dir.0, me(), 1000).unwrap();
-        assert_eq!(policy, AdminPolicy::defaults(1000).unwrap());
+        let policy = admin_policy::load_from(&dir.0, me(), HostUsers::DEFAULTS).unwrap();
+        assert_eq!(policy, AdminPolicy::defaults(HostUsers::DEFAULTS).unwrap());
     }
 
     #[test]
     fn owned_and_private_file_loads() {
         let dir = Dir::new("loads");
         write(&dir, "[limits]\ntasks_per_user = 3\n", 0o644);
-        let policy = admin_policy::load_from(&dir.0, me(), 1000).unwrap();
+        let policy = admin_policy::load_from(&dir.0, me(), HostUsers::DEFAULTS).unwrap();
         assert_eq!(policy.tasks_per_user.value, 3);
     }
 
@@ -619,7 +645,7 @@ mod policy_files {
         }
         let dir = Dir::new("owner");
         // Root must own the directory; the test's own directory is not root's.
-        let error = admin_policy::load_from(&dir.0, 0, 1000).unwrap_err();
+        let error = admin_policy::load_from(&dir.0, 0, HostUsers::DEFAULTS).unwrap_err();
         assert!(format!("{error:#}").contains("must be owned by user ID 0"));
     }
 
@@ -628,7 +654,7 @@ mod policy_files {
         let dir = Dir::new("writable");
         for mode in [0o664, 0o646, 0o666] {
             write(&dir, "", mode);
-            let error = admin_policy::load_from(&dir.0, me(), 1000).unwrap_err();
+            let error = admin_policy::load_from(&dir.0, me(), HostUsers::DEFAULTS).unwrap_err();
             assert!(
                 format!("{error:#}").contains("must not be writable"),
                 "{mode:o}"
@@ -636,7 +662,7 @@ mod policy_files {
         }
         write(&dir, "", 0o644);
         std::fs::set_permissions(&dir.0, std::fs::Permissions::from_mode(0o775)).unwrap();
-        let error = admin_policy::load_from(&dir.0, me(), 1000).unwrap_err();
+        let error = admin_policy::load_from(&dir.0, me(), HostUsers::DEFAULTS).unwrap_err();
         assert!(format!("{error:#}").contains("must not be writable"));
     }
 
@@ -646,21 +672,21 @@ mod policy_files {
         let target = dir.0.join("elsewhere.toml");
         std::fs::write(&target, "").unwrap();
         std::os::unix::fs::symlink(&target, dir.0.join(admin_policy::POLICY_FILE)).unwrap();
-        assert!(admin_policy::load_from(&dir.0, me(), 1000).is_err());
+        assert!(admin_policy::load_from(&dir.0, me(), HostUsers::DEFAULTS).is_err());
     }
 
     #[test]
     fn non_regular_policy_is_refused() {
         let dir = Dir::new("fifo");
         std::fs::create_dir(dir.0.join(admin_policy::POLICY_FILE)).unwrap();
-        assert!(admin_policy::load_from(&dir.0, me(), 1000).is_err());
+        assert!(admin_policy::load_from(&dir.0, me(), HostUsers::DEFAULTS).is_err());
     }
 
     #[test]
     fn oversized_policy_is_refused() {
         let dir = Dir::new("big");
         write(&dir, &format!("# {}\n", "x".repeat(70 * 1024)), 0o644);
-        let error = admin_policy::load_from(&dir.0, me(), 1000).unwrap_err();
+        let error = admin_policy::load_from(&dir.0, me(), HostUsers::DEFAULTS).unwrap_err();
         assert!(format!("{error:#}").contains("larger than"));
     }
 
@@ -668,7 +694,7 @@ mod policy_files {
     fn bad_policy_text_is_refused() {
         let dir = Dir::new("bad");
         write(&dir, "unknown = 1\n", 0o644);
-        assert!(admin_policy::load_from(&dir.0, me(), 1000).is_err());
+        assert!(admin_policy::load_from(&dir.0, me(), HostUsers::DEFAULTS).is_err());
     }
 }
 
@@ -695,7 +721,7 @@ fn property<'a>(spec: &'a units::UnitSpec, key: &str) -> Option<&'a str> {
 
 #[test]
 fn units_are_named_and_owned_by_the_caller() {
-    let policy = AdminPolicy::defaults(1000).unwrap();
+    let policy = AdminPolicy::defaults(HostUsers::DEFAULTS).unwrap();
     let place = placement(OrdinarySlice::UserSlice, PamSession::None);
     let ordinary = units::build(UnitKind::Ordinary, CALLER, &policy, place);
     let idle = units::build(UnitKind::Idle, CALLER, &policy, place);
@@ -734,7 +760,7 @@ fn units_are_named_and_owned_by_the_caller() {
 
 #[test]
 fn ordinary_slice_follows_n4_and_idle_never_moves() {
-    let policy = AdminPolicy::defaults(1000).unwrap();
+    let policy = AdminPolicy::defaults(HostUsers::DEFAULTS).unwrap();
     for (slice, expected) in [
         (OrdinarySlice::UserSlice, "user-1234.slice"),
         (OrdinarySlice::CedegridSlice, "cedegrid.slice"),
@@ -755,7 +781,7 @@ fn ordinary_slice_follows_n4_and_idle_never_moves() {
 fn pam_and_limits_follow_n3() {
     let policy = AdminPolicy::parse(
         "[limits]\ntasks_max = 100\nopen_files = 4096\nprocesses = 200\nlocked_memory_mib = 2\n",
-        1000,
+        HostUsers::DEFAULTS,
     )
     .unwrap();
     let none = units::build(
@@ -788,7 +814,7 @@ fn pam_and_limits_follow_n3() {
 
 #[test]
 fn builder_depends_only_on_caller_policy_and_placement() {
-    let policy = AdminPolicy::defaults(1000).unwrap();
+    let policy = AdminPolicy::defaults(HostUsers::DEFAULTS).unwrap();
     let place = placement(OrdinarySlice::UserSlice, PamSession::None);
     let first = units::build(UnitKind::Ordinary, CALLER, &policy, place);
     let second = units::build(UnitKind::Ordinary, CALLER, &policy, place);
@@ -807,7 +833,7 @@ fn builder_depends_only_on_caller_policy_and_placement() {
 
 #[test]
 fn systemd_run_arguments_are_fixed_and_shell_free() {
-    let policy = AdminPolicy::defaults(1000).unwrap();
+    let policy = AdminPolicy::defaults(HostUsers::DEFAULTS).unwrap();
     let spec = units::build(
         UnitKind::Ordinary,
         CALLER,
@@ -1468,7 +1494,7 @@ mod client {
 #[cfg(unix)]
 mod broker_service {
     use cedegrid::broker::ModeName;
-    use cedegrid::broker::admin_policy::AdminPolicy;
+    use cedegrid::broker::admin_policy::{AdminPolicy, HostUsers};
     use cedegrid::broker::peer::{Accounts, PeerCredentials, authorize};
     use cedegrid::broker::request::{MAX_REQUEST_BYTES, Refusal, RefusalCode, Reply, UnitStatus};
     use cedegrid::broker::server::{
@@ -1702,27 +1728,61 @@ mod broker_service {
     #[test]
     fn callers_are_checked_against_the_group_now() {
         let members = accounts(&[1234]);
-        assert_eq!(authorize(peer(1234), &members, 1000), Ok(CALLER));
         assert_eq!(
-            authorize(peer(1235), &members, 1000).unwrap_err().code,
+            authorize(peer(1234), &members, HostUsers::DEFAULTS),
+            Ok(CALLER)
+        );
+        assert_eq!(
+            authorize(peer(1235), &members, HostUsers::DEFAULTS)
+                .unwrap_err()
+                .code,
             RefusalCode::NotAMember
         );
         assert_eq!(
-            authorize(peer(0), &accounts(&[0]), 0).unwrap_err().code,
+            authorize(
+                peer(0),
+                &accounts(&[0]),
+                HostUsers {
+                    uid_min: 0,
+                    uid_max: 60000
+                }
+            )
+            .unwrap_err()
+            .code,
             RefusalCode::RefusedAccount
         );
         assert_eq!(
-            authorize(peer(999), &accounts(&[999]), 1000)
+            authorize(peer(999), &accounts(&[999]), HostUsers::DEFAULTS)
                 .unwrap_err()
                 .code,
             RefusalCode::RefusedAccount
         );
+        // Above UID_MAX is a system account too, such as a display manager's dynamic greeter
+        // account or `nobody` (001 FR-059).
+        assert_eq!(
+            authorize(peer(60000), &accounts(&[60000]), HostUsers::DEFAULTS),
+            Ok(Caller {
+                uid: 60000,
+                primary_gid: 60100
+            })
+        );
+        for uid in [60001, 64321, 65534] {
+            assert_eq!(
+                authorize(peer(uid), &accounts(&[uid]), HostUsers::DEFAULTS)
+                    .unwrap_err()
+                    .code,
+                RefusalCode::RefusedAccount,
+                "{uid}"
+            );
+        }
         let broken = FakeAccounts {
             members: [1234].into(),
             broken: true,
         };
         assert_eq!(
-            authorize(peer(1234), &broken, 1000).unwrap_err().code,
+            authorize(peer(1234), &broken, HostUsers::DEFAULTS)
+                .unwrap_err()
+                .code,
             RefusalCode::NotAMember
         );
     }
@@ -1748,7 +1808,7 @@ mod broker_service {
     #[test]
     fn start_makes_both_units_once() {
         let systemd = FakeSystemd::default();
-        let policy = AdminPolicy::defaults(1000).unwrap();
+        let policy = AdminPolicy::defaults(HostUsers::DEFAULTS).unwrap();
         let units = start_units(&systemd, CALLER, &policy, PLACE).unwrap();
         assert_eq!(units.len(), 2);
         assert!(units.iter().all(|unit| unit.state == "active"));
@@ -1772,7 +1832,7 @@ mod broker_service {
             "cedegrid-u1234.service",
             ours(UnitKind::Ordinary, 1234, "failed"),
         );
-        let policy = AdminPolicy::defaults(1000).unwrap();
+        let policy = AdminPolicy::defaults(HostUsers::DEFAULTS).unwrap();
         start_units(&systemd, CALLER, &policy, PLACE).unwrap();
         let calls = systemd.calls();
         let reset = calls
@@ -1794,7 +1854,7 @@ mod broker_service {
             description: "An administrator's own unit".into(),
             ..UnitShow::default()
         };
-        let policy = AdminPolicy::defaults(1000).unwrap();
+        let policy = AdminPolicy::defaults(HostUsers::DEFAULTS).unwrap();
         for name in ["cedegrid-u1234.service", "cedegrid-idle-u1234.service"] {
             let systemd = FakeSystemd::default();
             systemd.put(name, foreign.clone());
@@ -1825,7 +1885,7 @@ mod broker_service {
     #[test]
     fn stop_and_status_reach_only_the_callers_units() {
         let systemd = FakeSystemd::default();
-        let policy = AdminPolicy::defaults(1000).unwrap();
+        let policy = AdminPolicy::defaults(HostUsers::DEFAULTS).unwrap();
         start_units(&systemd, CALLER, &policy, PLACE).unwrap();
         let other = Caller {
             uid: 2000,
@@ -1851,7 +1911,7 @@ mod broker_service {
             stop_leaves_failed: true,
             ..FakeSystemd::default()
         };
-        let policy = AdminPolicy::defaults(1000).unwrap();
+        let policy = AdminPolicy::defaults(HostUsers::DEFAULTS).unwrap();
         start_units(&systemd, CALLER, &policy, PLACE).unwrap();
         let stopped = stop_units(&systemd, CALLER).unwrap();
         assert!(stopped.iter().all(|unit| unit.state == "absent"));
@@ -1869,8 +1929,10 @@ mod broker_service {
         BrokerState {
             systemd: Box::new(systemd),
             accounts: Box::new(accounts(members)),
-            load_policy: Box::new(move || AdminPolicy::parse(policy.unwrap_or(""), 1000)),
-            host_uid_min: 1000,
+            load_policy: Box::new(move || {
+                AdminPolicy::parse(policy.unwrap_or(""), HostUsers::DEFAULTS)
+            }),
+            host_users: HostUsers::DEFAULTS,
             user_slice_splits_cpu: Box::new(|| true),
             cgroups: Box::new(MemCgroups::default()),
             processes: Box::new(NoProcesses),
@@ -2034,7 +2096,8 @@ mod broker_service {
         let mut broker = state(FakeSystemd::default(), &[1234], None);
         broker.systemd = Box::new(Shared(Arc::clone(&systemd)));
         let text = Arc::clone(&policy);
-        broker.load_policy = Box::new(move || AdminPolicy::parse(&text.lock().unwrap(), 1000));
+        broker.load_policy =
+            Box::new(move || AdminPolicy::parse(&text.lock().unwrap(), HostUsers::DEFAULTS));
         let raise = |level: RaiseLevel| {
             line(&format!(
                 r#"{{"protocol":1,"kind":"raise","on":true,"level":"{}"}}"#,
@@ -2117,7 +2180,7 @@ mod broker_service {
         broker.load_policy = Box::new(move || {
             AdminPolicy::parse(
                 &format!("[modes]\nunprotected = {}\n", key.lock().unwrap()),
-                1000,
+                HostUsers::DEFAULTS,
             )
         });
         let raise = line(r#"{"protocol":1,"kind":"raise","on":true}"#);
@@ -2426,7 +2489,7 @@ mod broker_service {
         let path = dir.join("b.sock");
         let listener = UnixListener::bind(&path).unwrap();
         let mut state = state(FakeSystemd::default(), &[me], None);
-        state.host_uid_min = 1;
+        state.host_users.uid_min = 1;
         let state = Arc::new(state);
         std::thread::spawn(move || serve(listener, state));
         let ask = |body: &str| -> Reply {
@@ -2457,7 +2520,10 @@ mod broker_service {
 fn pam_session_comes_from_the_policy() {
     use cedegrid::broker::units::PamSession;
     assert_eq!(
-        AdminPolicy::defaults(1000).unwrap().pam_session.value,
+        AdminPolicy::defaults(HostUsers::DEFAULTS)
+            .unwrap()
+            .pam_session
+            .value,
         PamSession::None
     );
     for (name, expected) in [
@@ -2465,18 +2531,27 @@ fn pam_session_comes_from_the_policy() {
         ("cedegrid", PamSession::CedegridLimits),
         ("login", PamSession::HostLogin),
     ] {
-        let policy =
-            AdminPolicy::parse(&format!("[units]\npam_session = \"{name}\"\n"), 1000).unwrap();
+        let policy = AdminPolicy::parse(
+            &format!("[units]\npam_session = \"{name}\"\n"),
+            HostUsers::DEFAULTS,
+        )
+        .unwrap();
         assert_eq!(policy.pam_session.value, expected);
         assert_eq!(policy.pam_session.source, Source::File);
     }
-    assert!(AdminPolicy::parse("[units]\npam_session = \"system-auth\"\n", 1000).is_err());
+    assert!(
+        AdminPolicy::parse(
+            "[units]\npam_session = \"system-auth\"\n",
+            HostUsers::DEFAULTS
+        )
+        .is_err()
+    );
 }
 
 #[test]
 fn ordinary_slice_choice_follows_n4() {
     use cedegrid::broker::units::{OrdinarySlice, SliceChoice};
-    let policy = AdminPolicy::defaults(1000).unwrap();
+    let policy = AdminPolicy::defaults(HostUsers::DEFAULTS).unwrap();
     assert_eq!(policy.ordinary_slice.value, SliceChoice::Auto);
     assert_eq!(SliceChoice::Auto.resolve(true), OrdinarySlice::UserSlice);
     assert_eq!(
@@ -2493,11 +2568,16 @@ fn ordinary_slice_choice_follows_n4() {
         ("user", SliceChoice::User),
         ("cedegrid", SliceChoice::Cedegrid),
     ] {
-        let policy =
-            AdminPolicy::parse(&format!("[units]\nordinary_slice = \"{name}\"\n"), 1000).unwrap();
+        let policy = AdminPolicy::parse(
+            &format!("[units]\nordinary_slice = \"{name}\"\n"),
+            HostUsers::DEFAULTS,
+        )
+        .unwrap();
         assert_eq!(policy.ordinary_slice.value, expected);
     }
-    assert!(AdminPolicy::parse("[units]\nordinary_slice = \"root\"\n", 1000).is_err());
+    assert!(
+        AdminPolicy::parse("[units]\nordinary_slice = \"root\"\n", HostUsers::DEFAULTS).is_err()
+    );
 }
 
 /// Without the system package, `cedegrid system` changes nothing and prints no notice (FR-013).
@@ -2569,33 +2649,40 @@ mod oom_pass {
     fn principals_join_after_the_window_and_leave_after_a_minute() {
         let mut principals = Principals::default();
         let start = Instant::now();
-        let busy = memory(&[(1000, Some(50)), (999, Some(500)), (1001, Some(0))]);
+        // 999 and 64321, a display manager's dynamic greeter account above UID_MAX, are system
+        // accounts, never principals however much they hold (001 FR-059).
+        let busy = memory(&[
+            (1000, Some(50)),
+            (999, Some(500)),
+            (64321, Some(500)),
+            (1001, Some(0)),
+        ]);
         // 1% of 1000 pages is 10 pages.
-        principals.update(start, &busy, 1000, 1000, 1);
+        principals.update(start, &busy, 1000, 1000..=60000, 1);
         assert!(principals.members().is_empty());
-        principals.update(start + PRINCIPAL_JOIN, &busy, 1000, 1000, 1);
+        principals.update(start + PRINCIPAL_JOIN, &busy, 1000, 1000..=60000, 1);
         assert_eq!(principals.members(), &BTreeSet::from([1000]));
         // Below the threshold: stays until the leave window ends.
         let idle = memory(&[(1000, Some(1)), (1001, Some(0))]);
         let t = start + PRINCIPAL_JOIN + Duration::from_secs(1);
-        principals.update(t, &idle, 1000, 1000, 1);
+        principals.update(t, &idle, 1000, 1000..=60000, 1);
         principals.update(
             t + PRINCIPAL_LEAVE - Duration::from_secs(1),
             &idle,
             1000,
-            1000,
+            1000..=60000,
             1,
         );
         assert!(principals.members().contains(&1000));
-        principals.update(t + PRINCIPAL_LEAVE, &idle, 1000, 1000, 1);
+        principals.update(t + PRINCIPAL_LEAVE, &idle, 1000, 1000..=60000, 1);
         assert!(principals.members().is_empty());
         // Unknown memory counts as at the threshold.
         let unknown = memory(&[(1002, None)]);
-        principals.update(t, &unknown, 1000, 1000, 1);
-        principals.update(t + PRINCIPAL_JOIN, &unknown, 1000, 1000, 1);
+        principals.update(t, &unknown, 1000, 1000..=60000, 1);
+        principals.update(t + PRINCIPAL_JOIN, &unknown, 1000, 1000..=60000, 1);
         assert!(principals.members().contains(&1002));
         // A user whose processes are all gone leaves at once.
-        principals.update(t + PRINCIPAL_JOIN, &memory(&[]), 1000, 1000, 1);
+        principals.update(t + PRINCIPAL_JOIN, &memory(&[]), 1000, 1000..=60000, 1);
         assert!(principals.members().is_empty());
     }
 
@@ -3055,7 +3142,7 @@ mod oom_loop {
                 &units,
                 &pids,
                 &access,
-                1000,
+                1000..=60000,
                 1,
                 Lowering::WhileAnotherOverShare,
                 OverShareMarking::YieldFirstAndNeutral,
@@ -3111,7 +3198,7 @@ mod oom_loop {
                 &units,
                 &|_: &ScoredUnit| vec![1],
                 &Refuse,
-                1000,
+                1000..=60000,
                 1,
                 Lowering::WhileAnotherOverShare,
                 OverShareMarking::YieldFirstAndNeutral,
@@ -3154,7 +3241,7 @@ mod oom_loop {
                 &units,
                 &pids,
                 &access,
-                1000,
+                1000..=60000,
                 1,
                 Lowering::WhileAnotherOverShare,
                 OverShareMarking::YieldFirstAndNeutral,
@@ -5110,12 +5197,12 @@ fn outside_a_unit_the_agent_keeps_its_own_oom_marks() {
 // T051, T054: the agent in a unit applies the administrator policy to each launch.
 
 mod policy_in_unit {
-    use cedegrid::broker::admin_policy::AdminPolicy;
+    use cedegrid::broker::admin_policy::{AdminPolicy, HostUsers};
     use cedegrid::contention::ContentionMode::{Neutral, Performance, YieldFirst};
     use cedegrid::system_mode::launch_refusal_with;
 
     fn policy(text: &str) -> anyhow::Result<AdminPolicy> {
-        AdminPolicy::parse(text, 1000)
+        AdminPolicy::parse(text, HostUsers::DEFAULTS)
     }
 
     #[test]

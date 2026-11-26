@@ -12,6 +12,7 @@ use super::score::{
 use super::units::UnitKind;
 use crate::contention::max_min_shares;
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::RangeInclusive;
 use std::time::{Duration, Instant};
 
 /// How long a user's memory must stay at or above the threshold to become a principal
@@ -58,9 +59,10 @@ pub fn memory_by_user(samples: &[ProcessSample]) -> UserMemoryMap {
     map
 }
 
-/// Principal membership over time (001 FR-059): user IDs at or above `uid_min` whose memory has
-/// stayed at or above `principal_min_percent` of capacity join after `PRINCIPAL_JOIN`, and leave
-/// after `PRINCIPAL_LEAVE` below it. Unknown memory counts as at the threshold (Principle III).
+/// Principal membership over time (001 FR-059): user IDs in `users`, `uid_min` to `uid_max`,
+/// whose memory has stayed at or above `principal_min_percent` of capacity join after
+/// `PRINCIPAL_JOIN`, and leave after `PRINCIPAL_LEAVE` below it. Unknown memory counts as at the
+/// threshold (Principle III).
 #[derive(Clone, Debug, Default)]
 pub struct Principals {
     above_since: BTreeMap<u32, Instant>,
@@ -78,13 +80,13 @@ impl Principals {
         now: Instant,
         memory: &UserMemoryMap,
         capacity_pages: u64,
-        uid_min: u32,
+        users: RangeInclusive<u32>,
         principal_min_percent: u8,
     ) -> &BTreeSet<u32> {
         let threshold = capacity_pages.saturating_mul(u64::from(principal_min_percent)) / 100;
         let mut seen = BTreeSet::new();
         for (&uid, &pages) in &memory.by_user {
-            if uid < uid_min {
+            if !users.contains(&uid) {
                 continue;
             }
             seen.insert(uid);
@@ -632,7 +634,7 @@ impl OomLoop {
         units: &[ScoredUnit],
         pids_of: &dyn Fn(&ScoredUnit) -> Vec<u32>,
         access: &dyn ProcessAccess,
-        uid_min: u32,
+        users: RangeInclusive<u32>,
         principal_min_percent: u8,
         lowering: Lowering,
         marking: OverShareMarking,
@@ -649,7 +651,7 @@ impl OomLoop {
                 now,
                 &memory,
                 host.capacity_pages,
-                uid_min,
+                users,
                 principal_min_percent,
             )
             .clone();

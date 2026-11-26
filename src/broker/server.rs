@@ -3,7 +3,7 @@
 //! One request per connection, bounded in size, time and rate, answered by a fixed set of
 //! workers. A synchronous server with no async runtime, so it can be reviewed line by line.
 
-use super::admin_policy::AdminPolicy;
+use super::admin_policy::{AdminPolicy, HostUsers};
 use super::moves::{CgroupFs, move_job};
 use super::oom::ProcessAccess;
 use super::peer::{Accounts, PeerCredentials, authorize, peer_credentials};
@@ -78,7 +78,8 @@ pub struct BrokerState {
     pub accounts: Box<dyn Accounts + Send + Sync>,
     /// Loads the administrator policy; called at each request (FR-010).
     pub load_policy: Box<dyn Fn() -> anyhow::Result<AdminPolicy> + Send + Sync>,
-    pub host_uid_min: u32,
+    /// The host's ordinary user IDs, the only callers served (FR-004).
+    pub host_users: HostUsers,
     /// Whether `user.slice` splits CPU between accounts, for `units.ordinary_slice = "auto"`.
     pub user_slice_splits_cpu: Box<dyn Fn() -> bool + Send + Sync>,
     /// The cgroup files moves read and write.
@@ -248,7 +249,7 @@ pub fn handle(state: &BrokerState, peer: PeerCredentials, frame: &[u8]) -> Handl
         reply: Reply::refused(&refusal),
         kind,
     };
-    let caller = match authorize(peer, state.accounts.as_ref(), state.host_uid_min) {
+    let caller = match authorize(peer, state.accounts.as_ref(), state.host_users) {
         Ok(caller) => caller,
         Err(refusal) => return refused(refusal, "-"),
     };
@@ -585,7 +586,7 @@ pub fn run() -> anyhow::Result<()> {
         systemd: Box::new(SystemctlRunner::default()),
         accounts: Box::new(HostAccounts),
         load_policy: Box::new(admin_policy::load),
-        host_uid_min: admin_policy::host_uid_min(),
+        host_users: admin_policy::host_users(),
         user_slice_splits_cpu: Box::new(super::units::user_slice_splits_cpu),
         cgroups: Box::new(super::moves::HostCgroupFs {
             root: std::path::PathBuf::from("/sys/fs/cgroup"),
@@ -738,7 +739,7 @@ fn oom_loop() {
                     &units,
                     &|scored: &ScoredUnit| unit_pids(cgroup_root, &scored.unit.cgroup),
                     &PidfdAccess,
-                    policy.uid_min.value,
+                    policy.uid_min.value..=policy.uid_max.value,
                     policy.principal_min_percent.value,
                     Lowering::WhileAnotherOverShare,
                     OverShareMarking::YieldFirstAndNeutral,

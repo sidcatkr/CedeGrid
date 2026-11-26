@@ -24,6 +24,7 @@ locked_memory_mib = 0        # LimitMEMLOCK=; 0 means systemd's default
 
 [principals]
 uid_min = 1000               # 001 FR-059, used by the OOM loop; default from login.defs UID_MIN
+uid_max = 60000              # 001 FR-059 (T632), used by the OOM loop; default from login.defs UID_MAX, at least uid_min
 principal_min_percent = 1    # 001 FR-059's default
 
 [units]
