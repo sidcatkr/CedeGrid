@@ -212,6 +212,8 @@ enum Command {
     /// Choose roles, modes, the node cap, floors and margins; opens the keyboard
     /// interface on a terminal.
     Setup(Box<cedegrid::setup::SetupArgs>),
+    /// Run a command under CedeGrid through this user's local agent, starting it when needed.
+    Run(Box<cedegrid::run::RunArgs>),
     /// Start, stop or show your System mode units (needs cedegrid-system on the host).
     #[command(subcommand)]
     System(SystemCommand),
@@ -367,6 +369,10 @@ fn main() -> Result<()> {
         ),
         "ERR_CEDEGRID_UNSUPPORTED_PLATFORM: Windows supports client commands only"
     );
+    // `run` reads no configuration here: the local agent it reaches or starts does (003 US1).
+    if let Command::Run(args) = cli.command {
+        std::process::exit(cedegrid::run::main(*args)?);
+    }
     match &cli.command {
         Command::Setup(args) => std::process::exit(cedegrid::setup::main(&cli.config, args)),
         Command::System(command) => {
@@ -669,7 +675,8 @@ async fn async_main(cli: Cli) -> Result<()> {
         | Command::Pool { .. }
         | Command::Cancel { .. }
         | Command::Drain { .. }
-        | Command::Resume { .. } => unreachable!(),
+        | Command::Resume { .. }
+        | Command::Run(..) => unreachable!(),
         #[cfg(unix)]
         Command::Agent { local: true, .. } => {
             // A local agent exists to run the user's own runs (003).

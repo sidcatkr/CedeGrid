@@ -23,6 +23,7 @@ pub mod protocol;
 pub mod publication;
 pub mod publication_gc;
 pub mod rootless;
+pub mod run;
 pub mod setup;
 pub mod state;
 pub mod storage_qualification;
