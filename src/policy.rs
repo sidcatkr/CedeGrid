@@ -649,6 +649,8 @@ struct Interval<'a> {
     cooled_down: bool,
     // The yield ladder.
     actions: Vec<YieldAction>,
+    /// The logical CPUs each run with a core lever may use (003 FR-043).
+    granted_cores: BTreeMap<String, Vec<u32>>,
     /// The largest amount own work holds above its target, per resource.
     over_target: BTreeMap<ResourceKey, u64>,
     /// The deadline each hint carries to its worker, as the ladder enforces it.
@@ -759,6 +761,7 @@ impl<'a> Interval<'a> {
             first_come: BTreeSet::new(),
             cooled_down: false,
             actions: Vec::new(),
+            granted_cores: BTreeMap::new(),
             over_target: BTreeMap::new(),
             hint_deadlines: BTreeMap::new(),
             breached: BTreeSet::new(),
@@ -840,6 +843,7 @@ impl<'a> Interval<'a> {
             reason_codes: self.reasons,
             resources: self.statuses,
             actions: self.actions,
+            granted_cores: self.granted_cores,
             exceptions: config.caution_options_on(snapshot),
             allocation_modes: self.allocation_modes,
             max_mode: Some(config.contention.max_mode()),

@@ -850,6 +850,8 @@ impl ChildSlot {
                 sdk_children: family.sdk_children,
                 descendants: family.descendants.len() as u64,
             }),
+            // The affinity lever is the other thread's to report (003 FR-043).
+            cpu_cores: None,
         }
     }
 }

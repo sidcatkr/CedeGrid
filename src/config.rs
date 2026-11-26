@@ -573,6 +573,23 @@ pub struct Config {
     pub cgroup: crate::cgroup::CgroupConfig,
     pub execution: ExecutionConfig,
     pub contention: ContentionConfig,
+    pub evidence: EvidenceConfig,
+}
+
+/// Contention evidence the telemetry reads (003 FR-050).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct EvidenceConfig {
+    /// The most threads the run-queue scan reads per interval; later intervals read the rest.
+    pub max_threads_per_interval: u32,
+}
+
+impl Default for EvidenceConfig {
+    fn default() -> Self {
+        Self {
+            max_threads_per_interval: 4096,
+        }
+    }
 }
 
 impl Default for Config {
@@ -592,6 +609,7 @@ impl Default for Config {
             cgroup: crate::cgroup::CgroupConfig::default(),
             execution: ExecutionConfig::default(),
             contention: ContentionConfig::default(),
+            evidence: EvidenceConfig::default(),
         }
     }
 }
@@ -1458,6 +1476,7 @@ pub const KEY_CLASSES: &[(&str, KeyClass)] = {
         ("state_dir", Safe),
         ("storage_profile", Safe),
         ("monitor.interval_ms", Bounded),
+        ("evidence.max_threads_per_interval", Bounded),
         ("cpu.nice", Safe),
         ("cpu.reserve_physical_cores", Safe),
         ("ram.reserve_mib", Caution("small_floor")),
@@ -2249,6 +2268,10 @@ impl Config {
         ensure!(
             !self.node_id.is_empty() && self.node_id.len() <= 128,
             "node_id must contain 1 to 128 ASCII characters"
+        );
+        ensure!(
+            (64..=1_048_576).contains(&self.evidence.max_threads_per_interval),
+            "evidence.max_threads_per_interval must be between 64 and 1048576"
         );
         ensure!(
             self.node_id

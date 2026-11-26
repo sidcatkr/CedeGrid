@@ -19,6 +19,7 @@ use gpu::*;
 mod managed;
 #[cfg(target_os = "linux")]
 mod processes;
+mod runqueue;
 mod subuid;
 pub use managed::{CedegridCpu, ManagedCollector};
 #[cfg(target_os = "linux")]
@@ -71,6 +72,12 @@ pub struct Collector {
     system_accounts: crate::config::SystemAccounts,
     /// Subordinate user IDs, each counted as its range's owner (FR-059).
     subuid: subuid::SubordinateIds,
+    /// Other users' run-queue wait and the CPUs their waiting processes may use (003 FR-050).
+    runqueue: runqueue::RunQueue,
+    /// The most threads the run-queue scan reads per interval.
+    max_wait_threads: usize,
+    /// The run-queue scan's clock origin.
+    wait_origin: Instant,
     /// GPU compute's `principal_min_percent`, below which such a context is idle.
     gpu_principal_min_percent: u8,
     /// Every visible process, for principal aggregation only.
@@ -401,6 +408,10 @@ impl Collector {
             uid_min: crate::config::Config::default().contention.uid_min,
             system_accounts: crate::config::SystemAccounts::default(),
             subuid: subuid::SubordinateIds::at(crate::config::SUBORDINATE_UID_FILE),
+            runqueue: runqueue::RunQueue::new("/proc"),
+            wait_origin: Instant::now(),
+            max_wait_threads: crate::config::EvidenceConfig::default().max_threads_per_interval
+                as usize,
             gpu_principal_min_percent: crate::contention::ResourceThresholds::defaults(
                 crate::contention::ResourceKind::GpuCompute,
             )
@@ -485,16 +496,34 @@ impl Collector {
                 ..sample.clone()
             })
             .collect();
-        (
-            aggregate_principals(
-                &accounts,
-                &self.external_gpu_memory,
-                &self.external_gpu_compute,
-                owner_uid(),
-                &self.managed_pids,
-            ),
-            external,
-        )
+        let owner = owner_uid();
+        let mut principals = aggregate_principals(
+            &accounts,
+            &self.external_gpu_memory,
+            &self.external_gpu_compute,
+            owner,
+            &self.managed_pids,
+        );
+        // Other users' run-queue wait and the CPUs their waiting processes may use (003 FR-050,
+        // FR-056); the owner's and own work's threads are not read.
+        if cfg!(target_os = "linux") {
+            let others: Vec<(u32, u64, u32)> = accounts
+                .iter()
+                .filter(|sample| !self.managed_pids.contains(&sample.pid))
+                .filter_map(|sample| Some((sample.pid, sample.start_time, sample.uid?)))
+                .filter(|(_, _, uid)| Some(*uid) != owner)
+                .collect();
+            let now_ns = u64::try_from(self.wait_origin.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            let waits = self.runqueue.sample(&others, self.max_wait_threads, now_ns);
+            for principal in &mut principals {
+                if let Some((millicores, allowed)) = principal.uid.and_then(|uid| waits.get(&uid)) {
+                    principal.cpu_wait_millicores = *millicores;
+                    principal.allowed_cpus =
+                        allowed.as_ref().map(|cpus| cpus.iter().copied().collect());
+                }
+            }
+        }
+        (principals, external)
     }
 
     pub fn with_kernel(node_id: &str, config: crate::kernel::KernelConfig) -> Result<Self> {
@@ -520,6 +549,7 @@ impl Collector {
             .attribution_tolerance_percent;
         collector.uid_min = config.contention.uid_min;
         collector.system_accounts = config.contention.system_accounts.clone();
+        collector.max_wait_threads = config.evidence.max_threads_per_interval as usize;
         collector.subuid =
             subuid::SubordinateIds::at(&config.contention.system_accounts.subordinate_uid_file);
         collector.gpu_principal_min_percent = config

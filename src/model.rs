@@ -415,6 +415,14 @@ pub struct PrincipalUsage {
     /// Its CedeGrid work listed on each GPU device; a missing device means plain there.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub cedegrid_gpu: BTreeMap<String, CedeGridWork>,
+    /// Run-queue wait summed over its threads, in thousandths of a CPU-second spent waiting per
+    /// second; None where its threads cannot be read (003 FR-050).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_wait_millicores: Option<u64>,
+    /// The CPUs its waiting processes may run on (`Cpus_allowed_list`), read only; None where
+    /// they cannot be read (003 FR-056).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowed_cpus: Option<Vec<u32>>,
 }
 
 /// Another account's CedeGrid work on one compute resource, identified read-only (006 FR-002,
@@ -501,6 +509,19 @@ pub struct AllocationFacts {
     /// The run's family, once its supervisor reported one (FR-082, FR-083).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub family: Option<FamilySize>,
+    /// The run gives CPU back by the cores it may use, through its supervisor's affinity lever,
+    /// instead of by whole-task pauses (003 FR-043).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_cores: Option<CoreLever>,
+}
+
+/// The cores a run's affinity lever can grant (003 FR-043): each physical core as its logical
+/// CPU IDs, SMT siblings together, in the order the run prefers them, as the cores nearest its
+/// GPU first.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CoreLever {
+    pub cores: Vec<Vec<u32>>,
 }
 
 /// How many processes make up a run's verified family.
@@ -552,6 +573,9 @@ pub struct Decision {
     /// The yield steps the policy authority decided (schema 3).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<YieldAction>,
+    /// The logical CPUs each run with a core lever may use, by allocation ID (003 FR-043).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub granted_cores: BTreeMap<String, Vec<u32>>,
     /// Active caution options with their marker (schema 3).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exceptions: Vec<ExceptionNotice>,

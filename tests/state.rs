@@ -64,6 +64,7 @@ fn observation() -> (Snapshot, Decision) {
         reason_codes: vec![],
         resources: Default::default(),
         actions: vec![],
+        granted_cores: Default::default(),
         exceptions: vec![],
         allocation_modes: Default::default(),
         max_mode: None,
