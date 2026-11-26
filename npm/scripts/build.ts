@@ -1,4 +1,4 @@
-import { cpSync, mkdirSync, writeFileSync, chmodSync, readFileSync } from 'node:fs';
+import { cpSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 const root = resolve(__dirname, '../..');
 mkdirSync(`${root}/dist`, { recursive: true });
@@ -7,4 +7,3 @@ const exportNames = Object.keys(require(`${root}/dist/index.js`));
 writeFileSync(`${root}/dist/index.mjs`, `import sdk from './index.js';\n${exportNames.map(name => `export const ${name} = sdk.${name};`).join('\n')}\n`);
 writeFileSync(`${root}/dist/index.d.cts`, readFileSync(`${root}/dist/index.d.ts`));
 writeFileSync(`${root}/dist/index.d.mts`, readFileSync(`${root}/dist/index.d.ts`, 'utf8').replace(/from '([.][/]\w+)'/g, "from '$1.js'"));
-chmodSync(`${root}/dist/launcher.js`, 0o755);

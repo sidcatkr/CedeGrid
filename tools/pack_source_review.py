@@ -69,7 +69,6 @@ ALLOWLIST = (
     'npm/src/config.ts',
     'npm/src/errors.ts',
     'npm/src/index.ts',
-    'npm/src/launcher.ts',
     'npm/src/worker.ts',
     'npm/tests/numeric-interop.ts',
     'npm/tests/sdk.test.ts',

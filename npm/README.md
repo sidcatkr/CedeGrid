@@ -1,16 +1,17 @@
 # CedeGrid
 
-TypeScript SDK and native CLI launcher for CedeGrid 0.2. Node.js 22.14 or later is required.
+TypeScript SDK for CedeGrid. Node.js 22.14 or later is required.
+
+Each release attaches this package as `cedegrid-<version>.tgz`, listed in its `SHA256SUMS`.
+Install it from the downloaded file:
 
 ```sh
-npm install cedegrid
-npx cedegrid --help
+sha256sum --check --ignore-missing SHA256SUMS
+npm install ./cedegrid-<version>.tgz
 ```
 
-The SDK imports without optional native packages. CLI execution requires the matching
-exact-version native package. Linux uses glibc; supported native targets are Linux
-x64/arm64, macOS x64/arm64, and Windows x64 client commands. Installation does not
-run downloads, compilation, or code generation.
+The package holds the SDK only. The `cedegrid` command-line tool installs on its own; see the
+repository's README. Installation does not run downloads, compilation, or code generation.
 
 ```ts
 import { Client, commandTask, stringifyJson } from 'cedegrid';
