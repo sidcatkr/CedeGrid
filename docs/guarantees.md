@@ -101,7 +101,9 @@ work; a lone job, and one whose pause would go below the target, is left alone. 
 only the verified family: through pidfds without a delegated cgroup, and through a freeze of the
 workload's leaf, confirmed through `cgroup.events`, where `cgroup.freeze` is authorized. A pause
 still answering its demand at `pause_bound_s` (10 s) moves to another task, so no task is drained
-for GPU compute. Guaranteed work takes no GPU compute step. On a
+for GPU compute. A pause for GPU activity of unknown amount holds while that activity lasts, as
+one for measured growth does, and ends in the interval contention ends; the mode's scale-up
+interval alone does not end it. Guaranteed work takes no GPU compute step. On a
 time-sliced device, one neither under MPS nor a MIG parent, CedeGrid relies on the driver's
 time-slicing: in Neutral own work is not capped while it holds no
 more than its share of the device's busy contexts, m × k ≤ E, with m its busy processes and the

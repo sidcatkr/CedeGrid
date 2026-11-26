@@ -1895,7 +1895,7 @@ for runs E1 and E2 and has no code task yet.
   *At `ccc3cd3` on 2026-11-23 (`docs/validation.md`): E9 ×3 and E8 ×3 with its baseline ×3 pass. The floor in Yield
   First was not measurable: the login screen's GPU context, under the greeter's dynamic account, was listed first.
   After T632 and T633, on 2026-11-26: the floor ×3 and E9 ×3 pass at `eb3762c` with the login screen running (the
-  floor ×3 also at `d8053d6`); E8 is CPU only, which neither change touches.*
+  floor ×3 also at `d8053d6`), and again at `59bffa4` after T634; E8 is CPU only, which none of these changes touches.*
 
 - [X] T622 Remove the code that no longer runs after T616 and T617: the re-measure window and its state (`remeasuring`, `hold_remeasured`, `RemeasureWindow`, `remeasure_window_allowed`), the Performance recomputed-cap and minimum-duty paths (`cap_at_minimum_duty`, `at_minimum_duty`, `pause_returns_to_cap`), `applied_duty_credit`'s duty wording, and their tests, with the reason catalog and `docs/guarantees.md`, per FR-089 (unrequested)
 - [X] T624 Failing tests, then the change: a whole-task pause still answering its demand at `pause_bound_s` moves to the next task in the order (CPU and GPU compute, both GPU paths), no CPU or GPU compute drain at the bound except for the operator envelope, and a draining task's usage makes no other task hold, per FR-014, FR-089, SC-007 (contradicts, run E8)
@@ -1913,9 +1913,12 @@ for runs E1 and E2 and has no code task yet.
 - [X] T633 Failing test, then the change: while an own task is paused on a time-sliced device, every listed own
   context counts in m, so a stopped task's context does not age out of the counting window and the hold does not
   release it for one or two intervals every 30 s, per FR-021, FR-089 (the floor runs at `d8053d6` on the test host)
-- [ ] T634 Failing test, then the change: when a GPU task's pause moves from the unknown cause to the measured one,
+- [X] T634 Failing test, then the change: when a GPU task's pause moves from the unknown cause to the measured one,
   the pause carries over to the measured hold, with no interval in which both own tasks run beside the user; seen
   once per episode about 30 s after the pause on the test host at `eb3762c`, per FR-089, SC-002 (partial)
+
+  *Cause: Yield First's 30 s scale-up interval ended a pause that answered GPU activity of unknown amount while the
+  activity lasted. At `59bffa4` the floor ×3 and E9 ×3 show one probe paused throughout each episode.*
 - [ ] T623 Just before release, a read-only Tracked-mode sanity check on the shared GPU server: no stress, no global setting changed, nothing that touches other users; record the result in `docs/validation.md` (user, 2026-11-17)
 
 Order: T614, T615, T616, T617, T618, T619, T620, then T621 at the last commit; T622 before the security review; T623 last, just before release.
