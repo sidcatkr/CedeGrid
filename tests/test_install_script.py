@@ -19,7 +19,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / 'tools' / 'install.sh'
 VERSION = '9.8.7'
-TARGET = 'x86_64-unknown-linux-gnu'
+TARGET = 'linux-x64-gnu'
 TARBALL = f'cedegrid-{VERSION}-{TARGET}.tar.gz'
 TOOLS = ['sh', 'curl', 'tar', 'gzip', 'mktemp', 'mkdir', 'cp', 'mv', 'chmod', 'rm', 'grep', 'cut',
          'uname', 'id', 'cat', 'env']
