@@ -1820,7 +1820,8 @@ async fn rootless_cpu_contention_caps_the_job_and_reverses_without_drain() {
             std::thread::sleep(Duration::from_millis(100));
         }
     };
-    let (alone, _) = wait_for("the job to run", Duration::from_secs(20), &|own, step| {
+    // A shared CI host can be busy for a while on its own; Yield First admits only once it calms.
+    let (alone, _) = wait_for("the job to run", Duration::from_secs(60), &|own, step| {
         own >= 600 && step.is_none()
     });
     // Test-owned external load on every logical CPU.

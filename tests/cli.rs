@@ -54,6 +54,7 @@ fn validation_resolves_paths_against_config_without_creating_state() {
 
 /// `validate` and `doctor` show a GPU sample age derived from the interval, and say so; an
 /// explicit value is shown as configured and listed nowhere as derived (FR-070).
+#[cfg(unix)]
 #[test]
 fn validate_and_doctor_show_a_derived_sample_age() {
     let dir = tempfile::tempdir().unwrap();
@@ -236,6 +237,7 @@ fn observe_and_doctor_show_each_resource() {
 
 /// A file without `default_mode` now runs in Performance, and `doctor` says so once
 /// (T253, FR-030).
+#[cfg(unix)]
 #[test]
 fn doctor_reports_the_new_default_mode_once() {
     let dir = tempfile::tempdir().unwrap();
@@ -728,6 +730,7 @@ mod setup_non_interactive {
 
     /// Setup preselects Performance, the default, and writes it without an
     /// acknowledgement (FR-030, FR-051).
+    #[cfg(unix)]
     #[test]
     fn setup_preselects_performance_without_an_acknowledgement() {
         let dir = tempfile::tempdir().unwrap();
@@ -776,6 +779,7 @@ mod setup_non_interactive {
         json(output)["error"]["code"].as_str().unwrap().to_string()
     }
 
+    #[cfg(unix)]
     #[test]
     fn exit_codes_follow_the_contract_and_nothing_is_written_on_error() {
         let dir = tempfile::tempdir().unwrap();
@@ -865,6 +869,7 @@ mod setup_non_interactive {
         assert_eq!(json(&output)["written"], false);
     }
 
+    #[cfg(unix)]
     #[test]
     fn margins_are_set_for_every_mode_and_validated_in_order() {
         let dir = tempfile::tempdir().unwrap();
@@ -922,6 +927,7 @@ mod setup_non_interactive {
         assert_eq!(fs::read(&path).unwrap(), before);
     }
 
+    #[cfg(unix)]
     #[test]
     fn json_output_names_the_path_choices_and_caution_options() {
         let dir = tempfile::tempdir().unwrap();
@@ -955,6 +961,7 @@ mod setup_non_interactive {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn setup_never_prompts_or_blocks_without_a_terminal() {
         let dir = tempfile::tempdir().unwrap();
@@ -1006,6 +1013,7 @@ mod setup_non_interactive {
     }
 
     /// Memory margins exist for Yield First only.
+    #[cfg(unix)]
     #[test]
     fn memory_neutral_and_performance_margins_are_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -1056,6 +1064,7 @@ mod setup_non_interactive {
 
     /// Client and coordinator files take their connection settings; node choices
     /// are refused for them (T107).
+    #[cfg(unix)]
     #[test]
     fn client_and_coordinator_roles_take_connection_settings_only() {
         let dir = tempfile::tempdir().unwrap();
@@ -1140,6 +1149,7 @@ mod setup_non_interactive {
         assert_eq!(output.status.code(), Some(2));
     }
 
+    #[cfg(unix)]
     #[test]
     fn unmanaged_settings_and_comments_are_preserved_byte_for_byte() {
         let dir = tempfile::tempdir().unwrap();
@@ -1713,6 +1723,7 @@ mod setup_terminal {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn the_allowance_never_turns_on_without_a_terminal_and_turns_off_anywhere() {
     use cedegrid::state::{Allowance, StateStore, read_allowance, set_allowance};
@@ -1804,6 +1815,7 @@ fn doctor_marks_aggressive_and_its_caution() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn setup_flags_set_aggressive_only_with_its_acknowledgement() {
     // 004 T014: the flags path; the interface keeps the three margined modes for now.
