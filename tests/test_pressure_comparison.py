@@ -227,14 +227,16 @@ class GateRunnerTests(unittest.TestCase):
         self.assertTrue(verdict({'window_check':{'ratio':None,'biased':True}}).startswith('refused'))
 
     def test_a_unit_that_alternates_only_once_the_loop_runs_is_refused(self):
-        # The probe's units cost the same until the real loop has run a while, then
-        # alternate 1.0 and 1.5 ms. A check made before `ready.json` cannot see it; the window's
-        # own even/odd sums must, and the window is refused.
+        # The probe's units cost the same through the warm-up check and the loop's first 20
+        # units, then alternate 1.0 and 1.5 ms. A check made before `ready.json` cannot see it;
+        # the window's own even/odd sums must, and the window is refused. Counting from the
+        # warm-up's end keeps the even half from being diluted on a slow host, where a 2 s window
+        # completes few units.
         import argparse,pressure_probe
         calls=[0]
         def unit():
             calls[0]+=1
-            spin=1.5e-3 if calls[0]>300 and calls[0]%2==0 else 1e-3
+            spin=1.5e-3 if calls[0]>pressure_probe.WARM_UNITS+20 and calls[0]%2==0 else 1e-3
             end=time.thread_time()+spin
             while time.thread_time()<end:pass
         saved=(pressure_probe.cpu_unit,pressure_probe.local_guard,pressure_probe.rss_bytes)
