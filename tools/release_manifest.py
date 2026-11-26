@@ -3,6 +3,7 @@
 from __future__ import annotations
 import argparse
 import hashlib
+import io
 import json
 from pathlib import Path
 import re
@@ -24,6 +25,10 @@ SOURCE_ARCHIVE = 'source/cedegrid-0.2.0-source.tar.gz'
 EXPECTED = {'pypi/cedegrid-0.2.0-py3-none-any.whl','pypi/cedegrid-0.2.0.tar.gz','npm/cedegrid-0.2.0.tgz'}
 EXPECTED |= {'npm/cedegrid-'+target+'-0.2.0.tgz' for target in NATIVE}
 EXPECTED |= {'standalone/cedegrid-0.2.0-'+target+('.zip' if target=='win32-x64' else '.tar.gz') for target in NATIVE}
+# The Debian packages for System mode (005 FR-033): the CLI package holds the native binary.
+DEB_ARCH = {'linux-x64-gnu': 'amd64', 'linux-arm64-gnu': 'arm64'}
+EXPECTED |= {'deb/' + name + '_0.2.0_' + arch + '.deb'
+             for arch in DEB_ARCH.values() for name in ('cedegrid', 'cedegrid-system')}
 SHA256 = re.compile(r'[0-9a-f]{64}\Z')
 SOURCE_EXCLUDED = {'docs/release-0.2-gates.json', 'docs/release-0.2-evidence.md'}
 
@@ -84,6 +89,21 @@ def verify_source_snapshot(packages, candidate):
         if not isinstance(expected, str) or not SHA256.fullmatch(expected) or digest(member(ROOT, name)) != expected:
             raise ValueError('source snapshot file hash mismatch: ' + name)
 
+def deb_data(path):
+    """The data archive inside a Debian package, which is an ar archive."""
+    data = path.read_bytes()
+    if not data.startswith(b'!<arch>\n'):
+        raise ValueError('not a Debian package: ' + path.name)
+    offset = 8
+    while offset + 60 <= len(data):
+        header = data[offset:offset + 60]
+        name = header[:16].decode('ascii').strip().rstrip('/')
+        size = int(header[48:58].decode('ascii').strip())
+        if name.startswith('data.tar'):
+            return data[offset + 60:offset + 60 + size]
+        offset += 60 + size + size % 2
+    raise ValueError('Debian package without a data archive: ' + path.name)
+
 def verify_native_members(packages, manifest, artifact_paths):
     for target, native in manifest.get('native_inputs', {}).items():
         if target not in NATIVE or not SHA256.fullmatch(native.get('sha256', '')):
@@ -115,6 +135,18 @@ def verify_native_members(packages, manifest, artifact_paths):
                         actual = stream_digest(stream)
             if actual != native['sha256']:
                 raise ValueError('native input hash does not match packaged bytes')
+        if target in DEB_ARCH:
+            relative = 'deb/cedegrid_0.2.0_' + DEB_ARCH[target] + '.deb'
+            if relative not in artifact_paths:
+                raise ValueError('native input lacks its Debian package')
+            with tarfile.open(fileobj=io.BytesIO(deb_data(member(packages, relative)))) as archive:
+                entries = [item for item in archive.getmembers()
+                           if item.name in ('./usr/bin/cedegrid', 'usr/bin/cedegrid')]
+                if len(entries) != 1 or not entries[0].isfile() or entries[0].size != size:
+                    raise ValueError('native Debian member identity/size mismatch')
+                with archive.extractfile(entries[0]) as stream:
+                    if stream_digest(stream) != native['sha256']:
+                        raise ValueError('native input hash does not match packaged bytes')
 
 def relevant_hashes(gate_id, artifacts, native):
     paths = {item['path']: item['sha256'] for item in artifacts}

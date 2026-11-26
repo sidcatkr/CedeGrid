@@ -47,7 +47,11 @@ still required after cross compilation.
 wheel/sdist, npm platform packages, the main npm tarball, and standalone archives.
 The full five-target set is required. It verifies embedded binary bytes and scans
 extracted archive members, including printable native strings, for accidental
-private data. Preserve failed candidates and create a new candidate after fixes;
+private data. The candidate job then builds the System mode Debian packages,
+`cedegrid` and `cedegrid-system` for amd64 and arm64, with `tools/build_deb.py`
+from the same two Linux binaries; `tools/release_manifest.py` checks that each CLI
+package holds the qualified binary, and `SHA256SUMS` covers them with the rest.
+Preserve failed candidates and create a new candidate after fixes;
 resume only an unfinished package set without rewriting its existing files.
 
 The npm verification harness runs a disposable loopback registry without uplinks,

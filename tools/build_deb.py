@@ -82,7 +82,8 @@ def stage_system(root, packaging, version, arch):
 
 def build(root, output, name):
     target = output / name
-    subprocess.run(['dpkg-deb', '--root-owner-group', '--build', str(root), str(target)],
+    # xz, which Python's tarfile reads, so the release check can hash the packaged binary.
+    subprocess.run(['dpkg-deb', '--root-owner-group', '-Zxz', '--build', str(root), str(target)],
                    check=True)
     return target
 

@@ -31,6 +31,28 @@ def tar(path, files):
             archive.addfile(info, io.BytesIO(data))
 
 
+def deb(path, files):
+    """A Debian package: an ar archive holding debian-binary, control and an xz data archive."""
+    def xz(members):
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode='w:xz') as archive:
+            for name, data in members.items():
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                archive.addfile(info, io.BytesIO(data))
+        return buffer.getvalue()
+    parts = [('debian-binary', b'2.0\n'), ('control.tar.xz', xz({'./control': b'Package: x\n'})),
+             ('data.tar.xz', xz(files))]
+    out = bytearray(b'!<arch>\n')
+    for name, body in parts:
+        out += (name + '/').ljust(16).encode() + b'0'.ljust(12) + b'0'.ljust(6) + b'0'.ljust(6)
+        out += b'100644'.ljust(8) + str(len(body)).ljust(10).encode() + b'`\n' + body
+        if len(body) % 2:
+            out += b'\n'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(bytes(out))
+
+
 class CandidateFixture(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(prefix='cedegrid-release-test-')
@@ -58,6 +80,11 @@ class CandidateFixture(unittest.TestCase):
                     archive.writestr('cedegrid-0.2.0-' + target + '/' + executable, binary)
             else:
                 tar(Path(str(standalone) + '.tar.gz'), {'cedegrid-0.2.0-' + target + '/' + executable: binary})
+            if target in release.DEB_ARCH:
+                arch = release.DEB_ARCH[target]
+                deb(self.root / ('deb/cedegrid_0.2.0_' + arch + '.deb'), {'./usr/bin/cedegrid': binary})
+                deb(self.root / ('deb/cedegrid-system_0.2.0_' + arch + '.deb'),
+                    {'./lib/systemd/system/cedegrid-broker.service': b'[Unit]\n'})
         tar(self.root / 'npm/cedegrid-0.2.0.tgz', {'package/package.json': b'{"name":"cedegrid","version":"0.2.0"}'})
         (self.root / 'pypi').mkdir()
         for name in publish.PYTHON_FILES:
@@ -155,6 +182,16 @@ class ReleaseGateTests(CandidateFixture):
         self.manifest['native_inputs']['linux-x64-gnu']['sha256'] = '0' * 64
         self.write_manifest()
         with self.assertRaisesRegex(ValueError, 'packaged bytes'):
+            self.validate()
+
+    def test_a_debian_package_must_hold_the_qualified_binary(self):
+        deb(self.root / 'deb/cedegrid_0.2.0_amd64.deb', {'./usr/bin/cedegrid': b'another binary'})
+        for item in self.manifest['artifacts']:
+            if item['path'] == 'deb/cedegrid_0.2.0_amd64.deb':
+                path = self.root / item['path']
+                item['sha256'], item['size'] = release.digest(path), path.stat().st_size
+        self.write_manifest()
+        with self.assertRaisesRegex(ValueError, 'Debian member|native input hash'):
             self.validate()
 
     def test_native_member_hashing_works_without_python_3_11_file_digest(self):
@@ -301,9 +338,17 @@ class WorkflowTests(unittest.TestCase):
             self.assertTrue(uses)
             self.assertTrue(all(re.search(r'@[0-9a-f]{40}$', item) for item in uses), uses)
 
+    def test_the_candidate_builds_both_debian_architectures_once(self):
+        # 005 FR-033: the packages come from the candidate's own Linux binaries, never rebuilt.
+        source = (REPOSITORY / '.github/workflows/release-candidate.yml').read_text()
+        self.assertEqual(source.count('tools/build_deb.py'), 1)
+        for pair in ('linux-x64-gnu:amd64', 'linux-arm64-gnu:arm64'):
+            self.assertIn(pair, source)
+
     def test_publish_workflow_does_not_rebuild_or_repack(self):
         source = (REPOSITORY / '.github/workflows/release.yml').read_text()
-        for forbidden in ('npm run build', 'npm pack', 'uv build', 'build_packages.py', 'build_native.py'):
+        for forbidden in ('npm run build', 'npm pack', 'uv build', 'build_packages.py', 'build_native.py',
+                          'build_deb.py'):
             self.assertNotRegex(source, r'\b' + re.escape(forbidden) + r'\b')
         self.assertIn('artifact-ids:', source)
         self.assertIn('id-token: write', source)

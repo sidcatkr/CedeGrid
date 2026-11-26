@@ -96,6 +96,27 @@ jobs:
           manifest['artifacts'].append({'path':destination.relative_to(root).as_posix(),'sha256':digest(destination),'size':destination.stat().st_size,'scan':scan_archive(destination)})
           path.write_text(json.dumps(manifest,indent=2)+'\n')
           PY
+          # The System mode Debian packages from the same Linux binaries (005 FR-033).
+          for pair in linux-x64-gnu:amd64 linux-arm64-gnu:arm64; do
+            python tools/build_deb.py --binary "native/native-${pair%%:*}/cedegrid" \
+              --packaging packaging/deb --version 0.2.0 --arch "${pair##*:}" --output candidate/deb
+          done
+          python - <<'PY'
+          import json,sys,tempfile
+          from pathlib import Path
+          sys.path.insert(0,'tools')
+          from build_packages import scan_archive,digest
+          from release_manifest import deb_data
+          root=Path('candidate')
+          path=root/'manifest.json'
+          manifest=json.loads(path.read_text())
+          for deb in sorted((root/'deb').glob('*.deb')):
+              with tempfile.NamedTemporaryFile(suffix='.tar') as data:
+                  data.write(deb_data(deb)); data.flush()
+                  scan=scan_archive(Path(data.name))
+              manifest['artifacts'].append({'path':deb.relative_to(root).as_posix(),'sha256':digest(deb),'size':deb.stat().st_size,'scan':scan})
+          path.write_text(json.dumps(manifest,indent=2)+'\n')
+          PY
           cp docs/release-0.2-gates.json candidate/gates.json
           python tools/release_manifest.py --packages candidate --gates candidate/gates.json --freeze
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

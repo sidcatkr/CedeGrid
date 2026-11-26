@@ -310,8 +310,9 @@ the task list.
   - `prerm` stops the broker and every unit with the broker's description prefix and marker; `postrm` removes the group and an empty `/etc/cedegrid` on purge. The purge fixture passes (container run of 2026-11-17: Ubuntu 22.04, systemd 249, local VM).
 - [x] T054 [US5] Make the agent apply the administrator policy to each job in System mode, in `src/agent/` and `src/config.rs`: read `/etc/cedegrid/policy.toml` with the broker's loader, refuse a disallowed mode and a job past `tasks_per_user` (passes T051)
   - In a unit, before each launch the agent loads the policy with the broker's loader and refuses, once per offer, a job whose effective mode on any resource is not in `modes.allowed` (`mode_not_allowed`) or that would pass `limits.tasks_per_user` (`task_limit`); an unreadable policy refuses every launch (`policy_refused`). Each refusal is one `launch_refused` line naming the key; the offer stays with the coordinator.
-- [ ] T055 [US5] Add the `.deb` build for `cedegrid` and `cedegrid-system` to the release workflow in `.github/workflows/release.yml`, with checksums in the release (FR-033)
+- [x] T055 [US5] Add the `.deb` build for `cedegrid` and `cedegrid-system` to the release workflow in `.github/workflows/release.yml`, with checksums in the release (FR-033)
   - *In part:* `tools/build_deb.py` (standard library only, with `tests/test_build_deb.py`) builds both packages with `dpkg-deb`; the container suite installs and purges them with dpkg. The release workflow step and checksums are not written yet.
+  - *Done (2026-11-26):* the candidate job in `.github/workflows/release-candidate.yml` builds all four packages from the candidate's own Linux binaries (`dpkg-deb -Zxz`); `tools/release_manifest.py` expects them, checks that each CLI package holds the qualified binary, and `SHA256SUMS` and the GitHub Release carry them unchanged through `release.yml` (`tests/test_release_gate.py`).
 - [ ] T056 [US5] Add the project's own apt repository publication and its signing to `.github/workflows/release.yml`, behind a separate approval in the workflow (FR-033)
 
 **Checkpoint**: every story passes in the container.
