@@ -2628,6 +2628,7 @@ mod busy_sleep_tests {
 
     /// A write inside `within` waits for a held lock only as long as it is given, and the
     /// store's own wait holds again after it (R84).
+    #[cfg(unix)]
     #[test]
     fn a_write_within_a_short_wait_gives_up_at_that_wait() {
         let directory = crate::namespace::TestStateDir(

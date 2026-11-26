@@ -25,6 +25,9 @@ jobs:
       - run: python3 -m venv .runtime/test-python
       - run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
       - run: rustc +stable --version && python3 --version && uname -a
+      # The SDK's TLS tests make their certificates with the openssl on PATH; record which one
+      # and the test Python's own TLS library.
+      - run: which -a openssl; openssl version; .runtime/test-python/bin/python -c 'import ssl,sys; print(sys.version); print(ssl.OPENSSL_VERSION)'
       - run: cargo +stable fmt --all -- --check
       - run: cargo +stable clippy --locked --all-targets -- -D warnings
       - run: cargo +stable test --locked -- --test-threads=1

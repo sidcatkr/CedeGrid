@@ -1849,6 +1849,7 @@ mod cpu_alignment_tests {
     /// The busy interval is the time between the two `/proc/stat` reads, not between the two
     /// samples' starts: the inspection before the read takes 5 ms in one sample and 55 ms in the
     /// next, and an idle CPU's 55 ticks over the 550 ms between the reads are no overshoot.
+    #[cfg(unix)]
     #[test]
     fn the_busy_interval_is_measured_between_the_counter_reads() {
         let temp = tempfile::tempdir().unwrap();

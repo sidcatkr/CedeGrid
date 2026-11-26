@@ -2465,6 +2465,7 @@ mod tests {
 
     /// Every option the interface offers maps to a key the configuration accepts,
     /// and Performance, the default, is preselected on a new file.
+    #[cfg(unix)]
     #[test]
     fn every_offered_option_loads() {
         let (_dir, plain) = target("config_version = 1\n");
@@ -2486,6 +2487,7 @@ mod tests {
 
     /// The flags set the choice for an unattended setup; without either it stays unset, so a
     /// new file leaves it off (006 FR-025).
+    #[cfg(unix)]
     #[test]
     fn priority_over_plain_flags_set_the_choice() {
         let on = SetupArgs {
@@ -2516,6 +2518,7 @@ mod tests {
     }
 
     /// The choice is written under `[contention]` and running setup again changes it.
+    #[cfg(unix)]
     #[test]
     fn priority_over_plain_is_written_and_changed_again() {
         let (_dir, plain) = target("config_version = 1\n");

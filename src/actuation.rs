@@ -500,6 +500,7 @@ mod tests {
 
     /// A stop that reached only part of the family still counts as a stop: release continues
     /// every member, so none stays stopped (R2).
+    #[cfg(unix)]
     #[test]
     fn a_partial_stop_is_continued_on_release() {
         let mut family = PartlyStoppable {
@@ -522,6 +523,7 @@ mod tests {
 
     /// No rate cap runs rootless: CPU and GPU compute caps are unavailable, a cap is refused, a
     /// pause stops the family and its end continues it, and nothing is time-driven (FR-089).
+    #[cfg(unix)]
     #[test]
     fn no_rate_cap_runs_rootless() {
         let mut actuator = actuator(AllocationClass::Opportunistic);

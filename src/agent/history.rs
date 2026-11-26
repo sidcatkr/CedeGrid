@@ -179,6 +179,7 @@ mod tests {
         store.transition(&record).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn released_history_is_read_once_at_start_and_never_per_iteration() {
         let dir = crate::namespace::TestStateDir(
@@ -205,6 +206,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_run_released_during_the_run_is_followed_until_settled() {
         let dir = crate::namespace::TestStateDir(
@@ -235,6 +237,7 @@ mod tests {
         assert!(restarted.records(&store, &[]).unwrap().is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn settled_attempt_directories_beyond_the_newest_256_are_removed() {
         let dir = crate::namespace::TestStateDir(
@@ -280,6 +283,7 @@ mod tests {
         assert_eq!(prune_attempts(&store, dir.path()).unwrap(), 0);
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_upgrade_holds_table_is_looked_up_once_per_start() {
         let dir = crate::namespace::TestStateDir(
