@@ -386,6 +386,8 @@ pub struct PolicyEngine {
     ladder: BTreeMap<(String, ResourceKey), StepState>,
     /// The logical CPUs each run with a core lever was last granted (003 FR-043).
     granted_cores: BTreeMap<String, Vec<u32>>,
+    /// When each run's granted core count last changed.
+    core_changed_at: BTreeMap<String, u64>,
     /// When a resource's measurement became unknown or held (FR-008 window).
     unknown_since: BTreeMap<ResourceKey, u64>,
     /// When an allocation's usage became unknown (R10 window).

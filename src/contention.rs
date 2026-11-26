@@ -392,6 +392,10 @@ pub const REASON_CODES: &[(&str, &str)] = &[
         "One more own process on the time-sliced device would take a slice-bound principal below its fair share of the busy contexts, so GPU admission holds.",
     ),
     (
+        "cpu_cores_granted",
+        "A run that gives CPU back by the cores it may use is granted whole cores for its part of the target, at least one.",
+    ),
+    (
         "admitted_as_plain",
         "No account that arrived first with CedeGrid work contends, so Performance starts new work as plain Linux would.",
     ),

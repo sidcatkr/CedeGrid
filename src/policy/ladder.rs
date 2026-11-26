@@ -186,7 +186,13 @@ impl<'a> Interval<'a> {
     /// One memory resource or CPU: who yields for the excess, pending
     /// reservations first, and how the other steps on it hold or reverse.
     fn plan_resource(&mut self, key: ResourceKey) {
-        let frame = self.resource_frame(key);
+        let mut frame = self.resource_frame(key);
+        if frame.kind == ResourceKind::Cpu {
+            // Runs with a core lever give back by cores; what that frees comes off the excess the
+            // other tasks' pauses cover (003 FR-043).
+            let freed = self.plan_core_grants(&frame);
+            frame.usage_excess = frame.usage_excess.saturating_sub(freed);
+        }
         // A pause at its bound moves even while own usage over its target waits its dwell.
         let own_hold =
             frame.kind == ResourceKind::Cpu && self.cpu_own_hold && !self.pause_at_bound(&frame);
@@ -199,6 +205,113 @@ impl<'a> Interval<'a> {
         } else {
             self.hold_or_reverse(&frame, &planned);
         }
+    }
+
+    /// Runs with a core lever give CPU back by the cores they may use, never by a pause
+    /// (003 FR-043): each gets an equal part of the running CPU target left after the other
+    /// running own work, in whole physical cores, at least one (FR-048); a job in Performance or
+    /// Aggressive keeps every core, as plain Linux would run it. Fewer cores apply at once, more
+    /// after the mode's scale-up interval, and an unknown measurement keeps the last grant. The
+    /// cores chosen first avoid the CPUs a waiting user may use, where it may use fewer than the
+    /// scope's (FR-056). Returns the CPU the grants take from the runs' current use.
+    fn plan_core_grants(&mut self, frame: &Frame) -> u64 {
+        let (config, input, prev, now) = (self.config, self.input, self.prev, self.now);
+        let levers: Vec<(&Allocation, &crate::model::CoreLever)> = input
+            .allocations
+            .iter()
+            .filter(|a| a.phase == AllocationPhase::Running)
+            .filter_map(|a| Some((a, core_lever(input, &a.id)?)))
+            .collect();
+        if levers.is_empty() {
+            return 0;
+        }
+        let others: u64 = input
+            .allocations
+            .iter()
+            .filter(|a| a.phase == AllocationPhase::Running && core_lever(input, &a.id).is_none())
+            .map(cpu_usage_of)
+            .sum();
+        let part = self.cpu_running_target().saturating_sub(others) / levers.len() as u64;
+        let capacity = self.snapshot.cpu_capacity_millicores;
+        let floor = (capacity.saturating_mul(u64::from(
+            config
+                .contention
+                .thresholds(ResourceKind::Cpu)
+                .principal_min_percent,
+        )) / 100)
+            .max(1);
+        let avoid: BTreeSet<u32> = self
+            .snapshot
+            .principals
+            .iter()
+            .flatten()
+            .filter(|p| !p.is_owner && p.cpu_wait_millicores.is_some_and(|wait| wait >= floor))
+            .filter_map(|p| p.allowed_cpus.as_ref())
+            .filter(|cpus| (cpus.len() as u64).saturating_mul(1000) < capacity)
+            .flatten()
+            .copied()
+            .collect();
+        let thresholds = config.contention.thresholds(ResourceKind::Cpu);
+        let mut freed = 0u64;
+        for (allocation, lever) in levers {
+            let id = &allocation.id;
+            let mode = self.allocation_modes[id][&ResourceKind::Cpu];
+            let total = lever.cores.len();
+            let wanted = if mode >= ContentionMode::Performance {
+                total
+            } else {
+                cores_for(part, lever).clamp(1, total)
+            };
+            let before = prev.granted_cores.get(id).map(|cpus| {
+                lever
+                    .cores
+                    .iter()
+                    .filter(|core| core.iter().all(|c| cpus.contains(c)))
+                    .count()
+            });
+            let changed_at = prev.core_changed_at.get(id).copied().unwrap_or(0);
+            let count = match before {
+                Some(before) if !frame.measurement_known => before,
+                Some(before)
+                    if wanted > before
+                        && now.saturating_sub(changed_at)
+                            < thresholds.scale_up_interval_ms(mode, config.monitor.interval_ms) =>
+                {
+                    before
+                }
+                _ => wanted,
+            };
+            self.next.core_changed_at.insert(
+                id.clone(),
+                if Some(count) == before {
+                    changed_at
+                } else {
+                    now
+                },
+            );
+            let touches = |core: &&Vec<u32>| core.iter().any(|cpu| avoid.contains(cpu));
+            let mut cpus: Vec<u32> = lever
+                .cores
+                .iter()
+                .filter(|core| !touches(core))
+                .chain(lever.cores.iter().filter(|core| touches(core)))
+                .take(count)
+                .flatten()
+                .copied()
+                .collect();
+            cpus.sort_unstable();
+            freed = freed.saturating_add(
+                cpu_usage_of(allocation).saturating_sub((cpus.len() as u64).saturating_mul(1000)),
+            );
+            note(
+                &mut self.statuses,
+                ResourceKey::Cpu,
+                "cpu_cores_granted",
+                format!("allocation {id} may use {count} of {total} cores"),
+            );
+            self.granted_cores.insert(id.clone(), cpus);
+        }
+        freed
     }
 
     /// The CPU target running own work is held to: the budget, never below the equal share a
@@ -595,6 +708,8 @@ impl<'a> Interval<'a> {
                         })
             })
             .filter(|a| (a.phase == AllocationPhase::Pending) == pending_pass)
+            // A run with a core lever is never paused for CPU (003 FR-043).
+            .filter(|a| kind != ResourceKind::Cpu || core_lever(input, &a.id).is_none())
             .map(|a| {
                 let amount = match (kind, pending_pass) {
                     (_, true) => amount_of(key, &self.charges[&a.id]),
@@ -2171,6 +2286,28 @@ fn nearest(candidates: &[(String, u64)], need: u64, taken: &BTreeSet<String>) ->
         chosen.insert(id.clone());
     }
     chosen
+}
+
+/// A run's core lever, where the agent reports one with cores (003 FR-043).
+fn core_lever<'a>(input: &'a PolicyInput, id: &str) -> Option<&'a crate::model::CoreLever> {
+    input
+        .facts
+        .get(id)?
+        .cpu_cores
+        .as_ref()
+        .filter(|lever| !lever.cores.is_empty())
+}
+
+/// The fewest of a lever's cores, in its order, whose logical CPUs reach `part` millicores.
+fn cores_for(part: u64, lever: &crate::model::CoreLever) -> usize {
+    let mut reach = 0u64;
+    for (count, core) in lever.cores.iter().enumerate() {
+        if reach >= part {
+            return count;
+        }
+        reach = reach.saturating_add((core.len() as u64).saturating_mul(1000));
+    }
+    lever.cores.len()
 }
 
 fn cpu_usage_of(allocation: &Allocation) -> u64 {
