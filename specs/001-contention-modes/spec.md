@@ -2239,6 +2239,9 @@ node reports with the expected per-resource values at each step.
     moved pauses take turns, one resuming at a time. A paused task resumes when the demand it
     answered falls back past the reversal threshold, at the mode's pace, or at once when
     contention has ended (FR-034), and a returning contender is answered without the step dwell.
+    On GPU compute a pause that answered activity of unknown amount, which counts as the whole
+    device (FR-008), does the same: it waits for that activity to fall, never ends on the mode's
+    scale-up interval alone, and ends at once when contention has ended.
     A pause held for own usage over its target holds while resuming it would leave own work further
     over its target than the pause leaves it below, and at least while own work is not below its
     target by the contention floor (FR-013). A pause at its bound moves even while own usage over

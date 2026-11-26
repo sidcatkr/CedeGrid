@@ -1913,7 +1913,7 @@ for runs E1 and E2 and has no code task yet.
 - [X] T633 Failing test, then the change: while an own task is paused on a time-sliced device, every listed own
   context counts in m, so a stopped task's context does not age out of the counting window and the hold does not
   release it for one or two intervals every 30 s, per FR-021, FR-089 (the floor runs at `d8053d6` on the test host)
-- [ ] T634 Failing test, then the change: when a GPU task's pause moves from the unknown cause to the measured one,
+- [X] T634 Failing test, then the change: when a GPU task's pause moves from the unknown cause to the measured one,
   the pause carries over to the measured hold, with no interval in which both own tasks run beside the user; seen
   once per episode about 30 s after the pause on the test host at `eb3762c`, per FR-089, SC-002 (partial)
 - [ ] T623 Just before release, a read-only Tracked-mode sanity check on the shared GPU server: no stress, no global setting changed, nothing that touches other users; record the result in `docs/validation.md` (user, 2026-11-17)

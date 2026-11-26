@@ -333,6 +333,50 @@ mod ladder {
         assert_eq!(after.unwrap(), held);
     }
 
+    /// A whole-task GPU pause that answered activity of unknown amount, with no cap to rise
+    /// through, waits for that activity to fall as one for external growth does: the scale-up
+    /// interval does not end it while the device is still busy, so the task's whole part is not
+    /// handed back into the contention one interval before it is held again, and it ends in the
+    /// interval contention has ended (FR-034, FR-089, SC-002).
+    #[test]
+    fn a_whole_task_pause_for_unknown_activity_waits_for_it_to_fall() {
+        let mut gpu = timing(ResourceKind::GpuCompute, ContentionMode::YieldFirst);
+        gpu.pause_bound_ms = 60_000;
+        let paused = StepState {
+            to_free: None,
+            step: YieldStep::Pause,
+            entered_at_ms: 0,
+            cause: YieldCause::UnknownMeasurement,
+            target: None,
+            trigger_external: 1000,
+            calm_since_ms: None,
+            contended_since_ms: Some(0),
+            after_pause: false,
+            pending: false,
+            asked_target: None,
+            paused_usage: Some(500),
+        };
+        let busy = |external| LadderInput {
+            unavailable: [YieldStep::LowerShare, YieldStep::Cap].into(),
+            cause: YieldCause::UnknownMeasurement,
+            target: Some(500),
+            usage: Some(250),
+            allow_drain: false,
+            ..input(ResourceKind::GpuCompute, 0, external)
+        };
+        let (state, changes) = run(Some(paused.clone()), &gpu, 1..119, |_| busy(1000));
+        assert!(changes.is_empty(), "{changes:?}");
+        assert_eq!(state.unwrap().step, YieldStep::Pause);
+        // Once the activity has fallen and contention has ended, the pause ends in one move.
+        let mut returning = gpu.clone();
+        returning.returning = true;
+        let (state, changes) = run(Some(paused), &returning, 1..2, |_| busy(0));
+        assert!(
+            state.is_none_or(|s| s.step == YieldStep::None),
+            "{changes:?}"
+        );
+    }
+
     #[test]
     fn a_pause_escalates_after_its_bound_while_contention_persists() {
         let mut cpu = timing(ResourceKind::Cpu, ContentionMode::Neutral);

@@ -1202,13 +1202,21 @@ pub fn plan_step(
         / 100;
     let mut held = state.clone();
     held.contended_since_ms = None;
+    let no_cap = !input.applies(YieldStep::Cap) || input.unavailable.contains(&YieldStep::Cap);
+    // A whole-task GPU compute pause for activity of unknown amount: GPU activity of unknown
+    // amount counts as the whole device, so it answers that activity as one for external growth
+    // answers the growth (FR-008, FR-089).
+    let whole_pause = current == YieldStep::Pause
+        && state.cause == YieldCause::UnknownMeasurement
+        && input.kind == ResourceKind::GpuCompute
+        && no_cap;
     // Where no cap applies, a pause held for external growth ends in the interval contention has
     // ended, as a cap would rise there (FR-034, FR-089). Ending it leaves no step to dwell on, so
     // a contender that returns is answered at once, as a lowered cap would answer it (SC-002).
     if current == YieldStep::Pause
         && timing.returning
-        && state.cause == YieldCause::ExternalGrowth
-        && (!input.applies(YieldStep::Cap) || input.unavailable.contains(&YieldStep::Cap))
+        && (state.cause == YieldCause::ExternalGrowth || whole_pause)
+        && no_cap
     {
         held.step = input.previous_step(current);
         if held.step == YieldStep::None {
@@ -1273,8 +1281,10 @@ pub fn plan_step(
         };
     }
     // Only a step that answered external growth waits for that demand to fall;
-    // one that answered a breach reverses once calm, or admission stays closed.
-    if state.cause == YieldCause::ExternalGrowth
+    // one that answered a breach reverses once calm, or admission stays closed. A whole-task
+    // GPU pause for activity of unknown amount waits too: with no cap to rise through, ending it
+    // hands the task's whole part back into the same activity (FR-089).
+    if (state.cause == YieldCause::ExternalGrowth || whole_pause)
         && state.trigger_external > 0
         && input.external >= threshold
     {
