@@ -113,14 +113,16 @@ the task list.
 
 - [x] T016 [P] [US1] Container fixture in `tests/system_mode.rs` (opt-in): after install, 20 of 20 member starts land in `cedegrid-u<uid>.service` with the member's IDs at the Full level, and `doctor` says System (SC-001); two starts at once start each unit once
   - One member start, a repeat start, two starts at once and 20 of 20 start-stop rounds pass (container run of 2026-11-17: Ubuntu 22.04, systemd 249, local VM). `doctor` saying System is T025's.
-- [ ] T017 [US1] Container fixture in `tests/system_mode.rs`: with the package removed, 20 of 20 starts behave as before the install (SC-001); a non-member is refused with `not_a_member` and falls back; with the broker stopped and the socket present, the client says so in one line and falls back, and `--require-system` refuses; after a broker restart with units running, the units and their work keep running and `status` lists them by marker
+- [x] T017 [US1] Container fixture in `tests/system_mode.rs`: with the package removed, 20 of 20 starts behave as before the install (SC-001); a non-member is refused with `not_a_member` and falls back; with the broker stopped and the socket present, the client says so in one line and falls back, and `--require-system` refuses; after a broker restart with units running, the units and their work keep running and `status` lists them by marker
   - *In part:* a non-member falls back, a silent broker falls back in one line, `--require-system` refuses, and units survive a broker restart (container run of 2026-11-17: Ubuntu 22.04, systemd 249, local VM); the uninstalled case is covered by `system_command_without_the_package` outside the container.
-- [ ] T018 [P] [US1] Delegated-root detection tests in `tests/cgroup.rs`. The agent accepts its cgroup only when all of these hold:
+  - *Done (2026-11-26 audit):* all 20 container fixtures pass on Ubuntu 22.04 with systemd 249 in the local VM, `twenty_starts_all_land_in_the_members_units` among them once the client read a rate-limited reply after a broken pipe (`04db264`); the uninstalled case stays with `system_command_without_the_package`.
+- [x] T018 [P] [US1] Delegated-root detection tests in `tests/cgroup.rs`. The agent accepts its cgroup only when all of these hold:
   - the cgroup is its own unit's path (both N4 placements);
   - it is owned by its user ID;
   - the broker's marker reads back.
   - *In part:* the tests are in `tests/system_mode.rs` (module `agent_in_unit`): both placements, the `agent` leaf, another user's unit, the idle unit, a session, a nested path, a missing or wrong marker and a directory not owned by the user.
   Every other path is refused.
+  - *Done (2026-11-26 audit):* the checks are in `tests/system_mode.rs` (`agent_in_unit`), not `tests/cgroup.rs`: both N4 placements, the `agent` leaf, another user's unit, the idle unit, a session, a nested path, a missing or wrong marker and a directory the user does not own; every other path is refused.
 
 ### Implementation
 
@@ -142,8 +144,9 @@ the task list.
   - Both units' markers are checked before either is touched. Tested against a systemd stand-in only; the container run is T031.
 - [ ] T022 [US1] Implement the idle executor subcommand: a fixed CedeGrid subcommand with no policy of its own, started in the idle unit and driven by the user's agent over a socket in the ordinary unit's runtime directory `/run/cedegrid/u<uid>/`, never the user's own runtime directory (research R9, R18). In `src/agent/` and `src/main.rs`.
   - *In part:* each unit lays out its cgroups as the user (`system_mode::prepare_unit`): its process moves into `<unit>/agent`, cpu, memory and pids are passed down, and `<unit>/jobs` holds the jobs' leaves; the broker's moves and OOM pass read leaves there. A container fixture checks it. The ordinary unit runs the user's agent (`cedegrid --config <dir>/cedegrid.toml agent --deployment <dir>/deployment.toml`, with `<dir>` = `$XDG_CONFIG_HOME/cedegrid` or `~/.config/cedegrid`) with its jobs in the unit's jobs cgroup; without those files it holds the unit and logs one line (container fixture). The idle executor's protocol is not built: Yield First jobs stay in the ordinary unit with 001's Full steps (FR-018's fallback), and the idle unit holds.
-- [ ] T023 [US1] Implement delegated-root detection inside a unit in `src/cgroup.rs` (passes T018)
+- [x] T023 [US1] Implement delegated-root detection inside a unit in `src/cgroup.rs` (passes T018)
   - *In part:* `cgroup::system_unit_jobs_root` accepts the unit and returns `<unit>/jobs` as the jobs' delegated root; job leaves are named `cedegrid-<mode>-<job>.<nonce>` from the job's RAM mode and task ID (`cgroup::leaf_label`). Moving the agent into `<unit>/agent` and making `jobs` is T022's.
+  - *Done (2026-11-26 audit):* `cgroup::system_unit_jobs_root` passes T018's checks; the agent and jobs layout is in place (container fixture `units_lay_out_an_agent_cgroup_and_a_jobs_cgroup`, passing 2026-11-26); only the idle executor (SYS-3) is deferred.
 - [x] T024 [US1] Implement the client in `src/system_mode.rs`, with `cedegrid system start|stop|status` added to `src/main.rs`:
   - detect the socket and check the protocol;
   - start the units and wait;
@@ -214,7 +217,7 @@ the task list.
 ### Implementation
 
 - [x] T038 [US3] Write `cedegrid_idle.slice` with `CPUWeight=idle` in `packaging/deb/cedegrid_idle.slice`, and implement the broker's fallback write of `cpu.idle` with readback at start in `src/broker/units.rs` (passes T035)
-- [ ] T039 [US3] Implement the move in `src/broker/moves.rs`, as in research R9 (passes T036):
+- [x] T039 [US3] Implement the move in `src/broker/moves.rs`, as in research R9 (passes T036):
   - resolve the job's leaf inside the caller's source unit;
   - freeze it;
   - check each member's user and group IDs and that nothing else is there (the broker's verified set, N6), and open a pidfd on each;
@@ -222,6 +225,7 @@ the task list.
   - thaw. Refuse and thaw the source on any failure; the job stays in its unit.
   - Under (c), agreed 2026-11-17: the agent names each task leaf `cedegrid-<mode>-<id>` (with T023), and the OOM pass reads each ordinary-unit task's mode from it.
   - *Written:* `src/broker/moves.rs`, tested against a fake cgroup tree (whole move, missing job or destination, another user's process, a failed write put back, child cgroups, no freeze); the broker resolves both units through their markers first. Not yet run on Linux.
+  - *Done (2026-11-26 audit):* the container fixture `the_confined_broker_moves_a_members_job` moves a member's job under systemd (passing 2026-11-26); the refusals are pinned by the fake-tree tests in `src/broker/moves.rs`.
 - [ ] T040 [US3] Make the agent ask for a move when a running job's mode changes between Yield First and another, and make an empty destination leaf first; on a refusal, apply the new mode where the job is with 001's Full steps and say so in one line. In `src/agent/` (FR-017, FR-018)
   - *Deferred* to a later version with the idle executor (follow-up SYS-3, user decision of 2026-11-17).
 - [ ] T041 [US3] Implement the level-dependent CPU default and range of `yield_first_margin_percent` in `src/contention.rs` (`ResourceThresholds::defaults`) and `src/config.rs` (where defaults are applied and validated), chosen once the agent knows it runs in a broker-made unit; no new key (Principle VII) (passes T037)
@@ -269,12 +273,13 @@ the task list.
   - the measure 001 uses for RAM;
   - 001's max-min fair share with the policy's thresholds.
   - `src/broker/oom.rs`: memory by user from `/proc/<pid>/status` (VmRSS plus VmSwap), principals, fair shares, tasks by leaf, and the writes per user; tested against fake `/proc` and cgroup trees. Per-account counters are follow-up SYS-2.
-- [ ] T048 [US4] Implement the loop in `src/broker/oom.rs` (passes T044):
+- [x] T048 [US4] Implement the loop in `src/broker/oom.rs` (passes T044):
   - one pass per second;
   - only processes in the broker's verified set (N6), each checked by unit cgroup, user and group IDs, pidfd and start time;
   - writes through the `/proc/<pid>` directory handle, only on change, each read back;
   - one journal line per write.
   - *Written, not yet run on Linux:* the pass driver is tested with fake process access; the loop thread in `broker::server::run` (marker recheck every 10 s, one journal line per write) compiles only on Linux and has not been built there yet.
+  - *Done (2026-11-26 audit):* run on the test host at `196394a` on 2026-11-17 (130 `oom_score_adj` writes, none failed; SC-006 to SC-008 in `docs/validation.md`), built and tested on Linux in every suite since, and `a_score_written_as_root_is_the_floor_for_the_user` passes in the container (2026-11-26).
 - [ ] T049 [US4] Switch off the agent's own OOM score writes in System mode in `src/agent/oom.rs` and the supervisor's mark path in `src/supervision/unix.rs` (passes T045)
   - *In part:* when `main` has checked the unit, it marks the agent as in a unit (`system_mode::set_in_unit`); the agent then sends no OOM marks to its supervisors, and `ram.prefer_own_oom_victim` is turned off with a one-line warning, so no gate sets one either. The fixture that runs a configured agent inside a unit (T045) waits for the host runs.
 
@@ -362,11 +367,13 @@ estimated in advance. Results go to `docs/validation.md` with the commit.
   - *Drafted:* `docs/system-mode.md` describes the finished feature; recheck it against moves (T039), the OOM loop (T048), doctor (T025) and purge (T053) before release.
 - [ ] T064 [P] Fix SUP-9 (a busy journal blocks the supervisor in an off phase) with a bounded lock wait and a test in `src/supervision/unix.rs` and `tests/supervision.rs`
 - [ ] T065 [P] Fix AGT-15 (a failed Authorize or renewal send is never resent): resend until delivered, as AGT-16 was, with a test in `src/agent/service.rs` and `tests/agent.rs`
-- [ ] T066 Change AGT-17's target from 005 to 002 in `specs/001-contention-modes/follow-ups.md`, with research R16's reason (replay is not used in System mode), and start `specs/005-system-mode/follow-ups.md` for this feature's own deferred items
+- [x] T066 Change AGT-17's target from 005 to 002 in `specs/001-contention-modes/follow-ups.md`, with research R16's reason (replay is not used in System mode), and start `specs/005-system-mode/follow-ups.md` for this feature's own deferred items
+  - *Done (2026-11-26 audit):* AGT-17's target is 002 in `specs/001-contention-modes/follow-ups.md` with R16's reason, and `specs/005-system-mode/follow-ups.md` exists (SYS-1 to SYS-3).
 - [x] T067 After T059: if the agents' total CPU breaks 001 SC-014's 1% bound, fix the worst of EFF-6, EFF-7 and EFF-10 in `src/telemetry/managed.rs` and `src/agent/service.rs`, and record the result in `specs/005-system-mode/follow-ups.md`
   - *Done (2026-11-17):* T059 measured 2.8% of one CPU per idle agent at a 500 ms monitor interval, 56 m for both, 0.28% of the test host's 20 CPUs; inside the bound, so nothing to fix.
 - [ ] T068 Update `CHANGELOG.md` and `README.md`'s install section for the two packages
-- [ ] T069 Apply the approved amendment (D4, N5, N6) to `.specify/memory/constitution.md` with its version change, in the same pull request as `docs/guarantees.md`'s System mode section (T062) and the tests it relies on (Governance)
+- [x] T069 Apply the approved amendment (D4, N5, N6) to `.specify/memory/constitution.md` with its version change, in the same pull request as `docs/guarantees.md`'s System mode section (T062) and the tests it relies on (Governance)
+  - *Done (2026-11-26 audit):* Principle V, "Rootless by Default, One Root Broker in System Mode", is in the constitution (9.2.0 at this commit); the release pull request carries it with `docs/guarantees.md`.
 - [ ] T070 Run `cargo fmt --all -- --check`, `cargo clippy --locked --all-targets -- -D warnings`, `cargo test --locked -- --test-threads=1` and `cargo +1.88.0 check --locked --all-targets` once, both Python suites and the npm suite (Principle VI), and the Windows client checks (`cargo check --all-targets`, `cargo test --lib --test policy --test telemetry --test cli`)
 - [x] T071 Run the source pack (`tools/pack_source_review.py`) and check that every new file is exported and no exported text names a host, an account or a private path
   - *Done:* the public-candidate pack passes its disclosure checks at 29f11fc (254 files); a scan of the export for host, account and path names finds only the product's default port and fixtures that test the scanner. Rerun at the release candidate.
