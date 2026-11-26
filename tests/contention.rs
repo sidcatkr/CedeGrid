@@ -7994,6 +7994,50 @@ mod core_lever {
         );
     }
 
+    /// Own work that gets less than its fair share while nothing holds it back says so and why;
+    /// CedeGrid never raises its thread count or priority to win it back (003 FR-049).
+    #[test]
+    fn own_work_below_its_fair_share_says_so() {
+        let below = |external: u64| {
+            let mut config = config();
+            config.cpu.reserve_physical_cores = 0;
+            config.contention.default_mode = ContentionMode::Neutral;
+            let mut engine = PolicyEngine::new();
+            let mut decision = None;
+            for i in 0..12u64 {
+                let mut snap = snapshot(8000);
+                snap.principals = Some(vec![
+                    PrincipalUsage {
+                        uid: Some(1000),
+                        is_owner: true,
+                        ..PrincipalUsage::default()
+                    },
+                    PrincipalUsage {
+                        uid: Some(2000),
+                        cpu_millicores: external,
+                        ..PrincipalUsage::default()
+                    },
+                ]);
+                let input = PolicyInput {
+                    allocations: vec![allocation(
+                        "task",
+                        AllocationClass::Opportunistic,
+                        1000,
+                        Some(8000 - external),
+                    )],
+                    ..PolicyInput::default()
+                };
+                decision = Some(engine.evaluate(&config, &snap, &input, i * 500).unwrap());
+            }
+            decision.unwrap().resources[&ResourceKey::Cpu]
+                .reasons
+                .iter()
+                .any(|r| r.code == "below_fair_share")
+        };
+        assert!(below(6000));
+        assert!(!below(3000));
+    }
+
     fn granted(decision: &Decision) -> Vec<u32> {
         decision
             .granted_cores

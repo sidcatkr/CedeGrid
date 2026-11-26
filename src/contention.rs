@@ -392,6 +392,10 @@ pub const REASON_CODES: &[(&str, &str)] = &[
         "One more own process on the time-sliced device would take a slice-bound principal below its fair share of the busy contexts, so GPU admission holds.",
     ),
     (
+        "below_fair_share",
+        "Own work gets less than its fair share while nothing holds it back: the other users' threads get more of the CPU, and CedeGrid does not raise its own thread count or priority.",
+    ),
+    (
         "cpu_cores_granted",
         "A run that gives CPU back by the cores it may use is granted whole cores for its part of the target, at least one.",
     ),

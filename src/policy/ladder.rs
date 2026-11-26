@@ -82,6 +82,7 @@ impl<'a> Interval<'a> {
         for key in keys {
             self.plan_resource(key);
         }
+        self.note_below_fair_share();
         let budgets = std::mem::take(&mut self.gpu_compute_budget);
         for (uuid, budget) in &budgets {
             self.plan_gpu_compute(uuid, budget);
@@ -204,6 +205,43 @@ impl<'a> Interval<'a> {
             self.hold_unchanged(&frame, &planned);
         } else {
             self.hold_or_reverse(&frame, &planned);
+        }
+    }
+
+    /// Own work that gets less than its fair share of a saturated, contended CPU while no step
+    /// holds it back says so and why (003 FR-049): the other users' threads get more of the CPU,
+    /// and CedeGrid never raises its thread count or priority to win it back.
+    fn note_below_fair_share(&mut self) {
+        let fair = self.cpu_kept_running;
+        let Some((own, _)) = self
+            .statuses
+            .get(&ResourceKey::Cpu)
+            .and_then(|status| status.own)
+        else {
+            return;
+        };
+        let thresholds = self.config.contention.thresholds(ResourceKind::Cpu);
+        let total = self.cpu_capacity.min(self.cpu_ceiling);
+        let saturated = self.cpu_busy.is_some_and(|busy| {
+            busy.saturating_mul(100)
+                >= total.saturating_mul(u64::from(thresholds.saturation_percent))
+        });
+        let floor =
+            (total.saturating_mul(u64::from(thresholds.principal_min_percent)) / 100).max(1);
+        let held = self
+            .next
+            .ladder
+            .iter()
+            .any(|((_, key), state)| *key == ResourceKey::Cpu && state.step > YieldStep::None);
+        if fair > 0 && saturated && !held && own.saturating_add(floor) < fair {
+            note(
+                &mut self.statuses,
+                ResourceKey::Cpu,
+                "below_fair_share",
+                format!(
+                    "own work uses {own} m of its fair share of {fair} m: the other users' threads get more of the CPU, and CedeGrid does not raise its own thread count or priority to win it back"
+                ),
+            );
         }
     }
 
