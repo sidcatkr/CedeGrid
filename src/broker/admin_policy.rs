@@ -425,6 +425,12 @@ pub fn load() -> Result<AdminPolicy> {
     load_from(std::path::Path::new(POLICY_DIR), 0, host_uid_min())
 }
 
+/// Without unix sockets there is no System mode, so no policy permits anything.
+#[cfg(not(unix))]
+pub fn load() -> Result<AdminPolicy> {
+    anyhow::bail!("the administrator policy exists only on Unix hosts")
+}
+
 /// Loads the policy from `dir`, which `owner` must own and only `owner` may write.
 ///
 /// The broker passes root's user ID; tests pass their own to reach the same checks.

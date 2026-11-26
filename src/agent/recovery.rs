@@ -48,6 +48,7 @@ impl Recovered {
 }
 
 /// How recovery reads and signals processes: the host's pidfds and `/proc`, or a fake in tests.
+#[cfg(unix)]
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) trait Processes {
     type Handle;
@@ -59,6 +60,7 @@ pub(crate) trait Processes {
     fn signal(&self, handle: &Self::Handle, signal: i32) -> io::Result<()>;
 }
 
+#[cfg(unix)]
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn gone(error: &io::Error) -> bool {
     matches!(error.raw_os_error(), Some(libc::ESRCH | libc::ENOENT))
@@ -66,6 +68,7 @@ fn gone(error: &io::Error) -> bool {
 
 /// Continue or end each recorded process whose identity still matches, in Principle I's order;
 /// one that fails a check or a signal does not stop the others.
+#[cfg(unix)]
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn recover_members<P: Processes>(
     processes: &P,
@@ -180,6 +183,17 @@ pub(crate) fn recover_run(
     let Some(leader) = record.identity.as_ref() else {
         return Ok(None);
     };
+    recover_family(attempt, record, leader, children)
+}
+
+/// Signals the run's recorded family; only Linux has the pidfds this needs.
+#[cfg(target_os = "linux")]
+fn recover_family(
+    attempt: &Path,
+    record: &ExecutionRecord,
+    leader: &crate::execution_model::ProcessIdentity,
+    children: &[FamilyMember],
+) -> Result<Option<Recovered>> {
     let family = recorded_family(attempt);
     // Without a report, the run's IDs are this agent's, which its supervisors share.
     // SAFETY: getuid and getgid cannot fail.
@@ -197,18 +211,20 @@ pub(crate) fn recover_run(
         AllocationClass::Guaranteed => libc::SIGCONT,
         AllocationClass::Opportunistic => libc::SIGKILL,
     };
-    #[cfg(target_os = "linux")]
-    {
-        let recovered = recover_members(&HostProcesses, &members, &leader.boot_id, ids, signal);
-        // After the signals: a repeat after a crash in between sends the same signal again.
-        write_atomic(&attempt.join(RECOVERY_FILE), &recovered)?;
-        Ok(Some(recovered))
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (members, ids, signal);
-        Ok(None)
-    }
+    let recovered = recover_members(&HostProcesses, &members, &leader.boot_id, ids, signal);
+    // After the signals: a repeat after a crash in between sends the same signal again.
+    write_atomic(&attempt.join(RECOVERY_FILE), &recovered)?;
+    Ok(Some(recovered))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn recover_family(
+    _attempt: &Path,
+    _record: &ExecutionRecord,
+    _leader: &crate::execution_model::ProcessIdentity,
+    _children: &[FamilyMember],
+) -> Result<Option<Recovered>> {
+    Ok(None)
 }
 
 /// Recover a run whose supervisor is gone, if it is Tracked and not yet recovered: its SDK
@@ -321,7 +337,7 @@ impl Processes for HostProcesses {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::cell::RefCell;

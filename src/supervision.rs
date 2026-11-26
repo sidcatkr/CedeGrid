@@ -689,6 +689,7 @@ pub fn supervise_controlled(
 pub(crate) const OOM_PREFERRED: i32 = 1000;
 
 /// Read back an owned gate's OOM preference and record it as evidence.
+#[cfg(unix)]
 pub(crate) fn verify_oom_score_adj(
     pid: u32,
     requested: i32,

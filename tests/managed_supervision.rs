@@ -2124,7 +2124,9 @@ impl supervision::SupervisorControl for RamCapScript {
             }
             (2, 2) => vec![adjust(2, YieldStep::Hint, Some(64))],
             (3, 3) => vec![supervision::SupervisorCommand::Query],
-            (4, 4) => {
+            // The child must have read the hint before it is told to stop; a slow host can
+            // otherwise end it between two of its polls.
+            (4, 4) if self.dir.join("seen").exists() => {
                 fs::write(self.dir.join("stop"), "").unwrap();
                 vec![]
             }
@@ -2167,7 +2169,8 @@ signals.draining()
 (d/'ready').write_text('1')
 while not (d/'stop').exists():
     t=signals.resource_targets()
-    if t is not None and t.step=='hint': hint=t.ram_mib
+    if t is not None and t.step=='hint' and hint is None:
+        hint=t.ram_mib;(d/'seen').write_text('1')
     time.sleep(0.005)
 (d/'hint').write_text(str(hint))
 "#,

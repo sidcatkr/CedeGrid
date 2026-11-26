@@ -557,8 +557,18 @@ fn storage_exhausted(error: &anyhow::Error) -> bool {
         cause
             .downcast_ref::<std::io::Error>()
             .and_then(std::io::Error::raw_os_error)
-            .is_some_and(|code| code == libc::ENOSPC || code == libc::EDQUOT)
+            .is_some_and(storage_errno)
     })
+}
+
+#[cfg(unix)]
+fn storage_errno(code: i32) -> bool {
+    code == libc::ENOSPC || code == libc::EDQUOT
+}
+
+#[cfg(not(unix))]
+fn storage_errno(code: i32) -> bool {
+    code == libc::ENOSPC
 }
 
 pub(crate) use crate::state::journal_busy;
