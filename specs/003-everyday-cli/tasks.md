@@ -145,12 +145,15 @@ Then the implementation:
 
   Each call follows Principle I's thread-ID rule (constitution 5.0.0, research R4); its own tests are T074–T077.
 - [ ] T040 [US6] Implement the affinity actuator in src/supervision/tracked.rs (research R4), with every per-thread call made through T078's thread-ID call.
-- [ ] T041 [P] [US6] Test first in tests/runqueue.rs, with a fake `/proc`:
+- [x] T041 [P] [US6] Test first in tests/runqueue.rs, with a fake `/proc`:
   - per-thread `run_delay` deltas are summed by UID;
   - exited threads are dropped, so no change is negative;
   - the scan is bounded by `evidence.max_threads_per_interval`, with rotation.
-- [ ] T042 [US6] Implement src/telemetry/runqueue.rs and add per-principal wait to the snapshot (research R7).
-- [ ] T043 [US6] Test first in tests/contention.rs, then implement in src/contention.rs: wait marks a principal as contending for the probe of 001 FR-021 and FR-072. A waiting user whose CPU use does not grow after a yield is recorded as satisfied. With hidden process details, the host-level signal goes through the same probe, with a `doctor` note.
+  - *Done (001 thread, `bdd6ec3`, 2026-11-26):* run-queue wait and allowed CPUs read from a fake `/proc` in `src/telemetry/runqueue.rs`'s tests and `tests/contention.rs`.
+- [x] T042 [US6] Implement src/telemetry/runqueue.rs and add per-principal wait to the snapshot (research R7).
+  - *Done (001 thread, `bdd6ec3`, 2026-11-26):* `src/telemetry/runqueue.rs`; `PrincipalUsage.cpu_wait_millicores` and `allowed_cpus` in the snapshot, bounded by `[evidence] max_threads_per_interval` (4096).
+- [x] T043 [US6] Test first in tests/contention.rs, then implement in src/contention.rs: wait marks a principal as contending for the probe of 001 FR-021 and FR-072. A waiting user whose CPU use does not grow after a yield is recorded as satisfied. With hidden process details, the host-level signal goes through the same probe, with a `doctor` note.
+  - *Done (001 thread, `bdd6ec3`, 2026-11-26):* wait marks a principal as contending for the probe (001 FR-091, T637).
 - [ ] T044 [P] [US6] Test first in tests/tracked.rs and tests/contention.rs, for SCHED_IDLE:
   - only for Yield First with same-cgroup contenders;
   - never for GPU runs by default;
@@ -161,7 +164,9 @@ Then the implementation:
   Also: autogroup is used only when the tasks sit in the root CPU cgroup, and is off by default.
 - [ ] T045 [US6] Implement SCHED_IDLE and autogroup in src/supervision/tracked.rs (research R6).
 - [ ] T046 [P] [US6] Test first in tests/contention.rs: no thread count or priority is ever raised. `below_fair_share` carries the reason, such as the contender's thread count. In a shared CPU cgroup, Neutral and Performance correct their core count from measured usage (FR-051).
+  - *In part (001 thread, `bdd6ec3`, 2026-11-26):* the policy half: `below_fair_share` with its reason and no raised thread count or priority, in `tests/contention.rs`; the agent half waits for the core lever.
 - [ ] T047 [US6] Implement fair-share reporting and the shared-cgroup correction in src/policy/ and src/agent/service.rs (research R8).
+  - *In part (001 thread, `bdd6ec3`, 2026-11-26):* the policy half: fair-share reporting in `src/policy/`; the agent side in `src/agent/service.rs` waits for the core lever.
 - [ ] T048 [P] [US6] Test first in tests/tracked.rs, for Tracked RAM: no cap and no address-space limit; hints start one hint deadline earlier; a drain checkpoints and resumes when available memory clears the floor for the calm window.
 - [ ] T049 [US6] Implement Tracked RAM handling (research R9).
 - [ ] T050 [US6] The `granted_cores` worker event (contracts/worker-events.md): tests first in Rust, Python and TypeScript with the contract fixture, then implementation in src/actuation.rs, python/cedegrid/worker.py and npm/src/.
@@ -250,7 +255,9 @@ per-core contention. Tests first; T039 and T040 build on T074–T078.
 - [ ] T078 [US6] Implement the thread-ID call in src/supervision/tracked.rs (research R4): detect thread pidfd support (`pidfd_open` with `PIDFD_THREAD`) once per agent start; check the member's pidfd before the call; fix the thread's identity (thread pidfd, else task entry and start time); check the same thread after the call; keep `misdirected_tids` per member; honor `CEDEGRID_TEST_FORCE_PROC_THREADS` in tests and gates only. T040 makes every per-thread affinity change through it. Per FR-043, plan: CPU lever (missing)
 - [ ] T079 [P] [US6] Test first in tests/runqueue.rs, with a fake `/proc`: each contending process's `Cpus_allowed_list` is read read-only into the principal's `allowed_cpus`; unreadable entries leave it unknown, not empty. Per FR-056 and research R15 (missing)
 - [ ] T080 [P] [US6] Test first in tests/contention.rs (`pinned_contender_*`): a principal whose wait stays at the contending level (T043) for the probe's response window and whose `allowed_cpus` overlap own work's granted cores, or are unknown, is not recorded as satisfied, under the saturation probe and under the PSI-only probe; at the Tracked level own work's requested granted cores drop a known overlap but never fall below its fair share in cores, and an unknown overlap moves no core; at the Full level no core request is made; with no overlap the 001 behavior is unchanged. Per FR-056 and 001 FR-021, FR-072 (missing)
+  - *In part (001 thread, `bdd6ec3`, 2026-11-26):* the policy half: a contender pinned to own CPUs is never counted satisfied (`pinned_contender_*`).
 - [ ] T081 [US6] Implement per-core contention: `allowed_cpus` and `pinned_overlap` in src/telemetry/runqueue.rs, the satisfied gate in src/contention.rs's probe (beside T043), and the core request to the affinity actuator (T040, T078). Per FR-056 and plan: per-core contention (missing)
+  - *In part (001 thread, `bdd6ec3`, 2026-11-26):* the policy half: `allowed_cpus` and the satisfied gate; the core request through the actuator is the agent's, with the core lever.
 - [ ] T082 [P] [US6] Test first, then implement: `ps` and `ps --json` show `possibly_misdirected` with the thread IDs, and the run log records each one once. Per FR-043, data-model Run.flags, contracts/cli.md (missing)
 - [ ] T083 [US6] Add the "Pinned contender" and "Thread-ID calls" gates to specs/003-everyday-cli/native-gates.md with exact commands and pass criteria (plan: native gates). Per FR-056, FR-043 (missing)
 - [ ] T084 [US6] Gate, at the Tracked level: a contender pinned with `taskset` to two of own work's cores reaches its demand after own work moves off them and is never recorded as satisfied while it waits; record the evidence in native-gates.md. Per FR-056, SC-006 (missing)
@@ -285,7 +292,8 @@ Contended-CPU placement (FR-057, SC-013):
 - [ ] T100 [P] [US6] Test first in tests/contention.rs (`contended_cpu_placement_*`): when the ladder would cap own work on a contended CPU, the decision first moves own work's granted cores off it (Tracked), or lowers own leaves' `cpu.weight`, never above 100 (Full, where authorized and the contender shares the delegated parent). The duty cycle applies only when own usage still exceeds its target in the next interval, and own work never goes below its fair share in cores. Per FR-057 (missing)
 - [ ] T101 [P] [US6] Test first in tests/contention.rs: with placement, a contender that switches on and off every 4 intervals (001 SC-009's shape) changes own work's CPU step at most once per switch, and so does report 029 run 4's shape (two of four CPUs saturated 30 s on and 30 s off). Per FR-057 (missing)
 - [ ] T102 [US6] Implement the contended set in src/telemetry/runqueue.rs and `contended_cpus` in src/model.rs, until T099 passes. Per FR-057 (missing)
-- [ ] T103 [US6] Implement placement in src/policy/ladder.rs and src/contention.rs, with the record fields `placement` (`none` \| `moved_off` \| `weight`) and `duty_after_placement`, applied through the Tracked affinity lever (src/supervision/tracked.rs, T078) and `cpu.weight` in src/cgroup.rs, until T100 and T101 pass. Per FR-057 (missing)
+- [x] T103 [US6] Implement placement in src/policy/ladder.rs and src/contention.rs, with the record fields `placement` (`none` \| `moved_off` \| `weight`) and `duty_after_placement`, applied through the Tracked affinity lever (src/supervision/tracked.rs, T078) and `cpu.weight` in src/cgroup.rs, until T100 and T101 pass. Per FR-057 (missing)
+  - *Done (001 thread, `bdd6ec3`, 2026-11-26):* re-scoped with 001: a run with a core lever (`AllocationFacts.cpu_cores`) is granted whole cores (`Decision.granted_cores`, reason `cpu_cores_granted`) instead of being paused; fewer cores apply at once, more wait the scale-up interval, unknown keeps the last grant, Performance and Aggressive get every core.
 - [ ] T104 [US6] Add "Contended-CPU placement" to specs/003-everyday-cli/native-gates.md with exact commands: report 029 run 4's shape beside CedeGrid and beside a fixed `taskset` allocation of the same own share, in the same run, recording the contender's p50 and p99 and own work's step changes. It passes when the contender's p99 beside Tracked caps is at most 1.2× its p99 beside the fixed allocation. Per SC-013 (missing)
 - [ ] T105 [US6] Gate: run "Contended-CPU placement" on the test host and record the p99 ratio against the 1.2× bound and the step changes in native-gates.md and docs/validation.md. Per SC-013 (missing)
 
@@ -331,7 +339,8 @@ Item 048's converge against constitution 7.0.0 and `specs/001-contention-modes/f
 - [ ] T110 Make US6 scenario 6 and FR-052 depend on the mode and the memory fair share, as 001's ladder does: in Performance and Aggressive own memory within its fair share is not given up for a floor breach others caused; add that case to T048. Per Constitution II (contradicts)
 - [ ] T111 Re-run plan.md's Constitution Check against 7.0.0 (row II: the OOM order and the memory fair share at the floors), and update the version references in spec.md, research.md R3 and R4, and T039. Per Constitution II, plan: Constitution Check (contradicts)
 - [ ] T112 Plan the follow-up "Full moves cores too": whether Full verifies its leaf members per thread through `cgroup.procs` plus a pidfd and takes the core move, through `/speckit-clarify` (FR-056, R15, R17, T080, T081 say Full makes no per-thread call). Per follow-ups "019 analyze C1" (partial)
-- [ ] T113 Set and validate the numeric default of the wait level that marks a principal as contending (T003, T043; src/config.rs, research R7), test first in tests/contention.rs. Per FR-050, FR-056, follow-ups "019 analyze A1" (missing)
+- [x] T113 Set and validate the numeric default of the wait level that marks a principal as contending (T003, T043; src/config.rs, research R7), test first in tests/contention.rs. Per FR-050, FR-056, follow-ups "019 analyze A1" (missing)
+  - *Done (001 thread, `bdd6ec3`, 2026-11-26):* the contending wait level's default is set and validated in `src/config.rs`, with its test in `tests/contention.rs`.
 - [ ] T114 Add a Full-level same-cgroup contender case to T052 and native-gates.md, or record in plan.md why Full cannot have one and amend FR-053. Per FR-053 (partial)
 - [ ] T115 Add a failing test in tests/run_cli.rs before T038 for the one-line Tracked notice and the `--require-containment` refusal (exit 3). Per FR-040, US6 scenarios 2 and 3 (partial)
 - [ ] T116 Add to T058 (tests/run_cli.rs) the `[run."<script>"]` write, the kept comments, the read-only floors and the one-line notice naming the file. Per FR-020, FR-021, FR-026, US3 scenarios 1, 2 and 5 (partial)
