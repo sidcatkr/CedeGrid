@@ -632,7 +632,6 @@ pub fn decide(outcome: Outcome, require_system: bool) -> Decision {
 /// Sends `request` to the broker at `socket` and reads its one reply within `timeout`.
 #[cfg(unix)]
 pub fn ask(socket: &Path, request: &Request, timeout: Duration) -> Outcome {
-    use std::io::{BufRead, BufReader, Read, Write};
     use std::os::unix::fs::FileTypeExt;
     use std::os::unix::net::UnixStream;
 
@@ -655,21 +654,44 @@ pub fn ask(socket: &Path, request: &Request, timeout: Duration) -> Outcome {
         }
         Err(_) => return Outcome::NoAnswer("is not running".to_owned()),
     };
-    let silent = || Outcome::NoAnswer(format!("did not answer within {} s", timeout.as_secs_f64()));
     if stream.set_read_timeout(Some(timeout)).is_err()
         || stream.set_write_timeout(Some(timeout)).is_err()
     {
-        return silent();
+        return silent(timeout);
     }
-    if stream.write_all(request.to_line().as_bytes()).is_err() {
-        return silent();
+    exchange(&mut stream, request, timeout)
+}
+
+#[cfg(unix)]
+fn silent(timeout: Duration) -> Outcome {
+    Outcome::NoAnswer(format!("did not answer within {} s", timeout.as_secs_f64()))
+}
+
+/// Writes the request and reads the one reply line. A broker that refuses before reading, as a
+/// rate-limited or busy one does, has already written its reply and closed, so a broken pipe on
+/// the write still reads that reply.
+#[cfg(unix)]
+fn exchange<S: std::io::Read + std::io::Write>(
+    stream: &mut S,
+    request: &Request,
+    timeout: Duration,
+) -> Outcome {
+    use std::io::{BufRead, BufReader, ErrorKind, Read};
+
+    if let Err(error) = stream.write_all(request.to_line().as_bytes())
+        && !matches!(
+            error.kind(),
+            ErrorKind::BrokenPipe | ErrorKind::ConnectionReset
+        )
+    {
+        return silent(timeout);
     }
     let mut line = Vec::new();
-    let mut reader = BufReader::new((&stream).take(MAX_REPLY_BYTES));
+    let mut reader = BufReader::new(stream.take(MAX_REPLY_BYTES));
     match reader.read_until(b'\n', &mut line) {
         Ok(_) if line.ends_with(b"\n") => {}
         Ok(_) => return Outcome::NoAnswer("closed the connection without a reply".to_owned()),
-        Err(_) => return silent(),
+        Err(_) => return silent(timeout),
     }
     reply_outcome(&line)
 }
@@ -907,4 +929,59 @@ pub fn prepare_unit(kind: crate::broker::units::UnitKind) -> anyhow::Result<std:
         }
     }
     Ok(jobs)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::io::{Error, ErrorKind, Read, Write};
+
+    /// A connection whose write fails as `write` says and whose read returns `reply`.
+    struct Closed {
+        write: ErrorKind,
+        reply: std::io::Cursor<Vec<u8>>,
+    }
+
+    impl Write for Closed {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(Error::from(self.write))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Read for Closed {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.reply.read(buf)
+        }
+    }
+
+    /// A rate-limited broker answers and closes before reading, so the client's write breaks;
+    /// the reply is still read, and the caller learns it was rate limited, not that the broker
+    /// was silent.
+    #[test]
+    fn a_reply_sent_before_the_request_was_read_is_still_read() {
+        let busy = Reply::refused(&Refusal::new(RefusalCode::RateLimited, "busy")).to_line();
+        let timeout = Duration::from_secs(2);
+        for kind in [ErrorKind::BrokenPipe, ErrorKind::ConnectionReset] {
+            let mut stream = Closed {
+                write: kind,
+                reply: std::io::Cursor::new(busy.clone().into_bytes()),
+            };
+            match exchange(&mut stream, &Request::Start { mode: None }, timeout) {
+                Outcome::Refused(refusal) => assert_eq!(refusal.code, RefusalCode::RateLimited),
+                other => panic!("{kind:?}: {other:?}"),
+            }
+        }
+        // A write that times out is a silent broker.
+        let mut stream = Closed {
+            write: ErrorKind::TimedOut,
+            reply: std::io::Cursor::new(busy.into_bytes()),
+        };
+        assert!(matches!(
+            exchange(&mut stream, &Request::Start { mode: None }, timeout),
+            Outcome::NoAnswer(_)
+        ));
+    }
 }
