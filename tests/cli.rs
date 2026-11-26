@@ -357,14 +357,15 @@ fn synthetic_replay_explains_pressure_without_affecting_live_system() {
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
 }
 
+/// 003's `run` takes the command to run; without one it refuses before reaching any agent.
 #[test]
-fn legacy_run_subcommand_is_rejected() {
+fn run_without_a_command_is_refused() {
     let output = Command::new(env!("CARGO_BIN_EXE_cedegrid"))
         .arg("run")
         .output()
         .unwrap();
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("unrecognized subcommand"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("required"));
 }
 
 #[test]
