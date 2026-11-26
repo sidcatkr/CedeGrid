@@ -65,7 +65,7 @@ broker's policy so both classify accounts alike (FR-059; user, 2026-11-26).
 | Field | Type | Default | Validation / notes |
 |---|---|---|---|
 | `uid_ranges` | list of `[first, last]` | `[[60578, 60705], [61184, 65519], [65534, 65535]]` (`SYSTEMD_NON_HUMAN_UIDS`) | each `first ≤ last`; a range not inside a default one needs `relaxed_detection`; fewer or narrower ranges need nothing |
-| `subordinate_uid_file` | path | `/etc/subuid` (`SUBORDINATE_UID_FILE`) | absolute or empty; empty turns the owner mapping off. Read only, again when its modification time changes; an owner given by name is resolved through the system's user database |
+| `subordinate_uid_file` | path | `/etc/subuid` (`SUBORDINATE_UID_FILE`) | a relative path resolves against the configuration file; empty turns the owner mapping off. Read only, again when its modification time changes; an owner given by name is resolved through the system's user database |
 
 ## ResourceThresholds (`src/config.rs`)
 

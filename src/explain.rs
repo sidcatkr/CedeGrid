@@ -342,14 +342,14 @@ pub fn doctor_text(
     let _ = writeln!(out, "CedeGrid doctor");
     let _ = writeln!(out);
     let mut host = format!(
-        "{} CPU · {} RAM",
+        "{} CPU, {} RAM",
         amount(ResourceKind::Cpu, snapshot.cpu_capacity_millicores),
         amount(ResourceKind::Ram, snapshot.total_ram_mib)
     );
     for gpu in &snapshot.gpus {
         let _ = write!(
             host,
-            " · {} {}",
+            ", {} {}",
             gpu.uuid,
             amount(ResourceKind::GpuMemory, gpu.total_memory_mib)
         );

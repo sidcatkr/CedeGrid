@@ -46,6 +46,14 @@
 - **First-come GPU floor.** Own GPU work that was on a device before every other user listed
   there keeps, in Yield First and Neutral, at least the share that leaves none of them more
   than half of the device. An unreadable user ID or an unknown process list withholds it.
+- **System accounts.** Usage by user IDs below `contention.uid_min` (1000) and in
+  `contention.system_accounts.uid_ranges` is background: it comes off the capacity but never
+  forms a user that own work gives back to. The default ranges are systemd's dynamic greeter
+  users (60578–60705), dynamic service users (61184–65519) and `nobody`, so a login screen's
+  GPU context is not a user that arrived first. People with systemd-homed or directory accounts
+  stay users. A user ID in an `/etc/subuid` range counts as its owner, so a rootless
+  container's processes are their owner's (`contention.system_accounts.subordinate_uid_file`;
+  empty turns it off). A range beyond the defaults needs `relaxed_detection`.
 - **Satisfied demand.** Under saturation, a small external demand is probed and a larger one
   is watched for one response window. A user whose usage stays within its demand is recorded
   as satisfied and no longer contends until its usage grows past it. At most 64 records are

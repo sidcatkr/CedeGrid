@@ -1924,6 +1924,11 @@ for runs E1 and E2 and has no code task yet.
   type for the node and the broker); a user ID in an `/etc/subuid` range counts as its owner (`subordinate_uid_file`,
   empty turns it off); `uid_max` goes; a range beyond the defaults is `relaxed_detection`, per FR-059, R91 (user,
   2026-11-26: systemd-homed and directory users are people; nothing fixed in code)
+- [X] T636 Convergence before the freeze (2026-11-26), scoped to FR-021, FR-059, FR-089, FR-090 and 006 FR-005 to
+  FR-013, FR-020, FR-021: the telemetry's account test calls `SystemAccounts::is_user`, the one test the node and
+  the broker share; a relative `subordinate_uid_file` resolves against the configuration file; the doctor host
+  line lists its parts with commas (user: no "·" in output); a changelog entry for system accounts. 006's
+  policy part (T020 to T023) has no gap; its open tasks are the other thread's
 - [ ] T623 Just before release, a read-only Tracked-mode sanity check on the shared GPU server: no stress, no global setting changed, nothing that touches other users; record the result in `docs/validation.md` (user, 2026-11-17)
 
 Order: T614, T615, T616, T617, T618, T619, T620, then T621 at the last commit; T622 before the security review; T623 last, just before release.

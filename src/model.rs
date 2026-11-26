@@ -241,7 +241,7 @@ pub struct GpuSnapshot {
     /// compute is measured as zero, and the measured path applies at once.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub own_only: bool,
-    /// Listed external contexts of a user ID below `uid_min` that are background this
+    /// Listed external contexts of a system account (FR-059) that are background this
     /// interval: per-process utilization is readable and theirs stays below
     /// `principal_min_percent` (FR-021). They stay in `external_process_ids`, and their memory
     /// counts as external usage.

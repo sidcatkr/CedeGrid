@@ -1233,7 +1233,6 @@ fn contention_validation_rejects_out_of_range_and_unknown_settings() {
         "[contention]\nacknowledge_caution = [\"something_else\"]",
         "[contention]\nacknowledge_caution = [\"floor_policy_c\"]",
         "[contention.system_accounts]\nuid_ranges = [[65519, 61184]]",
-        "[contention.system_accounts]\nsubordinate_uid_file = \"subuid\"",
         "[contention.system_accounts]\nbogus = 1",
         "[contention]\nuid_max = 60000",
     ] {
@@ -2051,5 +2050,32 @@ fn run_option_cases_parse_and_validate_alike() {
                 task["contention"]
             );
         }
+    }
+}
+
+/// A relative subordinate user ID file resolves against the configuration file, as other paths
+/// do; an empty one stays empty, which turns the owner mapping off (FR-059).
+#[test]
+fn a_relative_subordinate_uid_file_resolves_against_the_configuration() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let path = root.join("node.toml");
+    for (value, expected) in [
+        ("subuid", root.join("subuid")),
+        ("/etc/subuid", std::path::PathBuf::from("/etc/subuid")),
+        ("", std::path::PathBuf::new()),
+    ] {
+        fs::write(
+            &path,
+            format!(
+                "config_version=1\n[contention.system_accounts]\nsubordinate_uid_file = \"{value}\"\n"
+            ),
+        )
+        .unwrap();
+        let (config, _) = config::load_for_run(&path).unwrap();
+        assert_eq!(
+            config.contention.system_accounts.subordinate_uid_file, expected,
+            "{value}"
+        );
     }
 }
