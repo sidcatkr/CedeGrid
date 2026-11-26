@@ -905,6 +905,16 @@ of 4096 MiB for 30 s each, more than the host's RAM and swap. CedeGrid ran all t
 time, in 64.9–66.9 s with no kill; by hand the kernel killed three of the twelve in every run
 (SC-005: pass).
 
+### Install on a clean account (`f181efc`, `45119ad`)
+
+The 003 gate in [native-gates.md](../specs/003-everyday-cli/native-gates.md) ran on 2026-11-26 on
+the Linux x86_64 test host as an existing non-root account, with release files built from the
+branch and served on loopback. With an empty `HOME`, `install.sh` installed the pinned 0.2.0
+binary into `~/.local/bin` (mode 755, nothing else written to `HOME`) and said the directory was
+not on `PATH`. From a tarball with one byte changed it stopped with nothing installed. The
+release build's strip step had first failed on Linux with Rust 1.98.1 (`45119ad` fixes it). The
+first `cedegrid run` waits for `run` to land, so SC-012 is not met yet.
+
 ## Rules for validation runs
 
 - Report these statuses separately:

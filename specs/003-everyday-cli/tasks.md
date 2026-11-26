@@ -290,7 +290,7 @@ Install channel (FR-073, SC-012):
 - [X] T094 [US5] In .github/workflows/release.yml and release-candidate.yml, build Linux x86_64 and aarch64 binaries at the glibc 2.35 floor and publish `cedegrid-<version>-<target>.tar.gz`, `SHA256SUMS` and `install.sh` with the version written in; the candidate checks the sums before publishing. Per FR-073 (missing)
 - [X] T095 [P] [US5] Test first in tests/test_packaging.py: the wheel built from python/ holds the SDK only, with no `cedegrid` binary or launcher. Per FR-073 (missing)
 - [X] T096 [US5] Lead README.md's install section with the one-line script. Homebrew and `cargo install --locked cedegrid` follow as secondary channels, then the npm launcher packages with a line that they keep working. Update T069's guide to match. Per FR-073, FR-080 (missing)
-- [ ] T097 [US5] Add "Install on a clean account" to specs/003-everyday-cli/native-gates.md with exact commands: an empty `HOME` under an existing account (a new account only with the user's approval, FR-053), the one-line install, the checksum stop with a changed tarball, and a first `cedegrid run`. Per SC-012 (missing)
+- [X] T097 [US5] Add "Install on a clean account" to specs/003-everyday-cli/native-gates.md with exact commands: an empty `HOME` under an existing account (a new account only with the user's approval, FR-053), the one-line install, the checksum stop with a changed tarball, and a first `cedegrid run`. Per SC-012 (missing)
 - [ ] T098 [US5] Gate: run "Install on a clean account" on the test host and record the evidence in native-gates.md and docs/validation.md. Per SC-012 (missing)
 
 Contended-CPU placement (FR-057, SC-013):
