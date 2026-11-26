@@ -92,18 +92,23 @@ impl Interval<'_> {
 
     /// Each other account's standing on a resource, by UID, from its CedeGrid work there as
     /// `work` picks it; None while the principal list cannot be read, so no account is known to
-    /// be plain. Accounts below `uid_min` and usage without a UID are plain (006 FR-004).
+    /// be plain. System accounts, outside `uid_min` to `uid_max`, and usage without a UID are
+    /// plain (006 FR-004).
     pub(super) fn standings(
         &self,
         own: OwnArrival,
         work: &dyn Fn(&PrincipalUsage) -> Option<CedeGridWork>,
     ) -> Option<BTreeMap<u32, Standing>> {
         let list = self.snapshot.principals.as_ref()?;
-        let uid_min = self.config.contention.uid_min;
+        let contention = &self.config.contention;
         Some(
             list.iter()
                 .filter(|p| !p.is_owner)
-                .filter_map(|p| p.uid.filter(|uid| *uid >= uid_min).map(|uid| (uid, p)))
+                .filter_map(|p| {
+                    p.uid
+                        .filter(|uid| contention.is_user_uid(*uid))
+                        .map(|uid| (uid, p))
+                })
                 .map(|(uid, p)| (uid, standing(own, work(p))))
                 .collect(),
         )

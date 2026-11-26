@@ -181,8 +181,9 @@ intervals. An interval in which both process queries succeed, every listed proce
 verified process checked through its pidfd, no MPS is present, device utilization is known and
 memory attributed to no listed process has not grown beyond the last measured, own-only or empty
 interval plus the noise tolerance is measured at once with no external compute, so a new own
-process neither restarts the window nor turns the device Unknown. A context of a user ID below
-`contention.uid_min`, such as a display server's, is background rather than activity while per-
+process neither restarts the window nor turns the device Unknown. A context of a system account,
+a user ID below `contention.uid_min` (1000) or above `contention.uid_max` (60000), such as a
+display server's or a display manager's login screen, is background rather than activity while per-
 process utilization is readable for the device (the query succeeds or reports no samples) and
 its own utilization stays below `principal_min_percent`: it is neither external compute nor
 unknown activity, its share of device time is nobody's, and its memory still counts as external
@@ -302,7 +303,8 @@ compute are *contended* when they are saturated (busy at or above `saturation_pe
 external principal uses at least
 `principal_min_percent` of them without its demand being known to be satisfied, or when
 external activity of unknown amount exists. Principals are the account CedeGrid runs as,
-whatever its UID, and users at or above `contention.uid_min` (1000) that have used at
+whatever its UID, and users from `contention.uid_min` (1000) to `contention.uid_max` (60000),
+as `UID_MIN` and `UID_MAX` in `login.defs` have them, that have used at
 least `principal_min_percent` for `contention.principal_window_intervals` (4)
 observations; they leave after `contention.principal_leave_s` (60 s) below it, and
 meanwhile their unused share goes to the others. The account CedeGrid runs as is one
@@ -685,8 +687,8 @@ capacity within the floors: a floor below twice its minimum, a margin below its 
 and a detection setting beyond its default (`saturation_percent`,
 `principal_min_percent`, `noise_tolerance_mib`, `contention.uid_min`,
 `contention.gpu_compute.attribution_tolerance_percent` or
-`contention.gpu_compute.slice_bound_percent` above it, `memory_peak_window_s` or
-`quiet_window_intervals` below it). Performance is the default mode and needs no
+`contention.gpu_compute.slice_bound_percent` above it, `contention.uid_max`,
+`memory_peak_window_s` or `quiet_window_intervals` below it). Performance is the default mode and needs no
 acknowledgement; a file that still lists `"performance_mode"` loads unchanged. A lower
 margin needs `contention.acknowledge_caution = ["reduced_margin"]` and a higher detection
 threshold needs `"relaxed_detection"`. A floor

@@ -437,6 +437,25 @@ fn an_unlisted_load_beyond_the_lists_error_contends_at_once() {
     assert!(budgets[6] <= 2000, "{budgets:?}");
 }
 
+/// An account above `uid_max`, such as a display manager's dynamic greeter account, is a system
+/// account: its CPU is background, as below `uid_min`, never a principal's (FR-059; user,
+/// 2026-11-24).
+#[test]
+fn an_account_above_uid_max_is_background_like_one_below_uid_min() {
+    let budget_as = |uid: u32| {
+        let (mut snapshot, input) = reading_with(2000, 50, 0, Some(true));
+        snapshot.principals.as_mut().unwrap()[1].uid = Some(uid);
+        PolicyEngine::new()
+            .evaluate(&config(ContentionMode::Neutral), &snapshot, &input, 0)
+            .unwrap()
+            .managed_budget
+            .cpu_millicores
+    };
+    let uid_max = config(ContentionMode::Neutral).contention.uid_max;
+    assert_eq!(budget_as(uid_max + 4321), budget_as(999));
+    assert_ne!(budget_as(uid_max + 4321), budget_as(uid_max));
+}
+
 /// The owner's other processes, such as a shell or the coordinator, share the owner's slice
 /// with own work where the owner has a CPU cgroup of its own, so own tasks still get the equal
 /// share on their requests; where it has none, they come out of the share as before.

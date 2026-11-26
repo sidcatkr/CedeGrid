@@ -64,8 +64,10 @@ pub struct Collector {
     gpu_memory_tolerance_mib: u64,
     quiet_window_intervals: u32,
     attribution_tolerance_percent: u8,
-    /// User IDs below this are system accounts; their idle GPU contexts are background.
+    /// User IDs below this or above `uid_max` are system accounts; their idle GPU contexts are
+    /// background.
     uid_min: u32,
+    uid_max: u32,
     /// GPU compute's `principal_min_percent`, below which such a context is idle.
     gpu_principal_min_percent: u8,
     /// Every visible process, for principal aggregation only.
@@ -394,6 +396,7 @@ impl Collector {
             )
             .attribution_tolerance_percent,
             uid_min: crate::config::Config::default().contention.uid_min,
+            uid_max: crate::config::Config::default().contention.uid_max,
             gpu_principal_min_percent: crate::contention::ResourceThresholds::defaults(
                 crate::contention::ResourceKind::GpuCompute,
             )
@@ -503,6 +506,7 @@ impl Collector {
             .thresholds(crate::contention::ResourceKind::GpuCompute)
             .attribution_tolerance_percent;
         collector.uid_min = config.contention.uid_min;
+        collector.uid_max = config.contention.uid_max;
         collector.gpu_principal_min_percent = config
             .contention
             .thresholds(crate::contention::ResourceKind::GpuCompute)
@@ -880,7 +884,7 @@ impl Collector {
                 activity_baseline,
                 &samples,
                 context_uid,
-                self.uid_min,
+                self.uid_min..=self.uid_max,
                 self.gpu_principal_min_percent,
             );
             let active_external: Option<Vec<u32>> =
@@ -1587,7 +1591,7 @@ mod tests {
         }
     }
 
-    /// A system account's context (user ID below `uid_min`) is background while per-process
+    /// A system account's context (outside `uid_min` to `uid_max`) is background while per-process
     /// utilization is readable and its own stays below `principal_min_percent`; a user's
     /// context, an unreadable query or one without a fresh baseline never is (FR-021).
     #[test]
@@ -1595,6 +1599,8 @@ mod tests {
         let uid = |pid: u32| match pid {
             10 | 12 => Some(120),
             11 => Some(1000),
+            // A display manager's dynamic greeter account, above `uid_max`.
+            14 => Some(64321),
             _ => None,
         };
         let fresh: std::result::Result<_, NvmlError> = Ok(vec![
@@ -1605,8 +1611,15 @@ mod tests {
             gpu_sample(10, 90, 90),
         ]);
         assert_eq!(
-            background_contexts(Some(&[10, 11, 12, 13]), Some(100), &fresh, uid, 1000, 5),
-            BTreeSet::from([10])
+            background_contexts(
+                Some(&[10, 11, 12, 13, 14]),
+                Some(100),
+                &fresh,
+                uid,
+                1000..=60000,
+                5
+            ),
+            BTreeSet::from([10, 14])
         );
         // No samples: every system context is idle.
         assert_eq!(
@@ -1615,7 +1628,7 @@ mod tests {
                 Some(100),
                 &Err(NvmlError::NotFound),
                 uid,
-                1000,
+                1000..=60000,
                 5
             ),
             BTreeSet::from([10, 12])
@@ -1626,13 +1639,13 @@ mod tests {
                 Some(100),
                 &Err(NvmlError::NotSupported),
                 uid,
-                1000,
+                1000..=60000,
                 5
             )
             .is_empty()
         );
-        assert!(background_contexts(Some(&[10]), None, &fresh, uid, 1000, 5).is_empty());
-        assert!(background_contexts(None, Some(100), &fresh, uid, 1000, 5).is_empty());
+        assert!(background_contexts(Some(&[10]), None, &fresh, uid, 1000..=60000, 5).is_empty());
+        assert!(background_contexts(None, Some(100), &fresh, uid, 1000..=60000, 5).is_empty());
     }
 
     /// Background contexts count as neither external compute nor unknown: own work keeps the

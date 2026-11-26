@@ -25,11 +25,11 @@ impl<'a> Interval<'a> {
             .thresholds(ResourceKind::Cpu)
             .principal_min_percent;
         let floor = (capacity.saturating_mul(u64::from(percent)) / 100).max(1);
-        let uid_min = self.config.contention.uid_min;
+        let contention = &self.config.contention;
         self.prev.cpu_quiet_intervals > 0
             && !list.iter().any(|principal| {
                 !principal.is_owner
-                    && principal.uid.is_none_or(|uid| uid >= uid_min)
+                    && principal.uid.is_none_or(|uid| contention.is_user_uid(uid))
                     && principal.cpu_millicores >= floor
             })
     }
@@ -732,7 +732,7 @@ impl<'a> Interval<'a> {
             match p.uid {
                 _ if p.is_owner => members.push((principal, usage)),
                 None => {}
-                Some(uid) if uid < config.contention.uid_min => {
+                Some(uid) if !config.contention.is_user_uid(uid) => {
                     background = background.saturating_add(usage);
                 }
                 Some(uid) => {
@@ -1129,8 +1129,9 @@ impl<'a> Interval<'a> {
             .collect();
         let held_set: BTreeSet<u32> = held.iter().flatten().copied().collect();
         // A plain principal contends: an account with no CedeGrid work on the CPU, or usage
-        // that no readable account accounts for. Accounts below uid_min are background.
-        let uid_min = self.config.contention.uid_min;
+        // that no readable account accounts for. System accounts, outside `uid_min` to `uid_max`,
+        // are background.
+        let contention = &self.config.contention;
         // CPU no account accounts for right after own tasks stop is their last interval's
         // usage, read in the host's busy time after the own reading dropped: no principal.
         let exit_recent = self.next.own_exit_ms.is_some_and(|at| {
@@ -1157,7 +1158,7 @@ impl<'a> Interval<'a> {
                     && match p.uid {
                         None => true,
                         Some(uid) => {
-                            uid >= uid_min
+                            contention.is_user_uid(uid)
                                 && standings
                                     .as_ref()
                                     .is_some_and(|s| s.get(&uid).is_none_or(|s| s.work.is_none()))
@@ -1269,7 +1270,7 @@ impl<'a> Interval<'a> {
                     };
                     match principal.uid {
                         Some(uid)
-                            if !principal.is_owner && uid >= self.config.contention.uid_min =>
+                            if !principal.is_owner && self.config.contention.is_user_uid(uid) =>
                         {
                             contending.push(usage);
                         }
@@ -2150,7 +2151,7 @@ impl<'a> Interval<'a> {
             return None;
         }
         let contexts = gpu.compute_contexts.as_ref()?;
-        let uid_min = self.config.contention.uid_min;
+        let contention = &self.config.contention;
         let own_listed: BTreeSet<u32> = contexts
             .own
             .iter()
@@ -2199,7 +2200,7 @@ impl<'a> Interval<'a> {
             let mut principals: BTreeMap<Option<u32>, u32> = BTreeMap::new();
             for pid in &external_listed {
                 if let Some(context) = seen(pid).filter(|context| context.sampled)
-                    && context.uid.is_none_or(|uid| uid >= uid_min)
+                    && context.uid.is_none_or(|uid| contention.is_user_uid(uid))
                 {
                     *principals.entry(context.uid).or_default() += 1;
                 }
@@ -2222,7 +2223,7 @@ impl<'a> Interval<'a> {
                 for (_, uid) in contexts
                     .listed
                     .iter()
-                    .filter(|(_, uid)| uid.is_none_or(|uid| uid >= uid_min))
+                    .filter(|(_, uid)| uid.is_none_or(|uid| contention.is_user_uid(uid)))
                 {
                     *principals.entry(*uid).or_default() += 1;
                 }
@@ -2326,12 +2327,12 @@ impl<'a> Interval<'a> {
         if !contexts.own.is_empty() {
             arrivals.own = Some(DeviceArrivals::note(arrivals.own, now));
         }
-        let uid_min = self.config.contention.uid_min;
+        let contention = &self.config.contention;
         let mut unreadable = false;
         let mut listed = BTreeSet::new();
         for (_, uid) in &contexts.listed {
             match uid {
-                Some(uid) if *uid >= uid_min => {
+                Some(uid) if contention.is_user_uid(*uid) => {
                     listed.insert(*uid);
                 }
                 Some(_) => {}
@@ -2373,7 +2374,8 @@ impl<'a> Interval<'a> {
     /// The share the first-come floor keeps for own work on the device, in thousandths, where it
     /// applies (FR-090): on a time-sliced device, the share 2 × E_max − E running own contexts
     /// get beside E external ones, E_max the most of one principal; elsewhere half the device
-    /// beside exactly one listed principal, and none beside more.
+    /// beside exactly one listed principal, and none beside more. System accounts' contexts are
+    /// no principal's (FR-059).
     fn first_come_share(&self, gpu: &GpuSnapshot) -> Option<u64> {
         if !self.first_come.contains(&gpu.uuid) {
             return None;
@@ -2381,7 +2383,10 @@ impl<'a> Interval<'a> {
         let contexts = gpu.compute_contexts.as_ref()?;
         let mut by_uid: BTreeMap<u32, u64> = BTreeMap::new();
         for (_, uid) in &contexts.listed {
-            *by_uid.entry((*uid)?).or_default() += 1;
+            let uid = (*uid)?;
+            if self.config.contention.is_user_uid(uid) {
+                *by_uid.entry(uid).or_default() += 1;
+            }
         }
         let most = by_uid.values().copied().max()?;
         let all: u64 = by_uid.values().sum();
@@ -2517,7 +2522,7 @@ impl<'a> Interval<'a> {
                 let averaged_background = listed
                     .iter()
                     .filter(|p| {
-                        !p.is_owner && p.uid.is_some_and(|uid| uid < config.contention.uid_min)
+                        !p.is_owner && p.uid.is_some_and(|uid| !config.contention.is_user_uid(uid))
                     })
                     .map(|p| averaged_of(p))
                     .sum();
