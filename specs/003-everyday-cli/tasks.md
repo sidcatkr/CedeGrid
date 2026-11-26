@@ -210,12 +210,12 @@ Native gates and docs:
 
 **Independent test**: setup on a terminal, with `NO_COLOR`, and non-interactively.
 
-- [ ] T061 [P] [US4] Test first in tests/cli.rs, rendering to ratatui's test backend:
+- [X] T061 [P] [US4] Test first in tests/cli.rs, rendering to ratatui's test backend:
   - the header, the three sections, and the side pane with this host's numbers;
   - values change in place with the left and right keys (FR-031);
   - caution marking and the separate confirmation;
   - `NO_COLOR` and non-terminal behavior unchanged.
-- [ ] T062 [US4] Reimplement src/setup/interface.rs with ratatui and crossterm, sharing its style module with src/top.rs.
+- [X] T062 [US4] Reimplement src/setup/interface.rs with ratatui and crossterm, sharing its style module with src/top.rs (the style is `src/tui_style.rs`; the pty tests replay the screen onto a grid).
 
 ## Phase 8: User Story 7 - Single-core bottlenecks (P2)
 

@@ -28,4 +28,5 @@ pub mod storage_qualification;
 pub mod supervision;
 pub mod system_mode;
 pub mod telemetry;
+pub mod tui_style;
 pub mod upgrade;

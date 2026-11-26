@@ -170,6 +170,7 @@ ALLOWLIST = (
     'src/telemetry/processes.rs',
     'src/telemetry/runqueue.rs',
     'src/telemetry/subuid.rs',
+    'src/tui_style.rs',
     'src/upgrade.rs',
     'tests/agent.rs',
     'tests/agent_reconciliation.rs',

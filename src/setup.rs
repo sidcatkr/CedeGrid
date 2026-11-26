@@ -2223,7 +2223,7 @@ fn fix_for(code: &str) -> Option<&'static str> {
 }
 
 /// The interactive paths: the terminal interface and the line prompts.
-mod interface;
+pub mod interface;
 
 #[cfg(test)]
 mod tests {

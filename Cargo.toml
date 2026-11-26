@@ -108,6 +108,10 @@ sha2 = "0.10"
 hex = "0.4"
 fs2 = "0.4"
 uuid = { version = "1", features = ["v4", "serde"] }
+# The setup interface and `top`: grouped sections, a side pane and in-place editing on every
+# terminal, Windows client paths included (003 R11). Both build on Rust 1.88.
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+crossterm = "0.29"
 
 # Whole-program optimization for the agent and its per-task supervisors (SC-014). Panics
 # stay unwinding: the supervisor's log-drain join, the agent's blocking-task joins and Drop

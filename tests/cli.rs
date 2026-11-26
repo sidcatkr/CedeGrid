@@ -1294,9 +1294,74 @@ mod setup_terminal {
             String::from_utf8_lossy(&self.output.lock().unwrap()).into_owned()
         }
 
+        /// The screen as the terminal shows it now: the output replayed onto a 60 by 140 grid,
+        /// following cursor moves and clears and ignoring other escape sequences.
+        fn screen(&self) -> String {
+            let text = self.text();
+            let mut grid = vec![vec![' '; 140]; 60];
+            let (mut row, mut column) = (0usize, 0usize);
+            let mut chars = text.chars().peekable();
+            while let Some(c) = chars.next() {
+                match c {
+                    '\x1b' => {
+                        if chars.peek() != Some(&'[') {
+                            continue;
+                        }
+                        chars.next();
+                        let mut body = String::new();
+                        while let Some(&next) = chars.peek() {
+                            chars.next();
+                            if next.is_ascii_alphabetic() {
+                                body.push(next);
+                                break;
+                            }
+                            body.push(next);
+                        }
+                        if let Some(position) = body.strip_suffix('H') {
+                            let mut parts =
+                                position.split(';').map(|n| n.parse::<usize>().unwrap_or(1));
+                            row = parts.next().unwrap_or(1).saturating_sub(1);
+                            column = parts.next().unwrap_or(1).saturating_sub(1);
+                        } else if body == "2J" {
+                            grid = vec![vec![' '; 140]; 60];
+                        }
+                    }
+                    '\n' => {
+                        row += 1;
+                        column = 0;
+                    }
+                    '\r' => column = 0,
+                    c if !c.is_control() => {
+                        if row < 60 && column < 140 {
+                            grid[row][column] = c;
+                        }
+                        column += 1;
+                    }
+                    _ => {}
+                }
+            }
+            grid.iter()
+                .map(|line| line.iter().collect::<String>().trim_end().to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        /// The settings list's row for `label`, without the side pane.
+        fn row(&self, label: &str) -> String {
+            self.screen()
+                .lines()
+                .map(|line| line.split('\u{2502}').next().unwrap_or_default())
+                .find(|line| {
+                    line.trim_start_matches(['\u{276f}', '>', ' '])
+                        .starts_with(label)
+                })
+                .unwrap_or_default()
+                .to_string()
+        }
+
         fn wait_for(&self, needle: &str) {
             let started = Instant::now();
-            while !self.text().contains(needle) {
+            while !self.text().contains(needle) && !self.screen().contains(needle) {
                 assert!(
                     started.elapsed() < Duration::from_secs(20),
                     "waited for {needle:?} in:\n{}",
@@ -1357,10 +1422,12 @@ mod setup_terminal {
         pty
     }
 
-    /// Open the row `index` levels below the top, from the top.
+    const LEFT: &[u8] = b"\x1b[D";
+    const RIGHT: &[u8] = b"\x1b[C";
+
+    /// Move to the row `index` levels below the top, from the top.
     fn open(pty: &mut Pty, index: usize) {
         pty.keys(DOWN, index);
-        pty.key(b"\r");
     }
 
     /// From the main screen, with the selection on `from`, review and write.
@@ -1377,12 +1444,11 @@ mod setup_terminal {
         let path = dir.path().join("node.toml");
         let mut pty = interface(&path, &[]);
         open(&mut pty, DEFAULT_MODE);
-        pty.wait_for("Holds the fair share");
-        // Options: Yield First, Neutral, Performance, Aggressive; the highlight starts on
-        // Performance, the current value. Space does nothing; Enter chooses.
-        pty.keys(UP, 2);
+        // Values: Yield First, Neutral, Performance, Aggressive, starting on Performance; Left
+        // changes it in place, and Space does nothing.
+        pty.keys(LEFT, 2);
         pty.key(b" ");
-        pty.key(b"\r");
+        pty.wait_for("Value: Yield First");
         write_from(&mut pty, DEFAULT_MODE);
         let (status, text, _) = pty.finish();
         assert!(status.success(), "{text}");
@@ -1397,25 +1463,20 @@ mod setup_terminal {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("node.toml");
         let mut pty = interface(&path, &[]);
-        // Ascending options; 768 MiB, near the minimum, is four above the current 8192.
+        // Ascending values; 768 MiB, near the minimum, is four below the current 8192, and the
+        // first caution value on the way.
         open(&mut pty, RAM_FLOOR);
-        pty.keys(UP, 4);
-        pty.key(b"\r");
+        pty.keys(LEFT, 4);
         pty.wait_for("Confirm a caution option");
         pty.wait_for("Less headroom is kept");
-        // Declining keeps the previous value.
+        // Declining keeps the value the step came from.
         pty.key(b"\r");
         pty.wait_for("Review and write");
-        let text = pty.text();
-        let row = text[text.rfind("RAM floor").unwrap()..]
-            .lines()
-            .next()
-            .unwrap();
-        assert!(row.contains("8192"), "{row}");
+        std::thread::sleep(Duration::from_millis(200));
+        let row = pty.row("RAM floor");
+        assert!(row.contains("1024"), "{row}");
         assert!(!row.contains("[caution]"), "{row}");
-        pty.key(b"\r");
-        pty.keys(UP, 4);
-        pty.key(b"\r");
+        pty.key(LEFT);
         pty.wait_for("Confirm a caution option");
         pty.key(DOWN);
         pty.key(b"\r");
@@ -1442,8 +1503,7 @@ mod setup_terminal {
             let before = pty.initial;
             // A change made before cancelling is not written either.
             open(&mut pty, DEFAULT_MODE);
-            pty.key(UP);
-            pty.key(b"\r");
+            pty.key(LEFT);
             pty.key(key);
             let (status, text, after) = pty.finish();
             assert_eq!(status.code(), Some(130), "{key:?}: {text}");
@@ -1478,8 +1538,12 @@ mod setup_terminal {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("node.toml");
         let mut pty = interface(&path, &[("NO_COLOR", "1")]);
-        // A floor near its minimum is marked; Performance, the default, is not.
+        // A floor near its minimum is marked once chosen; Performance, the default, is not.
         open(&mut pty, RAM_FLOOR);
+        pty.keys(LEFT, 4);
+        pty.wait_for("Confirm a caution option");
+        pty.key(DOWN);
+        pty.key(b"\r");
         pty.wait_for("[caution]");
         pty.key(b"q");
         let (_, text, _) = pty.finish();
@@ -1498,7 +1562,12 @@ mod setup_terminal {
         // With color the marker is yellow.
         let mut pty = interface(&path, &[]);
         open(&mut pty, RAM_FLOOR);
-        pty.wait_for("\x1b[33m[caution]\x1b[0m");
+        pty.keys(LEFT, 4);
+        pty.wait_for("Confirm a caution option");
+        pty.key(DOWN);
+        pty.key(b"\r");
+        // Yellow is palette color 3, which the screen library writes as 38;5;3.
+        pty.wait_for("38;5;3;49m[caution]");
         pty.key(b"q");
         pty.finish();
     }
@@ -1511,8 +1580,7 @@ mod setup_terminal {
         let path = dir.path().join("node.toml");
         let mut pty = interface(&path, &[]);
         open(&mut pty, MAX_MODE);
-        pty.keys(DOWN, 2);
-        pty.key(b"\r");
+        pty.keys(RIGHT, 2);
         pty.wait_for("Confirm a caution option");
         pty.wait_for("record aggressive_mode");
         // No is preselected; choose Yes.
@@ -1551,10 +1619,9 @@ mod setup_terminal {
                 "priority declined",
                 None,
                 |pty| {
-                    // Options: Yes (preselected), No.
+                    // Values: Yes (preselected), No.
                     open(pty, PLAIN_PRIORITY);
-                    pty.key(DOWN);
-                    pty.key(b"\r");
+                    pty.key(RIGHT);
                     write_from(pty, PLAIN_PRIORITY);
                 },
                 &["--no-priority-over-plain"],
@@ -1566,8 +1633,7 @@ mod setup_terminal {
                     // Options: no explicit cap (current), Performance, Aggressive; Performance
                     // needs no confirmation.
                     open(pty, MAX_MODE);
-                    pty.key(DOWN);
-                    pty.key(b"\r");
+                    pty.key(RIGHT);
                     write_from(pty, MAX_MODE);
                 },
                 &["--max-mode", "performance", "--priority-over-plain"],
@@ -1576,10 +1642,9 @@ mod setup_terminal {
                 "floor change",
                 Some(start),
                 |pty| {
-                    // Ascending options; 16 384 follows the current 8192.
+                    // Ascending values; 16 384 follows the current 8192.
                     open(pty, RAM_FLOOR);
-                    pty.key(DOWN);
-                    pty.key(b"\r");
+                    pty.key(RIGHT);
                     write_from(pty, RAM_FLOOR);
                 },
                 &["--ram-floor-mib", "16384", "--priority-over-plain"],
@@ -1588,10 +1653,9 @@ mod setup_terminal {
                 "margin change",
                 Some(start),
                 |pty| {
-                    // Descending options; 7 precedes the default 5.
+                    // Descending values; 7 precedes the default 5.
                     open(pty, CPU_NEUTRAL_MARGIN);
-                    pty.key(UP);
-                    pty.key(b"\r");
+                    pty.key(LEFT);
                     write_from(pty, CPU_NEUTRAL_MARGIN);
                 },
                 &["--margin", "cpu.neutral=7", "--priority-over-plain"],
@@ -1829,4 +1893,205 @@ fn setup_flags_set_aggressive_only_with_its_acknowledgement() {
             .mode(cedegrid::contention::ResourceKind::Cpu),
         cedegrid::contention::ContentionMode::Aggressive
     );
+}
+
+/// The setup screen (003 FR-030 to FR-032), drawn to ratatui's test backend: the host header,
+/// the three groups, a side pane with this host's numbers, values changed in place with Left
+/// and Right, caution marking with its separate confirmation, and no color without color.
+#[cfg(unix)]
+mod setup_screen {
+    use cedegrid::setup::interface::screen::{self, Key, Screen, View};
+    use cedegrid::setup::interface::{Glyphs, State};
+    use cedegrid::setup::{Choices, Field, Host, Target};
+    use ratatui::{Terminal, backend::TestBackend};
+
+    fn host() -> Host {
+        Host {
+            cpu_millicores: 16_000,
+            physical_cores: Some(8),
+            ram_mib: 65_536,
+            gpus: vec![("GPU-0000".into(), 24_576)],
+            plain_priority: cedegrid::system_mode::PlainPriorityHost::Rootless,
+        }
+    }
+
+    /// A fresh node file in a directory the caller keeps.
+    fn state() -> (tempfile::TempDir, State) {
+        let directory = tempfile::tempdir().unwrap();
+        let target = Target {
+            path: directory.path().join("node.toml"),
+            original: None,
+            role: None,
+        };
+        let state = State::new(target, Default::default(), Choices::default(), Some(host()));
+        (directory, state)
+    }
+
+    const GLYPHS: Glyphs = Glyphs {
+        pointer: ">",
+        chosen: ">",
+        other: " ",
+        arrows: "Up/Down",
+    };
+
+    fn drawn(state: &State, screen: &Screen, color: bool) -> (String, ratatui::buffer::Buffer) {
+        let mut terminal = Terminal::new(TestBackend::new(120, 48)).unwrap();
+        terminal
+            .draw(|frame| screen::draw(frame, state, screen, color, GLYPHS))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let text = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        (text, buffer)
+    }
+
+    fn move_to(screen: &mut Screen, state: &mut State, field: Field) {
+        while screen.rows[screen.row] != field {
+            assert!(screen.key(state, Key::Down).is_none());
+        }
+    }
+
+    #[test]
+    fn the_header_groups_and_side_pane_show_this_host() {
+        let (_directory, state) = state();
+        let mut screen = Screen::new(&state);
+        let (text, _) = drawn(&state, &screen, true);
+        assert!(text.contains("CedeGrid setup"), "{text}");
+        assert!(
+            text.contains("Host: 16 CPUs, 65 536 MiB RAM, GPU-0000 with 24 576 MiB"),
+            "{text}"
+        );
+        for section in screen::SECTIONS {
+            assert!(text.contains(section), "{section}: {text}");
+        }
+        assert!(!text.contains('\u{b7}'), "{text}");
+        let mut state = state;
+        move_to(&mut screen, &mut state, Field::RamFloor);
+        let (text, _) = drawn(&state, &screen, true);
+        assert!(text.contains("About this setting"), "{text}");
+        assert!(text.contains("MiB"), "{text}");
+    }
+
+    #[test]
+    fn left_and_right_change_the_value_in_place() {
+        let (_directory, mut state) = state();
+        let mut screen = Screen::new(&state);
+        move_to(&mut screen, &mut state, Field::HintDeadline);
+        let before = state.values[&Field::HintDeadline];
+        assert!(screen.key(&mut state, Key::Right).is_none());
+        assert!(matches!(screen.view, View::Main | View::Confirm { .. }));
+        if matches!(screen.view, View::Main) {
+            assert_ne!(state.values[&Field::HintDeadline], before);
+            assert!(screen.key(&mut state, Key::Left).is_none());
+            assert_eq!(state.values[&Field::HintDeadline], before);
+        }
+    }
+
+    #[test]
+    fn a_caution_value_is_marked_and_needs_its_own_confirmation() {
+        let (_directory, mut state) = state();
+        let mut screen = Screen::new(&state);
+        // Find a setting whose next value toward the edge is a caution one.
+        let mut found = None;
+        for field in screen.rows.clone() {
+            if field == Field::Role {
+                continue;
+            }
+            move_to(&mut screen, &mut state, field);
+            let kept = state.values[&field];
+            for key in [Key::Left, Key::Right] {
+                for _ in 0..12 {
+                    screen.key(&mut state, key);
+                    if let View::Confirm { .. } = screen.view {
+                        found = Some((field, kept));
+                        break;
+                    }
+                }
+                if found.is_some() {
+                    break;
+                }
+            }
+            if found.is_some() {
+                break;
+            }
+            state.values.insert(field, kept);
+        }
+        let (field, _) = found.expect("no caution value reached");
+        let (text, _) = drawn(&state, &screen, true);
+        assert!(text.contains("Confirm a caution option"), "{text}");
+        // Choosing No keeps the value; the value only changes after Yes.
+        let before = state.values[&field];
+        assert!(screen.key(&mut state, Key::Enter).is_none());
+        assert_eq!(state.values[&field], before);
+        assert!(matches!(screen.view, View::Main));
+        // Again, and Yes this time: the value changes, is marked, and its option is recorded.
+        let mut reached = false;
+        for key in [Key::Left, Key::Right] {
+            for _ in 0..12 {
+                screen.key(&mut state, key);
+                if let View::Confirm { .. } = screen.view {
+                    reached = true;
+                    break;
+                }
+            }
+            if reached {
+                break;
+            }
+        }
+        assert!(reached);
+        screen.key(&mut state, Key::Down);
+        screen.key(&mut state, Key::Enter);
+        assert!(!state.acknowledged.is_empty());
+        let (text, buffer) = drawn(&state, &screen, true);
+        assert!(text.contains("[caution]"), "{text}");
+        let yellow = (0..buffer.area.height).any(|y| {
+            (0..buffer.area.width).any(|x| buffer[(x, y)].fg == ratatui::style::Color::Yellow)
+        });
+        assert!(yellow, "the caution marker is not yellow");
+    }
+
+    #[test]
+    fn without_color_no_cell_has_a_color_or_modifier() {
+        let (_directory, state) = state();
+        let screen = Screen::new(&state);
+        let (_, buffer) = drawn(&state, &screen, false);
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                let cell = &buffer[(x, y)];
+                assert_eq!(cell.fg, ratatui::style::Color::Reset);
+                assert_eq!(cell.bg, ratatui::style::Color::Reset);
+                assert!(cell.modifier.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn esc_cancels_and_review_writes() {
+        let (_directory, mut state) = state();
+        let mut screen = Screen::new(&state);
+        while screen.row != screen.rows.len() {
+            screen.key(&mut state, Key::Down);
+        }
+        assert!(screen.key(&mut state, Key::Enter).is_none());
+        assert!(matches!(screen.view, View::Summary(_)));
+        let (text, _) = drawn(&state, &screen, true);
+        assert!(text.contains("Review before writing"), "{text}");
+        assert!(matches!(
+            screen.key(&mut state, Key::Enter),
+            Some(screen::Outcome::Done(_))
+        ));
+        let mut screen = Screen::new(&state);
+        assert!(matches!(
+            screen.key(&mut state, Key::Cancel),
+            Some(screen::Outcome::Cancelled)
+        ));
+    }
 }

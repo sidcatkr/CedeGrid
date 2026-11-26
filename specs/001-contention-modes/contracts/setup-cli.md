@@ -46,18 +46,20 @@ setup configures client settings only; node and coordinator setup is refused.
 | Key | Action |
 |---|---|
 | ↑ / ↓ | Move the selection |
-| Space | Toggle or select |
-| Enter | Confirm |
-| Esc, `q`, Ctrl-C | Cancel; nothing is written and the terminal is restored |
+| ← / → | Change the selected value in place (003 FR-031) |
+| Enter | On "Review and write", review; on the review, write; on a confirmation, apply the choice |
+| Esc, `q`, Ctrl-C | Cancel; nothing is written and the terminal is restored. On a confirmation or the review, Esc goes back instead |
 
 - **Rows.** Role, default mode, the mode of each resource, the node cap, the RAM and GPU memory
   floors, the three margins of CPU and GPU compute and the Yield First margin of RAM and GPU
   memory (memory keeps only the floor under Neutral and Performance, so
   `--margin ram.neutral=…` and the like exit 2), the Guaranteed hint deadline, the GPU memory
   noise tolerance and the GPU compute attribution tolerance, then "Review and write" and
-  "Cancel". Up from the first row wraps to the last. Enter or Space opens a row; on its option
-  screen Space marks an option and Enter confirms the marked one. Each row starts at the
-  current value; on a new file that is Neutral everywhere.
+  "Cancel", grouped under Modes, Safety floors and Advanced below a header with this host's CPU,
+  RAM and GPU memory (003 FR-030). Up from the first row wraps to the last. Left and Right step
+  the selected row through its options in place. A side pane explains the selected row with
+  this host's numbers: what it is, its value, its consequence and, for a caution value, why.
+  Each row starts at the current value; on a new file that is Neutral everywhere.
 - **Options.** Modes, plus "same as default" per resource and "no explicit cap" for the node cap.
   The cap offers only modes at least as aggressive as the most aggressive configured mode, since
   a lower cap does not load. Floors, margins, the deadline and the tolerances offer fixed
@@ -65,13 +67,13 @@ setup configures client settings only; node and coordinator setup is refused.
   `Config::load` accepts.
 - **Consequence lines** use this host's numbers: CPU millicores kept free, the effective RAM
   floor, and the effective floor of the first GPU.
-- **Option lines.** Each shows a one-line consequence. The default option has no color and no
-  label.
+- **Side pane.** It shows the selected value's one-line consequence. The default value has no
+  color and no label.
 - **Markers.**
 
   | Marker | Appearance | Options |
   |---|---|---|
-  | caution | `[caution]`, yellow (SGR 33) | a floor below twice its minimum; a margin below its default; `saturation_percent`, `principal_min_percent`, `noise_tolerance_mib`, `uid_min` or `attribution_tolerance_percent` above its default, a range in `system_accounts.uid_ranges` beyond the default ones, `memory_peak_window_s` or `quiet_window_intervals` below it |
+  | caution | `[caution]`, yellow (palette color 3, written as SGR 33 or 38;5;3) | a floor below twice its minimum; a margin below its default; `saturation_percent`, `principal_min_percent`, `noise_tolerance_mib`, `uid_min` or `attribution_tolerance_percent` above its default, a range in `system_accounts.uid_ranges` beyond the default ones, `memory_peak_window_s` or `quiet_window_intervals` below it |
 
 - **No color** when `NO_COLOR` is set to a non-empty value, when output is not a TTY, or when
   `TERM=dumb`. The labels always remain. Without color the interface writes no escape sequence
