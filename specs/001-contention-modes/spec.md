@@ -1705,7 +1705,9 @@ node reports with the expected per-resource values at each step.
   sample there within the counting window; a process CedeGrid launched and verified also counts
   toward m from the interval the device first lists it, sampled or not, stops counting once one
   counting window has passed with no sample for it, from that listing or from its last sample, and
-  counts again from its next sample; background contexts left out and an unattributed principal
+  counts again from its next sample, and while an own task is paused on the device every own
+  process listed there counts, since a stopped process has no samples but computes again once
+  released (FR-089); background contexts left out and an unattributed principal
   counted as one principal with one process: own work's share m ÷ (m + E) is then at most its fair
   share 1 ÷ (k + 1), and with one own process this always holds. While the amounts are unknown or
   inconsistent but the per-process samples are readable, the counts are the same busy contexts.

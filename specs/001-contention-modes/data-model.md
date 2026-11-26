@@ -580,7 +580,8 @@ See [contracts/wire-negotiation.md](contracts/wire-negotiation.md).
 ## Item 053 additions
 
 - GPU demand state per device: per listed PID, its first listing, its last sample and a quiet count
-  of readable intervals; an own PID counts while the count is below the counting window (FR-021).
+  of readable intervals; an own PID counts while the count is below the counting window, and every
+  listed own PID counts while an own task is paused on the device (FR-021, FR-089).
   `TimeSliceRecord.own_counted`: each own PID counted and whether by listing or by sample. Not a
   wire field.
 - Cgroup actuator (in memory, per supervisor): the controls it recorded writing and the count of
