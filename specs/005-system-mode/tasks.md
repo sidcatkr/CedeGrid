@@ -160,7 +160,9 @@ the task list.
   - whether `systemd-oomd` reaches the slices (R11);
   - which limits apply (N3), and which one a unit has reached;
   - logind's effective `RemoveIPC=`, and what it means at the user's last logout (R18).
+  - *In part (2026-11-26, `9d338f5`):* `doctor` shows a System mode section with the level and why (from one `status` request), this account's units, the effective policy with each value's source and the limits in force, and its JSON carries `system_mode`. The `systemd-oomd`, `RemoveIPC=` and `cpu.idle` notes are follow-up SYS-4.
 - [ ] T026 [US1] Label System runs in `observe` and the status output in `src/explain.rs` (FR-014)
+  - *In part (2026-11-26, `9d338f5`):* each `observe` sample carries `system_mode` with the level and why; per-run labels come with 003's `ps`.
 
 **Checkpoint**: US1 passes in the container. This is the MVP: Full for members, unchanged elsewhere.
 
@@ -298,6 +300,7 @@ the task list.
 - [x] T050 [P] [US5] Container fixture in `tests/system_mode.rs`: the inventory after install differs from before only by `contracts/units-and-slices.md`'s list; after runs and purge it equals the inventory before install (SC-009)
   - The install adds only the contract's items (unit files, the group, `/etc/cedegrid`, `/run/cedegrid`, the binary, the sysusers file) and purge returns the inventory to the one before (container run of 2026-11-17: Ubuntu 22.04, systemd 249, local VM).
 - [ ] T051 [US5] Container fixture in `tests/system_mode.rs`: a policy allowing only Yield First and Neutral refuses Performance with `mode_not_allowed`, naming the key; the agent refuses a job in a mode the policy does not allow and a job past `tasks_per_user`, each in one line naming the key; `doctor` shows the effective policy and where each value came from (FR-010)
+  - *In part (2026-11-26):* `doctor` shows the effective policy and each value's source (T025); `mode_not_allowed` and the policy's refusals are pinned by `handle_applies_the_policy_to_modes` and the policy tests outside the container.
 - [ ] T052 [US5] Container fixture in `tests/system_mode.rs`: a broker and a client of different protocol versions refuse with `protocol_mismatch`, naming the side to upgrade (FR-035)
 
 ### Implementation
