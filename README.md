@@ -13,57 +13,58 @@ leases, process supervision, checkpoints, artifacts, and result receipts. Python
 and TypeScript SDKs submit work and provide cooperative worker hooks. Any executable
 that meets the process contract can run; no application framework is required.
 
-Version **0.2.0** introduces the clean `cedegrid` name and TOML configuration.
-Packages are available on [npm](https://www.npmjs.com/package/cedegrid)
-and [PyPI](https://pypi.org/project/cedegrid/), with standalone files in the
-[GitHub release](https://github.com/sidcatkr/CedeGrid/releases/tag/v0.2.0).
-Publication preceded completion of the [qualification checks](docs/release-0.2-gates.json);
-the release notes record known limitations and follow-up fixes.
+Version **0.2.0** introduced the clean `cedegrid` name and TOML configuration, and is the last
+version on npm and PyPI. Later versions ship only as files on
+[GitHub Releases](https://github.com/sidcatkr/CedeGrid/releases), each with its sha256 in
+`SHA256SUMS`; see [moving off npm and PyPI](docs/migration-registries.md).
 Historical measurements in [validation](docs/validation.md) are scoped to their
-recorded versions and do not qualify these new binaries.
+recorded versions and do not qualify newer binaries.
 
 ## Install
 
-Install the CLI and TypeScript SDK with:
+On Linux x86_64 or aarch64, install the command-line tool for your user, with no root, from the
+release you want:
 
 ```sh
-npm install --global cedegrid@0.2.0
-# Or add the SDK and CLI to a project:
-npm install cedegrid@0.2.0
+curl -fsSL https://github.com/sidcatkr/CedeGrid/releases/download/v<version>/install.sh | sh
 ```
 
-Installation works with `--ignore-scripts`. Native binaries are supplied by exact
-version platform packages, without an install-time download or compiler. The SDK
-can also be imported when optional native packages are omitted. Node 22.14+ is
-required by the npm package.
-
-The same SDK and native payloads are also available in [GitHub Packages](https://github.com/users/sidcatkr/packages?repo_name=CedeGrid) under `@sidcatkr`. Configure the scope and authenticate to GitHub Packages before installing:
+Replace `<version>` with the release's version, as the release page shows it. The script
+installs that version into `~/.local/bin/cedegrid`, checks the download against the release's
+`SHA256SUMS` before installing it, and stops with nothing installed when the check fails. It
+refuses to run as root and says when `~/.local/bin` is not on `PATH`. Then:
 
 ```sh
-npm config set @sidcatkr:registry https://npm.pkg.github.com
-npm install @sidcatkr/cedegrid@0.2.0
+cedegrid run python3 train.py
 ```
 
-GitHub Packages requires authentication even for public npm packages; see the
-[GitHub authentication instructions](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-npm-registry#authenticating-to-github-packages).
+Other ways to install the same version:
 
-The Python distribution contains the SDK only:
+- **Homebrew:** each release carries `cedegrid.rb`, a formula that installs the release tarball
+  by its sha256: `brew install --formula ./cedegrid.rb`.
+- **Cargo:** `cargo install --locked cedegrid` builds it from source with Rust 1.88 or later and
+  a C compiler.
+- **Release files:** each release has a tarball per platform; check it against `SHA256SUMS`
+  (`sha256sum --check --ignore-missing SHA256SUMS`) and put `cedegrid` on your `PATH`.
+
+The Python and TypeScript SDKs are attached to each release as a wheel and an npm tarball, also
+listed in `SHA256SUMS`. Install them from the downloaded files:
 
 ```sh
-python -m pip install cedegrid==0.2.0
+sha256sum --check --ignore-missing SHA256SUMS
+python -m pip install ./cedegrid-<version>-py3-none-any.whl   # Python 3.10+; 3.10 uses tomli
+npm install ./cedegrid-<version>.tgz                           # Node 22.14+
 ```
 
-Python 3.10+ is supported; Python 3.10 uses `tomli`. Standalone release binaries
-require neither Python nor Node. Source builds need Rust 1.88+ and a C compiler:
+The SDKs need no CLI to be installed beside them, and the CLI needs neither Python nor Node.
+A CLI or SDK already installed from npm or PyPI at 0.2.0 keeps working; see
+[moving off npm and PyPI](docs/migration-registries.md). Source builds need Rust 1.88+ and a C
+compiler:
 
 ```sh
 cargo build --release --locked
 ./target/release/cedegrid --version
 ```
-
-Unpublished candidate files can be installed directly from their wheel/tarball.
-See [release preparation](docs/release.md) for checksums and the isolated npm
-registry check, which uses the original tarball bytes.
 
 ## Build and use
 

@@ -35,6 +35,7 @@ ALLOWLIST = (
     'docs/kernel-assisted-delta.md',
     'docs/local-supervision-verification.md',
     'docs/migration-0.2.md',
+    'docs/migration-registries.md',
     'docs/milestone-1-verification.md',
     'docs/release-0.2-gates.json',
     'docs/release-0.2-evidence.md',
