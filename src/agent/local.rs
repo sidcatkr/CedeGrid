@@ -4,10 +4,12 @@
 //! they need no network, no certificates and no second service (FR-003).
 
 use crate::coordinator::{Coordinator, wait_for_work};
-use crate::execution_model::AllocationClass;
-use crate::protocol::{CoordinatorConfig, PoolSpec, Principal, Request, Response};
-use anyhow::{Context, Result, bail};
-use std::path::Path;
+use crate::execution_model::{AllocationClass, LaunchRequest};
+use crate::protocol::{CoordinatorConfig, JobSpec, PoolSpec, Principal, Request, Response};
+use anyhow::{Context, Result, bail, ensure};
+use serde::Deserialize;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
@@ -28,6 +30,9 @@ pub fn local_pool(class: AllocationClass) -> &'static str {
 pub struct LocalCoordinator {
     node_id: String,
     coordinator: Mutex<Coordinator>,
+    /// Each run's environment values by task ID. They reach the launch from here and are
+    /// never written to the coordinator's state (FR-009).
+    env: Mutex<BTreeMap<String, BTreeMap<String, String>>>,
     work: tokio::sync::watch::Receiver<u64>,
     waiting: AtomicUsize,
 }
@@ -71,6 +76,7 @@ impl LocalCoordinator {
         Ok(Self {
             node_id: node_id.to_owned(),
             coordinator: Mutex::new(coordinator),
+            env: Mutex::new(BTreeMap::new()),
             work,
             waiting: AtomicUsize::new(0),
         })
@@ -101,11 +107,195 @@ impl LocalCoordinator {
         self.handle(&Principal::Operator, request)
     }
 
+    /// A run's environment values for its launch, taken once.
+    pub(super) fn take_env(&self, task_id: &str) -> Option<BTreeMap<String, String>> {
+        self.env
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(task_id)
+    }
+
+    /// Submits one run: its task goes to the local pool of its class, with the environment's
+    /// names only; the values wait here for the launch.
+    pub fn submit_run(
+        &self,
+        mut task: LaunchRequest,
+        env: BTreeMap<String, String>,
+    ) -> Result<String> {
+        let run_id = format!("run-{}", uuid::Uuid::new_v4().simple());
+        task.task_id = run_id.clone();
+        task.assignment_id = String::new();
+        task.env = env
+            .keys()
+            .map(|name| (name.clone(), String::new()))
+            .collect();
+        let job = JobSpec {
+            job_id: run_id.clone(),
+            pool_id: local_pool(task.class).to_owned(),
+            priority: 0,
+            tasks: vec![task],
+        };
+        self.env
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(run_id.clone(), env);
+        match self.operator_request(Request::Submit { job }) {
+            Ok(Response::Error { message }) => {
+                self.take_env(&run_id);
+                bail!("the run was refused: {message}")
+            }
+            Ok(_) => Ok(run_id),
+            Err(error) => {
+                self.take_env(&run_id);
+                Err(error)
+            }
+        }
+    }
+
     fn handle(&self, principal: &Principal, request: Request) -> Result<Response> {
         self.coordinator
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .handle(principal, request)
+    }
+}
+
+/// The user's socket: `$XDG_RUNTIME_DIR/cedegrid/agent.sock`, else
+/// `~/.local/state/cedegrid/agent.sock` (contracts/local-agent.md).
+pub fn socket_path() -> Result<PathBuf> {
+    let base = match std::env::var_os("XDG_RUNTIME_DIR").filter(|dir| !dir.is_empty()) {
+        Some(dir) => PathBuf::from(dir),
+        None => PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?)
+            .join(".local")
+            .join("state"),
+    };
+    Ok(base.join("cedegrid").join("agent.sock"))
+}
+
+/// Makes the socket's directory, mode 0700 and owned by this user, or refuses: the directory
+/// keeps other users out, beside the peer check on each connection.
+#[cfg(unix)]
+pub fn private_socket_dir(dir: &Path) -> Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    if !dir.exists() {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .with_context(|| format!("{} could not be made", dir.display()))?;
+    }
+    let meta = std::fs::symlink_metadata(dir)
+        .with_context(|| format!("{} could not be read", dir.display()))?;
+    ensure!(
+        meta.file_type().is_dir(),
+        "{} is not a plain directory",
+        dir.display()
+    );
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let me = unsafe { libc::getuid() };
+    ensure!(
+        meta.uid() == me,
+        "{} is not owned by this user",
+        dir.display()
+    );
+    ensure!(
+        meta.mode() & 0o077 == 0,
+        "{} is open to other users (mode {:o})",
+        dir.display(),
+        meta.mode() & 0o777
+    );
+    Ok(())
+}
+
+/// One request on the user's socket: one JSON object per line (contracts/local-agent.md).
+#[derive(Debug, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+pub enum LocalRequest {
+    Run {
+        task: Box<LaunchRequest>,
+        #[serde(default)]
+        env: BTreeMap<String, String>,
+    },
+    Ps,
+    Stop {
+        run_id: String,
+    },
+}
+
+/// The most one request line may hold.
+const MAX_REQUEST_BYTES: u64 = 1024 * 1024;
+
+/// Serves the user's socket until the listener fails. Each connection carries one request and
+/// gets one reply line; a peer of another user is refused before anything is read.
+#[cfg(unix)]
+pub async fn serve(
+    listener: tokio::net::UnixListener,
+    local: std::sync::Arc<LocalCoordinator>,
+) -> Result<()> {
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let local = std::sync::Arc::clone(&local);
+        tokio::spawn(async move {
+            // A connection that fails affects only its own caller.
+            let _ = serve_connection(stream, &local).await;
+        });
+    }
+}
+
+#[cfg(unix)]
+async fn serve_connection(stream: tokio::net::UnixStream, local: &LocalCoordinator) -> Result<()> {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let me = unsafe { libc::getuid() };
+    let peer = stream.peer_cred()?;
+    let (read, mut write) = stream.into_split();
+    let reply = if peer.uid() != me {
+        refusal(
+            "ERR_CEDEGRID_LOCAL_PEER",
+            "this agent serves only its own user".to_owned(),
+        )
+    } else {
+        let mut line = Vec::new();
+        BufReader::new(read.take(MAX_REQUEST_BYTES))
+            .read_until(b'\n', &mut line)
+            .await?;
+        match serde_json::from_slice::<LocalRequest>(&line) {
+            Ok(request) => answer(local, request),
+            Err(error) => refusal(
+                "ERR_CEDEGRID_LOCAL_REQUEST",
+                format!("the request could not be read: {error}"),
+            ),
+        }
+    };
+    let mut text = serde_json::to_vec(&reply)?;
+    text.push(b'\n');
+    write.write_all(&text).await?;
+    Ok(())
+}
+
+fn refusal(code: &str, message: String) -> serde_json::Value {
+    serde_json::json!({"error": {"code": code, "message": message}})
+}
+
+/// The reply to one request, as JSON.
+pub fn answer(local: &LocalCoordinator, request: LocalRequest) -> serde_json::Value {
+    match request {
+        LocalRequest::Run { task, env } => match local.submit_run(*task, env) {
+            Ok(run_id) => serde_json::json!({ "run_id": run_id }),
+            Err(error) => refusal("ERR_CEDEGRID_RUN_REFUSED", format!("{error:#}")),
+        },
+        LocalRequest::Ps => match local.operator_request(Request::Status { job_id: None }) {
+            Ok(Response::Status { tasks, .. }) => serde_json::json!({ "runs": tasks }),
+            Ok(other) => refusal("ERR_CEDEGRID_LOCAL", format!("unexpected reply: {other:?}")),
+            Err(error) => refusal("ERR_CEDEGRID_LOCAL", format!("{error:#}")),
+        },
+        LocalRequest::Stop { run_id } => match local.operator_request(Request::Cancel {
+            job_id: run_id.clone(),
+        }) {
+            Ok(Response::Error { message }) => refusal("ERR_CEDEGRID_STOP_REFUSED", message),
+            Ok(_) => serde_json::json!({ "run_id": run_id, "state": "stopping" }),
+            Err(error) => refusal("ERR_CEDEGRID_LOCAL", format!("{error:#}")),
+        },
     }
 }
 
