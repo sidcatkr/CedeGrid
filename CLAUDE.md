@@ -7,7 +7,7 @@ yields that capacity when other workloads need it.
 
 - `src/`: one Rust crate, `cedegrid` (lib + bin, edition 2024, MSRV 1.88).
   - `main.rs`: the CLI. The hidden `__worker-gate` / `__assignment-supervisor` dispatch runs
-    before clap, Tokio, any thread and the launcher terminal handoff. Keep it first.
+    before clap, Tokio and any thread. Keep it first.
   - `agent.rs` and `agent/`: the rootless node agent. `agent/service.rs` runs each loop:
     sample, evaluate policy, drain, report and launch. `launch`, `publishing`, `replay`,
     `reconcile` (restart), `report` (contention report) and `client` hold its stages;
@@ -35,12 +35,12 @@ yields that capacity when other workloads need it.
   - `setup.rs`: `cedegrid setup` and its flags, with the keyboard interface and line prompts
     in `setup/interface.rs`. `explain.rs`: the
     `observe` and `doctor` renderings.
-  - `storage_qualification.rs` (storage diagnostics), `launcher_terminal.rs` (npm launcher
-    terminal handoff); `lib.rs` declares the modules.
+  - `storage_qualification.rs` (storage diagnostics); `lib.rs` declares the modules.
 - `tests/`: Rust integration tests (`*.rs`), tool tests (`test_*.py`), shared test modules
   (`tests/support/`) and the contract fixture `tests/contracts/cedegrid-0.2.json`.
 - `python/cedegrid/`, `npm/src/`: the Python and TypeScript SDKs, which mirror each other.
-- `tools/`: operator, validation and release scripts.
+- `tools/`: operator, validation and release scripts. `release_version.py` reads the release
+  version from Cargo.toml for every release tool; the release is GitHub Release files only.
 - `docs/`: user and operator docs. `docs/guarantees.md` defines the support boundary.
 - `specs/`, `.specify/`: Spec Kit specs, templates and the constitution.
 

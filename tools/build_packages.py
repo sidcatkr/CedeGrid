@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""Build immutable SDK/native package candidates; never upload to a registry.
+"""Build immutable release file candidates; never upload anything.
 
-Native input files must already be built and signed as intended. This tool copies
-those bytes unchanged. It records missing targets and leaves platform qualification
-NOT_RUN; successful packaging is not platform or release acceptance.
+The candidate holds the SDK files (a Python wheel and sdist, a TypeScript SDK tarball), one
+standalone archive per native target, install.sh with the release version written in, and the
+Homebrew formula cedegrid.rb with each macOS and Linux tarball's sha256 written in. Native
+input files must already be built and signed as intended; this tool copies those bytes unchanged.
+It records missing targets and leaves platform qualification NOT_RUN; successful packaging is not
+platform or release acceptance.
 """
 from __future__ import annotations
 import argparse
 import hashlib
-import io
 import json
-import os
 import re
 from pathlib import Path
 import shutil
@@ -20,15 +21,20 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
 from pack_source_review import inspect_text
+import release_version
 
-VERSION = '0.2.0'
 TARGETS = {
-    'linux-x64-gnu': ('linux', 'x64', 'cedegrid'),
-    'linux-arm64-gnu': ('linux', 'arm64', 'cedegrid'),
-    'darwin-x64': ('darwin', 'x64', 'cedegrid'),
-    'darwin-arm64': ('darwin', 'arm64', 'cedegrid'),
-    'win32-x64': ('win32', 'x64', 'cedegrid.exe'),
+    'linux-x64-gnu': ('linux', 'cedegrid'),
+    'linux-arm64-gnu': ('linux', 'cedegrid'),
+    'darwin-x64': ('darwin', 'cedegrid'),
+    'darwin-arm64': ('darwin', 'cedegrid'),
+    'win32-x64': ('win32', 'cedegrid.exe'),
 }
+INSTALL_SCRIPT = ROOT / 'tools' / 'install.sh'
+VERSION_PLACEHOLDER = '@VERSION@'
+HOMEBREW_TEMPLATE = ROOT / 'packaging' / 'homebrew' / 'cedegrid.rb'
+# The targets the Homebrew formula installs: macOS and Linux, each by its tarball's sha256.
+HOMEBREW_TARGETS = ('darwin-arm64', 'darwin-x64', 'linux-arm64-gnu', 'linux-x64-gnu')
 
 def run(args, cwd=ROOT):
     subprocess.run([str(arg) for arg in args], cwd=cwd, check=True)
@@ -56,7 +62,8 @@ def native_notices(cargo):
     return ''.join(lines)
 
 def scan_archive(path):
-    if path.suffix=='.whl' or path.suffix=='.zip':
+    if path.suffix in ('.sh','.rb'):members=[(path.name,path.read_bytes())]
+    elif path.suffix=='.whl' or path.suffix=='.zip':
         with zipfile.ZipFile(path) as archive:members=[(item.filename,archive.read(item)) for item in archive.infolist() if not item.is_dir()]
     else:
         with tarfile.open(path) as archive:
@@ -78,6 +85,47 @@ def scan_archive(path):
             inspect_text(name,printable)
     return {'file_count':len(members),'expanded_bytes':sum(len(data) for _,data in members)}
 
+def sdk_tarball_only(path):
+    """Refuse a TypeScript SDK tarball that installs a command or pulls in a native package."""
+    with tarfile.open(path) as archive:
+        names=[item.name for item in archive.getmembers() if item.isfile()]
+        manifest=json.loads(archive.extractfile('package/package.json').read())
+    for key in ('bin','optionalDependencies','scripts'):
+        if key=='scripts':
+            hooks={'preinstall','install','postinstall'}&set(manifest.get('scripts',{}))
+            if hooks:raise RuntimeError(f'the SDK tarball runs install scripts: {sorted(hooks)}')
+        elif manifest.get(key):raise RuntimeError(f'the SDK tarball declares {key}; the CLI ships as its own release files')
+    stray=[name for name in names if 'launcher' in Path(name).name]
+    if stray:raise RuntimeError(f'the SDK tarball holds a launcher: {stray}')
+
+def standalone_name(version, target):
+    suffix = 'zip' if TARGETS[target][0] == 'win32' else 'tar.gz'
+    return f'cedegrid-{version}-{target}.{suffix}'
+
+def install_script(version):
+    """install.sh with the release version in place of its one placeholder."""
+    text = INSTALL_SCRIPT.read_text(encoding='utf-8')
+    if text.count(VERSION_PLACEHOLDER) != 1:
+        raise RuntimeError('install.sh must hold its version placeholder exactly once')
+    return text.replace(VERSION_PLACEHOLDER, version)
+
+def homebrew_formula(version, digests):
+    """The formula with the release URL, the version and each tarball's sha256 written in."""
+    text = HOMEBREW_TEMPLATE.read_text(encoding='utf-8')
+    values = {'@RELEASE_URL@': release_version.release_url(version), VERSION_PLACEHOLDER: version}
+    for target in HOMEBREW_TARGETS:
+        if not re.fullmatch(r'[0-9a-f]{64}', digests.get(target, '')):
+            raise RuntimeError(f'the Homebrew formula needs the {target} tarball')
+        values['@SHA256_' + target.upper().replace('-', '_') + '@'] = digests[target]
+    for placeholder, value in values.items():
+        if placeholder not in text:
+            raise RuntimeError(f'the Homebrew template lacks {placeholder}')
+        text = text.replace(placeholder, value)
+    left = re.findall(r'@[A-Z0-9_]+@', text)
+    if left:
+        raise RuntimeError(f'the Homebrew template has values nothing writes: {sorted(set(left))}')
+    return text
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out',type=Path,required=True)
@@ -89,6 +137,7 @@ def main():
     parser.add_argument('--skip-python',action='store_true')
     parser.add_argument('--skip-npm',action='store_true')
     args=parser.parse_args()
+    version=release_version.check()
     out=args.out.resolve()
     if args.resume:
         if not out.is_dir() or (out/'manifest.json').exists():parser.error('--resume requires an incomplete candidate directory')
@@ -100,58 +149,65 @@ def main():
         binary=Path(path).resolve(strict=True)
         if not binary.is_file():parser.error('native input must be a regular file')
         binaries[target]=binary
-    if not args.skip_python and not (out/'pypi'/f'cedegrid-{VERSION}-py3-none-any.whl').exists():
+    if not args.skip_python and not (out/'pypi'/f'cedegrid-{version}-py3-none-any.whl').exists():
         (out/'pypi').mkdir()
         run(['uv','build','--python',args.python,'--out-dir',out/'pypi',ROOT/'python'])
-    if not args.skip_npm and not (out/'npm'/f'cedegrid-{VERSION}.tgz').exists():
+    if not args.skip_npm and not (out/'npm'/f'cedegrid-{version}.tgz').exists():
         (out/'npm').mkdir()
         run(['npm','run','build'],ROOT/'npm')
         run(['npm','pack','--ignore-scripts','--pack-destination',out/'npm'],ROOT/'npm')
-    complete_native = all((out/'standalone'/f'cedegrid-{VERSION}-{target}.{"zip" if target.startswith("win32") else "tar.gz"}').exists() and (args.skip_npm or (out/'npm'/f'cedegrid-{target}-{VERSION}.tgz').exists()) for target in binaries)
-    if binaries and not complete_native:
+    if not args.skip_npm:sdk_tarball_only(out/'npm'/f'cedegrid-{version}.tgz')
+    script=out/'install'/'install.sh'
+    if script.exists():
+        if script.read_text(encoding='utf-8')!=install_script(version):raise RuntimeError('install.sh differs from the immutable existing candidate')
+    else:
+        script.parent.mkdir(exist_ok=True)
+        script.write_text(install_script(version),encoding='utf-8')
+    missing=[target for target in binaries if not (out/'standalone'/standalone_name(version,target)).exists()]
+    if missing:
         notices=native_notices(args.cargo);(out/'standalone').mkdir(exist_ok=True)
-        for target,binary in binaries.items():
-            operating_system,architecture,executable=TARGETS[target]
-            standalone=out/'standalone'/f'cedegrid-{VERSION}-{target}.{"zip" if operating_system=="win32" else "tar.gz"}'
-            npm_archive=out/'npm'/f'cedegrid-{target}-{VERSION}.tgz'
-            if standalone.exists() and (args.skip_npm or npm_archive.exists()):continue
+        for target in missing:
+            binary=binaries[target]
+            executable=TARGETS[target][1]
+            standalone=out/'standalone'/standalone_name(version,target)
             stage=out/'staging'/('cedegrid-'+target);(stage/'bin').mkdir(parents=True,exist_ok=True)
             destination=stage/'bin'/executable;shutil.copyfile(binary,destination);destination.chmod(0o755)
             if digest(destination)!=digest(binary):raise RuntimeError('native bytes changed while staging')
             for name in ('LICENSE','NOTICE'):shutil.copyfile(ROOT/name,stage/name)
             (stage/'THIRD_PARTY_NOTICES.md').write_text(notices,encoding='utf-8')
-            manifest={'name':'cedegrid-'+target,'version':VERSION,'description':f'CedeGrid native CLI for {target}','license':'Apache-2.0','os':[operating_system],'cpu':[architecture],'files':['bin/','LICENSE','NOTICE','THIRD_PARTY_NOTICES.md'],'repository':{'type':'git','url':'https://github.com/sidcatkr/CedeGrid.git'}}
-            if target.endswith('-gnu'):manifest['libc']=['glibc']
-            (stage/'package.json').write_text(json.dumps(manifest,indent=2)+'\n')
-            if not args.skip_npm and not npm_archive.exists():run(['npm','pack','--ignore-scripts','--pack-destination',out/'npm'],stage)
-            if standalone.exists():continue
-            if operating_system=='win32':
+            directory=f'cedegrid-{version}-{target}'
+            if standalone.suffix=='.zip':
                 with zipfile.ZipFile(standalone,'x',compression=zipfile.ZIP_DEFLATED) as archive:
-                    for name in (f'bin/{executable}','LICENSE','NOTICE','THIRD_PARTY_NOTICES.md'):archive.write(stage/name,arcname=f'cedegrid-{VERSION}-{target}/{Path(name).name}')
+                    for name in (f'bin/{executable}','LICENSE','NOTICE','THIRD_PARTY_NOTICES.md'):archive.write(stage/name,arcname=f'{directory}/{Path(name).name}')
             else:
                 with tarfile.open(standalone,'x:gz') as archive:
-                    for name in (f'bin/{executable}','LICENSE','NOTICE','THIRD_PARTY_NOTICES.md'):archive.add(stage/name,arcname=f'cedegrid-{VERSION}-{target}/{Path(name).name}',recursive=False)
+                    for name in (f'bin/{executable}','LICENSE','NOTICE','THIRD_PARTY_NOTICES.md'):archive.add(stage/name,arcname=f'{directory}/{Path(name).name}',recursive=False)
         shutil.rmtree(out/'staging')
     (out/'pypi'/'.gitignore').unlink(missing_ok=True)
     for target,binary in binaries.items():
-        if not args.skip_npm:
-            with tarfile.open(out/'npm'/f'cedegrid-{target}-{VERSION}.tgz') as archive:
-                embedded=archive.extractfile('package/bin/'+TARGETS[target][2]).read()
-                if hashlib.sha256(embedded).hexdigest()!=digest(binary):raise RuntimeError('native input differs from the immutable existing archive')
-        standalone=out/'standalone'/f'cedegrid-{VERSION}-{target}.{"zip" if target.startswith("win32") else "tar.gz"}'
+        standalone=out/'standalone'/standalone_name(version,target)
+        name=f'cedegrid-{version}-{target}/{TARGETS[target][1]}'
         if standalone.suffix=='.zip':
-            with zipfile.ZipFile(standalone) as archive:embedded=archive.read(f'cedegrid-{VERSION}-{target}/{TARGETS[target][2]}')
+            with zipfile.ZipFile(standalone) as archive:embedded=archive.read(name)
         else:
-            with tarfile.open(standalone) as archive:embedded=archive.extractfile(f'cedegrid-{VERSION}-{target}/{TARGETS[target][2]}').read()
+            with tarfile.open(standalone) as archive:embedded=archive.extractfile(name).read()
         if hashlib.sha256(embedded).hexdigest()!=digest(binary):raise RuntimeError('native input differs from the immutable standalone archive')
     for target in TARGETS:
-        if any((out/'standalone').glob(f'cedegrid-{VERSION}-{target}.*')) and target not in binaries:
+        if (out/'standalone'/standalone_name(version,target)).exists() and target not in binaries:
             raise RuntimeError('resume must include every previously frozen native target')
+    if all(target in binaries for target in HOMEBREW_TARGETS):
+        formula=homebrew_formula(version,{target:digest(out/'standalone'/standalone_name(version,target)) for target in HOMEBREW_TARGETS})
+        destination=out/'homebrew'/'cedegrid.rb'
+        if destination.exists():
+            if destination.read_text(encoding='utf-8')!=formula:raise RuntimeError('cedegrid.rb differs from the immutable existing candidate')
+        else:
+            destination.parent.mkdir(exist_ok=True)
+            destination.write_text(formula,encoding='utf-8')
     artifacts=[]
-    for directory in ('npm','pypi','standalone'):
+    for directory in ('homebrew','install','npm','pypi','standalone'):
         for path in sorted((out/directory).rglob('*')):
             if path.is_file():artifacts.append({'path':path.relative_to(out).as_posix(),'sha256':digest(path),'size':path.stat().st_size,'scan':scan_archive(path)})
-    record={'schema_version':1,'version':VERSION,'publication':'NOT_RUN','platform_qualification':'NOT_RUN','missing_native_targets':sorted(set(TARGETS)-set(binaries)),'native_inputs':{target:{'sha256':digest(binary),'size':binary.stat().st_size} for target,binary in binaries.items()},'artifacts':artifacts}
+    record={'schema_version':1,'version':version,'publication':'NOT_RUN','platform_qualification':'NOT_RUN','missing_native_targets':sorted(set(TARGETS)-set(binaries)),'native_inputs':{target:{'sha256':digest(binary),'size':binary.stat().st_size} for target,binary in binaries.items()},'artifacts':artifacts}
     manifest_path=out/('manifest.partial.json' if args.defer_manifest else 'manifest.json')
     manifest_path.write_text(json.dumps(record,indent=2)+'\n')
     if not args.defer_manifest:(out/'manifest.partial.json').unlink(missing_ok=True)

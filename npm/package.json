@@ -1,7 +1,7 @@
 {
   "name": "cedegrid",
   "version": "0.2.0",
-  "description": "CedeGrid TypeScript SDK and native CLI launcher",
+  "description": "CedeGrid TypeScript SDK",
   "license": "Apache-2.0",
   "type": "commonjs",
   "engines": {
@@ -21,9 +21,6 @@
       }
     }
   },
-  "bin": {
-    "cedegrid": "dist/launcher.js"
-  },
   "files": [
     "dist/",
     "README.md",
@@ -32,7 +29,7 @@
     "THIRD_PARTY_NOTICES.md"
   ],
   "scripts": {
-    "build": "tsc && node build/scripts/build.js",
+    "build": "node -e \"for (const d of ['build', 'dist']) require('node:fs').rmSync(d, { recursive: true, force: true })\" && tsc && node build/scripts/build.js",
     "test": "npm run build && node --test build/tests/*.test.js",
     "pack:release": "npm run build && npm pack --ignore-scripts"
   },
@@ -47,14 +44,6 @@
   },
   "devDependencies": {
     "@types/node": "22.19.2",
-    "typescript": "5.9.3",
-    "verdaccio": "6.10.3"
-  },
-  "optionalDependencies": {
-    "cedegrid-darwin-arm64": "0.2.0",
-    "cedegrid-darwin-x64": "0.2.0",
-    "cedegrid-linux-arm64-gnu": "0.2.0",
-    "cedegrid-linux-x64-gnu": "0.2.0",
-    "cedegrid-win32-x64": "0.2.0"
+    "typescript": "5.9.3"
   }
 }

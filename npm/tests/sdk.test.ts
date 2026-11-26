@@ -7,7 +7,6 @@ import { pathToFileURL } from 'node:url';
 import { parseJson, stringifyJson, integer, U64_MAX, I64_MAX, commandTask, loadClientConfig, PublicationUncertain, DownloadUncertain, WorkerContext, Client, CedeGridError, isCedeGridError, TASK_STATUSES, TERMINAL_TASK_STATUSES } from '../src';
 import { createHash } from 'node:crypto';
 import { endpointOrigin } from '../src/config';
-import { nativePackage } from '../src/launcher';
 import { protocolValue } from '../src/codec';
 test('cancelled is a terminal task status', () => {
     assert.ok(TASK_STATUSES.includes('cancelled'));
@@ -165,7 +164,6 @@ test('mixed require/import share the implementation and constructors', async () 
     assert(cjs.isCedeGridError(new esm.PublicationUncertain('id', {})));
     assert.equal(isCedeGridError({ code: 'ERR_CEDEGRID_REMOTE' }), true);
 });
-test('unsupported targets fail only native launcher selection', () => { assert.throws(() => nativePackage('freebsd' as any, 'x64'), { code: 'ERR_CEDEGRID_UNSUPPORTED_TARGET' }); assert.equal(typeof commandTask, 'function'); });
 test('the request digest is the same in both SDKs', async () => {
     // The digest covers the request with sorted keys; the Python test pins the same value.
     const context = new WorkerContext({ schema_version: 2n, namespace_id: 'ns', session_id: 's', task_id: 't', assignment_id: 'a', generation: 1n }, { async request() { throw new Error('lost ack'); } });

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Run installed SDKs through native workers, durable coordinator state and mTLS.
 
-The npm directory must be the unmodified local install retained by
-verify-packages.ts --keep-local. The Python SDK is installed from the original
-candidate wheel in a fresh environment outside the checkout. No SDK source path
+Everything comes from the candidate's own files, with no registry for CedeGrid's packages: the
+TypeScript SDK is installed from its tarball into a fresh directory (its dependencies still come
+from npm), the native binary is unpacked from its standalone archive, and the Python SDK is
+installed from the original wheel in a fresh environment outside the checkout. No SDK source path
 is added to either runtime's module search path.
 """
 from __future__ import annotations
@@ -18,8 +19,10 @@ import socket
 import sqlite3
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
+import zipfile
 
 
 def digest(path):
@@ -32,6 +35,46 @@ def command(argv, cwd, env, timeout=90):
     if result.returncode:
         raise RuntimeError(f'{argv[0]} failed ({result.returncode})\n{result.stdout}\n{result.stderr}')
     return result.stdout
+
+
+def candidate_manifest(candidate):
+    path = candidate / 'manifest.json'
+    if not path.exists():
+        path = candidate / 'manifest.partial.json'
+    return json.loads(path.read_text())
+
+
+def native_target(args):
+    if sys.platform == 'darwin' and os.uname().machine == 'arm64':
+        return 'darwin-arm64'
+    if not args.target:
+        raise RuntimeError('--target is required for this native host')
+    return args.target
+
+
+def executable_name():
+    return 'cedegrid.exe' if os.name == 'nt' else 'cedegrid'
+
+
+def install_from_candidate(candidate, version, target, node, installation, env):
+    """The SDK tarball installed with npm, and the native binary unpacked beside it."""
+    installation.mkdir()
+    (installation / 'package.json').write_text('{"private": true}\n')
+    npm = shutil.which('npm', path=str(Path(node).parent)) or 'npm'
+    command([npm, 'install', '--ignore-scripts', '--no-audit', '--no-fund',
+             candidate / 'npm' / f'cedegrid-{version}.tgz'], installation, env, 240)
+    member = f'cedegrid-{version}-{target}/{executable_name()}'
+    standalone = candidate / 'standalone' / f'cedegrid-{version}-{target}'
+    if target.startswith('win32'):
+        with zipfile.ZipFile(f'{standalone}.zip') as archive:
+            data = archive.read(member)
+    else:
+        with tarfile.open(f'{standalone}.tar.gz') as archive:
+            data = archive.extractfile(member).read()
+    binary = installation / 'bin' / executable_name()
+    binary.parent.mkdir()
+    binary.write_bytes(data)
+    binary.chmod(0o755)
 
 
 def installed_run(args, env):
@@ -49,16 +92,13 @@ def installed_run(args, env):
     installation = args.npm_install.resolve()
     output = args.output.resolve()
     output.mkdir(parents=True, mode=0o700, exist_ok=False)
-    target = 'darwin-arm64' if sys.platform == 'darwin' and os.uname().machine == 'arm64' else args.target
-    if not target:
-        raise RuntimeError('--target is required for this native host')
-    binary = installation / 'node_modules' / ('cedegrid-' + target) / 'bin' / ('cedegrid.exe' if os.name == 'nt' else 'cedegrid')
-    manifest_path = candidate / 'manifest.json'
-    if not manifest_path.exists(): manifest_path = candidate / 'manifest.partial.json'
-    manifest = json.loads(manifest_path.read_text())
+    target = native_target(args)
+    binary = installation / 'bin' / executable_name()
+    manifest = candidate_manifest(candidate)
+    version = manifest['version']
     expected = manifest['native_inputs'][target]['sha256']
     if digest(binary) != expected:
-        raise RuntimeError('installed native binary is not the original candidate binary')
+        raise RuntimeError('unpacked native binary is not the original candidate binary')
     command([args.node, '-e', 'console.log(require.resolve("cedegrid"))'], installation, env)
     js_worker = installation / 'numeric-interop.cjs'
     py_worker = Path(sys.prefix).parent / 'numeric_interop.py'
@@ -103,11 +143,11 @@ def installed_run(args, env):
     cleanup = []
     client = Client.from_config(output / 'operator.toml')
     report = {'schema_version': 1, 'status': 'RUNNING', 'native_sha256': expected,
-              'npm_sha256': digest(candidate / 'npm/cedegrid-0.2.0.tgz'),
-              'python_wheel_sha256': digest(candidate / 'pypi/cedegrid-0.2.0-py3-none-any.whl'),
+              'npm_sha256': digest(candidate / f'npm/cedegrid-{version}.tgz'),
+              'python_wheel_sha256': digest(candidate / f'pypi/cedegrid-{version}-py3-none-any.whl'),
               'python_version': sys.version.split()[0], 'node_version': command([args.node, '--version'], installation, env).strip(),
               'worker_resources': {'cpu_millicores': 1000, 'ram_mib': 512, 'gpu_memory_mib': {}},
-              'registry_publication': 'NOT_RUN', 'cleanup': cleanup}
+              'cleanup': cleanup}
     last_status = None
 
     def save():
@@ -254,7 +294,7 @@ worker.complete(metadata)
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('candidate', type=Path)
-    parser.add_argument('--npm-install', type=Path, required=True)
+    parser.add_argument('--npm-install', type=Path, help=argparse.SUPPRESS)
     parser.add_argument('--node', type=Path, required=True)
     parser.add_argument('--python', default=sys.executable)
     parser.add_argument('--output', type=Path, required=True)
@@ -268,15 +308,19 @@ def main():
     if args.installed:
         installed_run(args, env)
         return
+    candidate = args.candidate.resolve()
+    version = candidate_manifest(candidate)['version']
     with tempfile.TemporaryDirectory(prefix='cedegrid-installed-interop-') as directory:
         root = Path(directory)
+        installation = root / 'npm-install'
+        install_from_candidate(candidate, version, native_target(args), args.node.resolve(), installation, env)
         environment = root / 'env'
         command(['uv', 'venv', '--python', args.python, environment], root, env)
         python = environment / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
         command(['uv', 'pip', 'install', '--python', python,
-                 args.candidate.resolve() / 'pypi/cedegrid-0.2.0-py3-none-any.whl'], root, env)
-        invocation = [python, '-I', Path(__file__).resolve(), args.candidate.resolve(), '--installed',
-                      '--npm-install', args.npm_install.resolve(), '--node', args.node.resolve(),
+                 candidate / f'pypi/cedegrid-{version}-py3-none-any.whl'], root, env)
+        invocation = [python, '-I', Path(__file__).resolve(), candidate, '--installed',
+                      '--npm-install', installation, '--node', args.node.resolve(),
                       '--output', args.output.resolve()]
         if args.target:
             invocation += ['--target', args.target]

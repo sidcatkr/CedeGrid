@@ -1,0 +1,314 @@
+{
+  "manifest_version": 1,
+  "target_release": "0.3.0",
+  "specification": "release.md",
+  "candidate": {
+    "source_commit": null,
+    "source_sha256": null,
+    "artifacts": []
+  },
+  "allowed_statuses": [
+    "PASS",
+    "FAIL",
+    "BLOCKED",
+    "NOT_RUN"
+  ],
+  "stable_readiness": false,
+  "readiness_rule": "All listed required qualification gates must be PASS with verified source/artifact hashes matching one frozen candidate and complete evidence; missing or mismatched evidence is never PASS.",
+  "required_gates": [
+    {
+      "id": "SOURCE-RUST",
+      "description": "Rust fmt/clippy/tests and MSRV1.88",
+      "targets": [
+        "linux",
+        "macos"
+      ],
+      "status": "NOT_RUN",
+      "source_commit": null,
+      "source_sha256": null,
+      "artifact_sha256": [],
+      "evidence": [],
+      "reason": "Not run against a 0.3.0 candidate yet."
+    },
+    {
+      "id": "CONTRACTS",
+      "description": "All shared contracts and deterministic fault interleavings",
+      "targets": [
+        "rust",
+        "python",
+        "typescript",
+        "native-c"
+      ],
+      "status": "NOT_RUN",
+      "source_commit": null,
+      "source_sha256": null,
+      "artifact_sha256": [],
+      "evidence": [],
+      "reason": "Not run against a 0.3.0 candidate yet."
+    },
+    {
+      "id": "SDK-PYTHON",
+      "description": "Python SDK installed from the release wheel on Python3.10..3.14, and an independent sdist-rebuild integration",
+      "targets": [
+        "linux",
+        "macos",
+        "windows-client"
+      ],
+      "status": "NOT_RUN",
+      "source_commit": null,
+      "source_sha256": null,
+      "artifact_sha256": [],
+      "evidence": [],
+      "reason": "Not run against a 0.3.0 candidate yet."
+    },
+    {
+      "id": "SDK-TYPESCRIPT",
+      "description": "TypeScript SDK installed from the release tarball: Node22/24/26 ESM/CJS/type/transport/native-worker integration",
+      "targets": [
+        "linux",
+        "macos",
+        "windows-client"
+      ],
+      "status": "NOT_RUN",
+      "source_commit": null,
+      "source_sha256": null,
+      "artifact_sha256": [],
+      "evidence": [],
+      "reason": "Not run against a 0.3.0 candidate yet."
+    },
+    {
+      "id": "SDK-FILES",
+      "description": "Wheel, sdist and TypeScript SDK tarball attached to the GitHub Release under SHA256SUMS; the wheel holds the SDK only and the npm tarball carries no command or native package",
+      "targets": [
+        "python",
+        "typescript"
+      ],
+      "status": "NOT_RUN",
+      "source_commit": null,
+      "source_sha256": null,
+      "artifact_sha256": [],
+      "evidence": [],
+      "reason": "Not run against a 0.3.0 candidate yet."
+    },
+    {
+      "id": "INSTALL-SCRIPT",
+      "description": "install.sh with the version written in installs the pinned Linux CLI into ~/.local/bin on a clean account without root, and installs nothing on a changed tarball (003 SC-012)",
+      "targets": [
+        "linux-x64-gnu",
+        "linux-arm64-gnu"
+      ],
+      "status": "NOT_RUN",
+      "source_commit": null,
+      "source_sha256": null,
+      "artifact_sha256": [],
+      "evidence": [],
+      "reason": "Not run against a 0.3.0 candidate yet."
+    },
+    {
+      "id": "PLATFORM-LINUX-X64",
+      "description": "Final Linux x64 binary on glibc2.35/kernel5.15",
+      "targets": [
+        "x86_64-unknown-linux-gnu"
+      ],
+      "status": "NOT_RUN",
+      "source_commit": null,
+      "source_sha256": null,
+      "artifact_sha256": [],
+      "evidence": [],
+      "reason": "Not run against a 0.3.0 candidate yet."
+    },
+    {
+      "id": "PLATFORM-LINUX-ARM64",
+      "description": "Final Linux ARM64 binary on glibc2.35/kernel5.15",
+      "targets": [
+        "aarch64-unknown-linux-gnu"
+      ],
+      "status": "NOT_RUN",
+      "source_commit": null,
+      "source_sha256": null,
+      "artifact_sha256": [],
+      "evidence": [],
+      "reason": "Not run against a 0.3.0 candidate yet."
+    },
+    {
+      "id": "PLATFORM-MACOS-X64",
+      "description": "Final Intel binary on macOS14 minimum",
+      "targets": [
+        "x86_64-apple-darwin"
+      ],
+      "status": "NOT_RUN",
+      "source_commit": null,
+      "source_sha256": null,
+      "artifact_sha256": [],
+      "evidence": [],
+      "reason": "Not run against a 0.3.0 candidate yet."
+    },
+    {
+      "id": "PLATFORM-MACOS-ARM64",
+      "description": "Final Apple Silicon binary on macOS14 minimum",
+      "targets": [
+        "aarch64-apple-darwin"
+      ],
+      "status": "NOT_RUN",
+      "source_commit": null,
+      "source_sha256": null,
+      "artifact_sha256": [],
+      "evidence": [],
+      "reason": "Not run against a 0.3.0 candidate yet."
+    },
+    {
+      "id": "PLATFORM-WIN",
+      "description": "Final Windows11 24H2 x64 client, no NVIDIA; execution refusal before mutation",
+      "targets": [
+        "x86_64-pc-windows-msvc"
+      ],
+      "status": "NOT_RUN",
+      "source_commit": null,
+      "source_sha256": null,
+      "artifact_sha256": [],
+      "evidence": [],
+      "reason": "Not run against a 0.3.0 candidate yet."
+    },
+    {
+      "id": "RENAME-CONFIG-UPGRADE",
+      "description": "Clean public rename, separated loaders, converter equivalence and offline-state compatibility",
+      "targets": [
+        "all"
+      ],
+      "status": "NOT_RUN",
+      "source_commit": null,
+      "source_sha256": null,
+      "artifact_sha256": [],
+      "evidence": [],
+      "reason": "Not run against a 0.3.0 candidate yet."
+    },
+    {
+      "id": "RECOVERY-MACOS",
+      "description": "Deterministic namespace/recovery faults and repeated complete native suite",
+      "targets": [
+        "macos"
+      ],
+      "status": "NOT_RUN",
+      "source_commit": null,
+      "source_sha256": null,
+      "artifact_sha256": [],
+      "evidence": [],
+      "reason": "Not run against a 0.3.0 candidate yet."
+    },
+    {
+      "id": "PHYSICAL-THREE-HOST",
+      "description": "Useful work, checkpoints, faults and confirmed release on all three roles",
+      "targets": [
+        "durable-coordinator",
+        "durable-agent",
+        "replay-agent"
+      ],
+      "status": "NOT_RUN",
+      "source_commit": null,
+      "source_sha256": null,
+      "artifact_sha256": [],
+      "evidence": [],
+      "reason": "Not run against a 0.3.0 candidate yet."
+    },
+    {
+      "id": "GPU-RTX5060TI",
+      "description": "Useful computation/checkpoint/resume/drain/owned-VRAM-release scenarios",
+      "targets": [
+        "rtx-5060-ti"
+      ],
+      "status": "NOT_RUN",
+      "source_commit": null,
+      "source_sha256": null,
+      "artifact_sha256": [],
+      "evidence": [],
+      "reason": "Not run against a 0.3.0 candidate yet."
+    },
+    {
+      "id": "GPU-L4",
+      "description": "Useful computation/checkpoint/resume/drain/owned-VRAM-release scenarios",
+      "targets": [
+        "l4"
+      ],
+      "status": "NOT_RUN",
+      "source_commit": null,
+      "source_sha256": null,
+      "artifact_sha256": [],
+      "evidence": [],
+      "reason": "Not run against a 0.3.0 candidate yet."
+    },
+    {
+      "id": "ARTIFACT-CONTROL",
+      "description": "Three concurrent256MiB unique uploads with per-op p99 and exact result/download validation",
+      "targets": [
+        "three-agent"
+      ],
+      "status": "NOT_RUN",
+      "source_commit": null,
+      "source_sha256": null,
+      "artifact_sha256": [],
+      "evidence": [],
+      "reason": "Not run against a 0.3.0 candidate yet."
+    },
+    {
+      "id": "SUPPLY-CHAIN",
+      "description": "Artifact notices/licenses/advisories/secrets and candidate provenance",
+      "targets": [
+        "all-artifacts"
+      ],
+      "status": "NOT_RUN",
+      "source_commit": null,
+      "source_sha256": null,
+      "artifact_sha256": [],
+      "evidence": [],
+      "reason": "Not run against a 0.3.0 candidate yet."
+    },
+    {
+      "id": "PUBLIC-EVIDENCE",
+      "description": "Allowlisted public summaries and extracted-archive privacy scan",
+      "targets": [
+        "all-public-archives"
+      ],
+      "status": "NOT_RUN",
+      "source_commit": null,
+      "source_sha256": null,
+      "artifact_sha256": [],
+      "evidence": [],
+      "reason": "Not run against a 0.3.0 candidate yet."
+    }
+  ],
+  "publication_readiness": {
+    "github_release": "NOT_RUN",
+    "reason": "0.3.0 ships as GitHub Release files only, published on the owner's release go once every gate passes; nothing goes to npm or PyPI."
+  },
+  "numeric_limits": {
+    "descriptor_bytes": 1048576,
+    "status_page_bytes": 7340032,
+    "status_client_bytes": 8388608,
+    "node_report_bytes": 2097152,
+    "node_report_allocations": 2048,
+    "lease_ms": 10000,
+    "control_deadline_ms": 10000,
+    "control_p99_ms_strictly_less_than": 2500
+  },
+  "gpu_limits": {
+    "scenario_seconds": 60,
+    "cleanup_seconds": 30,
+    "observed_owned_vram_bytes": 1073741824,
+    "sample_interval_ms": 100
+  },
+  "load_limits": {
+    "repetitions": 3,
+    "concurrent_lanes": 3,
+    "artifact_bytes_per_lane": 268435456,
+    "chunk_bytes": 1048576,
+    "serialized_wire_bytes_per_second_per_lane": 10485760,
+    "minimum_samples_per_operation_per_repetition": 300,
+    "operations": [
+      "heartbeat",
+      "renew",
+      "status"
+    ],
+    "scenario_seconds": 240,
+    "cleanup_seconds": 30
+  }
+}

@@ -1,114 +1,119 @@
-# CedeGrid 0.2.0 release
+# CedeGrid release
 
-CedeGrid 0.2.0 contains a standalone native CLI, a TypeScript SDK and launcher in
-npm `cedegrid`, and a Python-only SDK in PyPI `cedegrid`. The executable, Rust
-library, Python import, and environment prefix are `cedegrid`/`CEDEGRID_` without
-old-name aliases. Runtime configuration is TOML 1.0. Rust 1.88, Python 3.10, and
-Node 22.14 are the compatibility floors.
+From 0.3.0 on, CedeGrid ships as files on GitHub Releases only. The command-line tool installs
+for one user with a script, and the Python and TypeScript SDKs are files attached to the same
+release. Nothing is published to npm or PyPI. Version 0.2.0 stays on both registries, and
+[Moving off npm and PyPI](migration-registries.md) covers an existing install. The 0.2.0
+[qualification record](release-0.2-gates.json), [evidence](release-0.2-evidence.md) and
+[contract](release-0.2-spec.md) are kept as they were.
 
-Version 0.2.0 is published on npm, PyPI, and GitHub using the original checked
-archives. Publication was explicitly requested before qualification finished;
-the [qualification manifest](release-0.2-gates.json) retains incomplete and failed
-checks. The Windows native npm package was rejected by npm's spam filter.
-Fresh public-registry installation passed on macOS arm64 with npm scripts
-disabled. The release used the owner's npm login and PyPI token, without an
-OIDC provenance attestation. Crates.io publication remains disabled.
+The executable, Rust library, Python import and environment prefix are `cedegrid`/`CEDEGRID_`.
+Runtime configuration is TOML 1.0. Rust 1.88, Python 3.10 and Node 22.14 are the compatibility
+floors.
 
-## Artifacts and support boundary
+## Version
 
-The native package targets are `linux-x64-gnu`, `linux-arm64-gnu`, `darwin-x64`,
-`darwin-arm64`, and `win32-x64`. GNU binaries target glibc 2.35 and Linux kernel
-5.15. macOS deployment target is 14. Windows uses the MSVC x64 client target and
-requires Windows 11 24H2 qualification. Linux/macOS execute supported workloads;
-Windows refuses execution/recovery before state initialization. Standalone
-binaries require neither Python nor Node.
+The release version is the `version` in Cargo.toml's `[package]` table. Every release tool and
+both release workflows read it through `tools/release_version.py`; nothing else names it.
+`python3 tools/release_version.py --check` prints it, and fails unless `python/pyproject.toml`
+and `npm/package.json` carry the same version. To start a release, change those three lines
+together and run `cargo check` so Cargo.lock follows. The release's gates file is
+`docs/release-MAJOR.MINOR-gates.json`, here [release-0.3-gates.json](release-0.3-gates.json).
 
-macOS binaries have an ad-hoc integrity signature after stripping build provenance
-paths. They are not Developer ID signed or notarized. Windows binaries are not
-Authenticode signed. Checksums and build attestations identify release files;
-no certificate-backed platform-signing claim is made.
+## Release files
 
-The npm main tarball contains compiled ESM/CommonJS, matching declarations,
-TypeScript-derived launcher code, and exact-version optional native dependencies.
-Installation with scripts disabled requires no build or download hook. The SDK
-imports independently of native CLI resolution. Python provides an original wheel
-and source distribution, plus a separate rebuilt-sdist install check.
+| File | What it holds |
+| --- | --- |
+| `install.sh` | The user-level installer, with the release version written in |
+| `cedegrid.rb` | The Homebrew formula, with each macOS and Linux tarball's sha256 written in |
+| `cedegrid-VERSION-linux-x64-gnu.tar.gz`, `cedegrid-VERSION-linux-arm64-gnu.tar.gz` | The CLI for Linux, glibc 2.35 and kernel 5.15 or newer |
+| `cedegrid-VERSION-darwin-arm64.tar.gz`, `cedegrid-VERSION-darwin-x64.tar.gz` | The CLI for macOS 14 or newer |
+| `cedegrid-VERSION-win32-x64.zip` | The Windows client, which refuses to run work |
+| `cedegrid_VERSION_amd64.deb`, `cedegrid_VERSION_arm64.deb`, `cedegrid-system_VERSION_*.deb` | System mode packages, for administrators |
+| `cedegrid-VERSION-py3-none-any.whl`, `cedegrid-VERSION.tar.gz` | The Python SDK, wheel and sdist |
+| `cedegrid-VERSION.tgz` | The TypeScript SDK |
+| `cedegrid-VERSION-source.tar.gz` | The reviewed source export |
+| `SHA256SUMS` | One line for each file above, under the file's release name |
+
+Each CLI archive holds one directory, `cedegrid-VERSION-TARGET/`, with the binary, LICENSE,
+NOTICE and THIRD_PARTY_NOTICES.md. Because `SHA256SUMS` names each file as the release does,
+`sha256sum -c --ignore-missing SHA256SUMS` works in a download directory, and `install.sh` finds
+its tarball's line there.
+
+The wheel holds the `cedegrid` package's Python files and metadata only, and the TypeScript SDK
+tarball has no `bin` entry, no optional native packages and no install hook. Neither installs a
+command; the CLI is its own file.
+
+macOS binaries have an ad-hoc integrity signature after stripping build provenance paths. They
+are not Developer ID signed or notarized. Windows binaries are not Authenticode signed.
+Checksums and build attestations identify release files; no certificate-backed platform-signing
+claim is made.
 
 ## Build and validate locally
 
-`tools/build_native.py` produces immutable native candidates and their build
-records; it remaps private paths, strips debug records and hashes the final
-binary. Linux cross builds use Zig with a glibc 2.35 sysroot. ARM64 links preserve
-the Cortex-A53 erratum workaround through LLVM. Windows cross builds may use
-cargo-xwin with an isolated SDK/CRT cache. Native execution on the minimum OS is
-still required after cross compilation.
+`tools/build_native.py` produces immutable native candidates and their build records; it
+remaps private paths, strips debug records and hashes the final binary. Linux cross builds use
+Zig with a glibc 2.35 sysroot. ARM64 links preserve the Cortex-A53 erratum workaround through
+LLVM. Windows cross builds may use cargo-xwin with an isolated SDK/CRT cache. Native execution
+on the minimum OS is still required after cross compilation.
 
-`tools/build_packages.py --out NEW_DIRECTORY --binary TARGET=PATH ...` builds
-wheel/sdist, npm platform packages, the main npm tarball, and standalone archives.
-The full five-target set is required. It verifies embedded binary bytes and scans
-extracted archive members, including printable native strings, for accidental
-private data. The candidate job then builds the System mode Debian packages,
-`cedegrid` and `cedegrid-system` for amd64 and arm64, with `tools/build_deb.py`
-from the same two Linux binaries; `tools/release_manifest.py` checks that each CLI
-package holds the qualified binary, and `SHA256SUMS` covers them with the rest.
-Preserve failed candidates and create a new candidate after fixes;
-resume only an unfinished package set without rewriting its existing files.
+`tools/build_packages.py --out NEW_DIRECTORY --binary TARGET=PATH ...` builds the wheel and
+sdist, the TypeScript SDK tarball, one standalone archive per target, `install.sh` with the
+version written in, and `cedegrid.rb` from [the formula template](../packaging/homebrew/cedegrid.rb)
+once all four macOS and Linux archives exist; `tools/release_manifest.py` checks that the formula
+names exactly those archives with their sha256. It refuses an SDK tarball that declares a command, an optional native
+package or an install hook, verifies embedded binary bytes, and scans extracted archive members,
+including printable native strings, for accidental private data. The candidate job then builds
+the System mode Debian packages, `cedegrid` and `cedegrid-system` for amd64 and arm64, with
+`tools/build_deb.py` from the same two Linux binaries. Preserve failed candidates and create a
+new candidate after fixes; resume only an unfinished package set without rewriting its files.
 
-The npm verification harness runs a disposable loopback registry without uplinks,
-serving the original unpublished tarballs with exact optional-dependency versions.
-Clean local/global, scripts-disabled, optional-omitted, ESM/CJS, declarations,
-transport, native self-launch, and terminal signal paths are tested outside the
-checkout. Python tests install the original wheel and independently rebuilt sdist
-across 3.10–3.14. Cross-SDK workers pass metadata through native publication and
-SQLite, restart the coordinator, and verify with the other installed SDK.
+`tools/verify_python_packages.py` installs the original wheel and an independently rebuilt
+sdist on Python 3.10 to 3.14, and refuses a wheel that holds more than the SDK.
+`tools/verify_package_interop.py` installs the TypeScript SDK from the candidate's tarball and
+unpacks the native binary from its standalone archive, then passes metadata from workers of
+both SDKs through native publication and SQLite, restarts the coordinator, and reads it back
+with the other SDK. `tests/test_install_script.py` runs `install.sh` against release files
+served on loopback.
 
-`tools/release_manifest.py` freezes the reviewed source file hash map, checks each
-artifact hash, and enforces the fixed gate set. Qualification records are excluded
-from their own source digest. Its `--require-stable` mode fails for missing,
-changed, unqualified, or mismatched evidence. The [detailed contract](release-0.2-spec.md)
-defines descriptor/quota faults, namespace interleavings, 100k/1m pagination,
-three-host work, both GPUs, and three-agent 256 MiB artifact/control latency gates.
+`tools/release_manifest.py` freezes the reviewed source file hash map, writes `SHA256SUMS`,
+checks each artifact hash and enforces the fixed gate set. Qualification records are excluded
+from their own source digest. Its `--require-stable` mode fails for missing, changed,
+unqualified or mismatched evidence. The 0.3 gate set drops 0.2's two registry gates and adds
+`SDK-FILES` (the wheel, sdist and TypeScript SDK tarball, and that they hold the SDK only) and
+`INSTALL-SCRIPT` (003 SC-012: `install.sh` on a clean account without root installs the pinned
+version, and installs nothing from a changed tarball). The other gates keep the scenarios
+[the 0.2 contract](release-0.2-spec.md) defines.
 
 Before a merge into `main`, a release or a tag, one more gate applies: an independent security
 review of the commit to be published, run in an isolated environment. Nothing is merged into
 `main`, released or tagged until it has run on that exact commit and its findings are fixed or
 accepted in writing.
 
-## Publication prerequisites and exact-byte workflow
+## Publishing
 
-The public registry preflight found no existing project for the main npm name,
-its five platform names, or PyPI `cedegrid`. Absence does not reserve a name or
-prove permission to publish. Each project's owner and trusted publisher must be
-configured and verified externally. A PyPI pending publisher does not reserve
-its project name, and npm `whoami` does not validate OIDC publication.
+Run `release-candidate.yml` in `build` mode to produce the original unqualified file set,
+uploaded as `cedegrid-unqualified-VERSION`. After qualification against those exact files, its
+`accept-qualified` mode verifies the prepared bundle on the protected
+`cedegrid-release-qualification` runner. Set the Actions variable
+`QUALIFIED_CANDIDATE_DIRECTORY` to that bundle's directory. Only reviewed manifest members and
+hashed public evidence enter the resulting `cedegrid-qualified-VERSION` artifact. The build
+matrix is for compilation; dedicated baseline and physical-host evidence is still required,
+following [GitHub's runner specifications](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
 
-The manually dispatched release workflow consumes a previously qualified artifact
-set. It rechecks source and file hashes and every stable gate, then publishes native
-npm packages, the original Python files, and finally the main npm package. Existing
-registry files are skipped only after their cryptographic digest matches. A
-conflicting existing version aborts. Publish jobs never rebuild or repackage.
-The default workflow dispatch performs verification only; upload requires its
-explicit publish input and the repository's release environment.
-
-Run `release-candidate.yml` in `build` mode to produce the original unqualified
-package set. After qualification against those exact files, its `accept-qualified`
-mode verifies the prepared bundle on the protected `cedegrid-release-qualification`
-runner. Set the environment variable `QUALIFIED_CANDIDATE_DIRECTORY` through the
-same-named repository/environment Actions variable to that bundle's directory.
-Only reviewed manifest members and hashed public evidence enter the resulting
-`cedegrid-qualified-0.2.0` artifact; publishing consumes that completed run ID.
-The build matrix is for compilation. Dedicated baseline and physical-host evidence
-is still required, following [GitHub's runner specifications](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
-
-The prepared qualified-release workflow uses GitHub-hosted OIDC, Node 24.14.0 and npm 11.16.0, following
-[npm trusted publishing](https://docs.npmjs.com/trusted-publishers/) and
-[PyPI trusted publishing](https://packaging.python.org/en/latest/guides/publishing-package-distribution-releases-using-github-actions-ci-cd-workflows/).
-Configure the exact repository, release workflow filename, environment, and
-allowed publisher action for every registry project. Current npm publishers may
-default to staged publication; explicitly permit direct `npm publish` for this
-workflow. Actual authentication/publication can be recorded as PASS only after a
-real upload. GitHub artifact attestations follow the
+`release.yml` takes that run's ID. It rechecks the source, every file hash and every stable
+gate, and checks that `SHA256SUMS` matches the manifest. With its `publish` input set, in the
+repository's release environment, it attests the files and creates the GitHub Release
+`vVERSION` with them and `SHA256SUMS`, unchanged. It never rebuilds or repackages, uses no
+registry credentials, and stops without overwriting anything when the release already exists.
+The default dispatch verifies only. Attestations follow the
 [official provenance guidance](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations).
+
+Two second channels install the same version. Homebrew takes `cedegrid.rb` from the release;
+Homebrew installs formulae only from a tap, so the README shows a local tap until there is a
+published one. crates.io gets this commit's crate for `cargo install --locked cedegrid` when the
+`publish_crate` input is also set, after the GitHub Release exists; it needs the
+`CARGO_REGISTRY_TOKEN` secret in the release environment and the crate name on crates.io.
 
 ## Migration and retained limits
 

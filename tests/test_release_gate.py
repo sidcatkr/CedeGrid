@@ -1,12 +1,10 @@
 """Release failures must stop before uploads; tests never contact a registry."""
 from __future__ import annotations
-import base64
 import contextlib
 import copy
 import hashlib
 import io
 import json
-import os
 from pathlib import Path
 import re
 import sys
@@ -18,8 +16,11 @@ import zipfile
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY / 'tools'))
+import build_packages
 import release_manifest as release
-import publish_packages as publish
+import release_version
+
+V = release.VERSION
 
 
 def tar(path, files):
@@ -68,40 +69,44 @@ class CandidateFixture(unittest.TestCase):
         for target in sorted(release.NATIVE):
             binary = ('native original ' + target).encode()
             executable = 'cedegrid.exe' if target == 'win32-x64' else 'cedegrid'
-            name = 'cedegrid-' + target
             native[target] = {'sha256': hashlib.sha256(binary).hexdigest(), 'size': len(binary)}
-            tar(self.root / ('npm/' + name + '-0.2.0.tgz'), {
-                'package/package.json': json.dumps({'name': name, 'version': '0.2.0'}).encode(),
-                'package/bin/' + executable: binary})
-            standalone = self.root / ('standalone/cedegrid-0.2.0-' + target)
+            standalone = self.root / release.standalone(target)
+            member = 'cedegrid-' + V + '-' + target + '/' + executable
             if target == 'win32-x64':
                 standalone.parent.mkdir(exist_ok=True)
-                with zipfile.ZipFile(str(standalone) + '.zip', 'w') as archive:
-                    archive.writestr('cedegrid-0.2.0-' + target + '/' + executable, binary)
+                with zipfile.ZipFile(standalone, 'w') as archive:
+                    archive.writestr(member, binary)
             else:
-                tar(Path(str(standalone) + '.tar.gz'), {'cedegrid-0.2.0-' + target + '/' + executable: binary})
+                tar(standalone, {member: binary})
             if target in release.DEB_ARCH:
                 arch = release.DEB_ARCH[target]
-                deb(self.root / ('deb/cedegrid_0.2.0_' + arch + '.deb'), {'./usr/bin/cedegrid': binary})
-                deb(self.root / ('deb/cedegrid-system_0.2.0_' + arch + '.deb'),
+                deb(self.root / ('deb/cedegrid_' + V + '_' + arch + '.deb'), {'./usr/bin/cedegrid': binary})
+                deb(self.root / ('deb/cedegrid-system_' + V + '_' + arch + '.deb'),
                     {'./lib/systemd/system/cedegrid-broker.service': b'[Unit]\n'})
-        tar(self.root / 'npm/cedegrid-0.2.0.tgz', {'package/package.json': b'{"name":"cedegrid","version":"0.2.0"}'})
+        tar(self.root / ('npm/cedegrid-' + V + '.tgz'),
+            {'package/package.json': json.dumps({'name': 'cedegrid', 'version': V}).encode()})
         (self.root / 'pypi').mkdir()
-        for name in publish.PYTHON_FILES:
-            (self.root / 'pypi' / name).write_bytes(('original ' + name).encode())
-        tar(self.root / release.SOURCE_ARCHIVE, {'CedeGrid/source.txt': b'candidate source\n'})
+        for name in release.sdk_files():
+            if name.startswith('pypi/'):
+                (self.root / name).write_bytes(('original ' + name).encode())
+        (self.root / 'install').mkdir()
+        (self.root / release.INSTALL_SCRIPT).write_text('#!/bin/sh\nversion=${CEDEGRID_VERSION:-' + V + '}\n')
+        (self.root / 'homebrew').mkdir()
+        (self.root / release.HOMEBREW_FORMULA).write_text(build_packages.homebrew_formula(
+            V, {target: release.digest(self.root / release.standalone(target)) for target in build_packages.HOMEBREW_TARGETS}))
+        tar(self.root / release.source_archive(), {'CedeGrid/source.txt': b'candidate source\n'})
         artifacts = [{'path': name, 'sha256': release.digest(self.root / name), 'size': (self.root / name).stat().st_size}
-                     for name in sorted(release.EXPECTED | {release.SOURCE_ARCHIVE})]
-        self.manifest = {'version': '0.2.0', 'artifacts': artifacts, 'native_inputs': native,
+                     for name in sorted(release.expected() | {release.source_archive()})]
+        self.manifest = {'version': V, 'artifacts': artifacts, 'native_inputs': native,
                          'missing_native_targets': []}
         self.write_manifest()
         source = release.source_snapshot()
         (self.root / 'source-snapshot.json').write_text(json.dumps(source))
-        (self.root / 'SHA256SUMS').write_text(''.join(item['sha256'] + '  ' + item['path'] + '\n' for item in artifacts))
+        (self.root / 'SHA256SUMS').write_text(release.checksums(artifacts))
         evidence = self.root / 'evidence' / 'qualification.json'
         evidence.parent.mkdir(); evidence.write_text('{"status":"PASS"}\n')
         hashes = sorted({item['sha256'] for item in artifacts} | {item['sha256'] for item in native.values()})
-        self.gates = {'target_release': '0.2.0', 'stable_readiness': True,
+        self.gates = {'target_release': V, 'stable_readiness': True,
                       'candidate': {key: source[key] for key in ('source_commit', 'source_sha256')},
                       'required_gates': [{'id': name, 'status': 'PASS', 'source_commit': source['source_commit'],
                                          'source_sha256': source['source_sha256'], 'artifact_sha256': hashes,
@@ -119,13 +124,8 @@ class CandidateFixture(unittest.TestCase):
     def validate(self):
         return release.validate(self.root, self.gates, require_stable=True)
 
-    def registry(self, npm='new', python='new'):
-        context = contextlib.ExitStack()
-        context.enter_context(patch.object(publish, 'npm_state', side_effect=lambda path: (path.stem, npm)))
-        context.enter_context(patch.object(publish, 'python_state', return_value=python))
-        context.enter_context(patch.object(publish, 'require_oidc'))
-        uploaded = context.enter_context(patch.object(publish, 'npm_publish'))
-        return context, uploaded
+    def gate(self, gate_id):
+        return next(row for row in self.gates['required_gates'] if row['id'] == gate_id)
 
 
 class ReleaseGateTests(CandidateFixture):
@@ -138,13 +138,13 @@ class ReleaseGateTests(CandidateFixture):
             self.validate()
 
     def test_artifact_changed_after_manifest_rejected(self):
-        (self.root / 'pypi/cedegrid-0.2.0-py3-none-any.whl').write_bytes(b'different bytes')
+        (self.root / ('pypi/cedegrid-' + V + '-py3-none-any.whl')).write_bytes(b'different bytes')
         with self.assertRaisesRegex(ValueError, 'artifact hash or size'):
             self.validate()
 
     def test_platform_gate_cannot_substitute_sdk_hash(self):
-        gate = next(row for row in self.gates['required_gates'] if row['id'] == 'PLATFORM-LINUX-X64')
-        gate['artifact_sha256'] = [release.digest(self.root / 'npm/cedegrid-0.2.0.tgz')]
+        gate = self.gate('PLATFORM-LINUX-X64')
+        gate['artifact_sha256'] = [release.digest(self.root / ('npm/cedegrid-' + V + '.tgz'))]
         with self.assertRaises(ValueError):
             self.validate()
 
@@ -178,16 +178,16 @@ class ReleaseGateTests(CandidateFixture):
         with self.assertRaisesRegex(ValueError, 'path/sha256'):
             self.validate()
 
-    def test_native_input_hash_must_match_both_archives(self):
+    def test_native_input_hash_must_match_its_archive(self):
         self.manifest['native_inputs']['linux-x64-gnu']['sha256'] = '0' * 64
         self.write_manifest()
         with self.assertRaisesRegex(ValueError, 'packaged bytes'):
             self.validate()
 
     def test_a_debian_package_must_hold_the_qualified_binary(self):
-        deb(self.root / 'deb/cedegrid_0.2.0_amd64.deb', {'./usr/bin/cedegrid': b'another binary'})
+        deb(self.root / ('deb/cedegrid_' + V + '_amd64.deb'), {'./usr/bin/cedegrid': b'another binary'})
         for item in self.manifest['artifacts']:
-            if item['path'] == 'deb/cedegrid_0.2.0_amd64.deb':
+            if item['path'] == 'deb/cedegrid_' + V + '_amd64.deb':
                 path = self.root / item['path']
                 item['sha256'], item['size'] = release.digest(path), path.stat().st_size
         self.write_manifest()
@@ -205,7 +205,7 @@ class ReleaseGateTests(CandidateFixture):
             self.validate()
 
     def test_artifact_symlink_is_rejected(self):
-        path = self.root / 'pypi/cedegrid-0.2.0-py3-none-any.whl'
+        path = self.root / ('pypi/cedegrid-' + V + '-py3-none-any.whl')
         other = self.base / 'moved-wheel'; path.rename(other); path.symlink_to(other)
         with self.assertRaisesRegex(ValueError, 'symlink'):
             self.validate()
@@ -221,113 +221,144 @@ class ReleaseGateTests(CandidateFixture):
         release.verify_checksums(self.root, self.manifest['artifacts'])
 
 
-class PublishPhaseTests(CandidateFixture):
-    def test_missing_gate_stops_before_network_or_upload(self):
-        self.gates['required_gates'].pop()
-        with patch.object(publish, 'npm_state') as registry, patch.object(publish, 'npm_publish') as uploaded:
-            with self.assertRaises(ValueError):
-                publish.publish_phase(self.root, self.gates, 'native', apply=True)
-            registry.assert_not_called(); uploaded.assert_not_called()
+class ReleaseFileTests(CandidateFixture):
+    """0.3 ships files on GitHub Releases only (003 FR-073)."""
 
-    def test_late_npm_collision_stops_before_any_upload(self):
-        def state(path):
-            if 'win32' in path.name:
-                raise ValueError('same version different registry bytes')
-            return path.stem, 'new'
-        context, uploaded = self.registry()
-        with context, patch.object(publish, 'npm_state', side_effect=state):
-            with self.assertRaisesRegex(ValueError, 'different registry bytes'):
-                publish.publish_phase(self.root, self.gates, 'native', apply=True)
-            uploaded.assert_not_called()
+    def test_the_registry_gates_are_gone_and_the_file_gates_are_required(self):
+        self.assertFalse({'PACKAGES-NPM', 'PACKAGES-PYPI'} & release.REQUIRED)
+        self.assertLessEqual({'SDK-FILES', 'INSTALL-SCRIPT'}, release.REQUIRED)
+        self.gate('INSTALL-SCRIPT')['id'] = 'PACKAGES-NPM'
+        with self.assertRaisesRegex(ValueError, 'complete fixed'):
+            self.validate()
 
-    def test_late_pypi_collision_stops_before_native_upload(self):
-        context, uploaded = self.registry()
-        with context, patch.object(publish, 'python_state', side_effect=ValueError('same filename different bytes')):
-            with self.assertRaises(ValueError):
-                publish.publish_phase(self.root, self.gates, 'native', apply=True)
-            uploaded.assert_not_called()
+    def test_no_native_npm_package_is_a_release_file(self):
+        self.assertEqual([name for name in release.expected() if name.startswith('npm/')],
+                         ['npm/cedegrid-' + V + '.tgz'])
+        extra = self.root / ('npm/cedegrid-linux-x64-gnu-' + V + '.tgz')
+        tar(extra, {'package/bin/cedegrid': b'native original linux-x64-gnu'})
+        self.manifest['artifacts'].append({'path': extra.relative_to(self.root).as_posix(),
+                                           'sha256': release.digest(extra), 'size': extra.stat().st_size})
+        self.write_manifest()
+        with self.assertRaisesRegex(ValueError, 'unexpected release artifact'):
+            self.validate()
 
-    def test_identical_retry_performs_no_upload(self):
-        context, uploaded = self.registry('identical', 'identical')
-        with context:
-            result = publish.publish_phase(self.root, self.gates, 'native', apply=True)
-            uploaded.assert_not_called()
-            self.assertTrue(all(item['registry_state'] == 'identical' for item in result['actions']))
+    def test_sha256sums_names_each_file_as_the_release_does(self):
+        lines = (self.root / 'SHA256SUMS').read_text().splitlines()
+        names = [line.split('  ', 1)[1] for line in lines]
+        self.assertFalse([name for name in names if '/' in name])
+        # The line install.sh looks for: two spaces, then the tarball's own name.
+        tarball = 'cedegrid-' + V + '-linux-x64-gnu.tar.gz'
+        self.assertEqual([line for line in lines if re.search('  ' + re.escape(tarball) + '$', line)],
+                         [release.digest(self.root / release.standalone('linux-x64-gnu')) + '  ' + tarball])
+        self.assertIn('install.sh', names)
+        for name in ('cedegrid-' + V + '-py3-none-any.whl', 'cedegrid-' + V + '.tar.gz',
+                     'cedegrid-' + V + '.tgz'):
+            self.assertIn(name, names)
 
-    def test_python_requires_all_native_packages_first(self):
-        context, uploaded = self.registry()
-        stage = self.base / 'stage'
-        with context:
-            with self.assertRaisesRegex(ValueError, 'native npm package'):
-                publish.publish_phase(self.root, self.gates, 'python-stage', python_stage=stage)
-            self.assertFalse(stage.exists()); uploaded.assert_not_called()
+    def test_two_release_files_with_one_name_are_refused(self):
+        twin = dict(self.manifest['artifacts'][0], path='evidence/' + Path(self.manifest['artifacts'][0]['path']).name)
+        with self.assertRaisesRegex(ValueError, 'share a name'):
+            release.checksums(self.manifest['artifacts'] + [twin])
 
-    def test_python_stages_only_missing_original_file(self):
-        context, uploaded = self.registry('identical')
-        stage = self.base / 'stage'
-        with context, patch.object(publish, 'python_state', side_effect=lambda path: 'new' if path.suffix == '.whl' else 'identical'):
-            publish.publish_phase(self.root, self.gates, 'python-stage', python_stage=stage)
-            uploaded.assert_not_called()
-        self.assertEqual([path.name for path in stage.iterdir()], ['cedegrid-0.2.0-py3-none-any.whl'])
-        self.assertEqual(release.digest(stage / 'cedegrid-0.2.0-py3-none-any.whl'), release.digest(self.root / 'pypi/cedegrid-0.2.0-py3-none-any.whl'))
+    def test_the_install_script_gate_covers_the_script_and_both_linux_tarballs(self):
+        gate = self.gate('INSTALL-SCRIPT')
+        gate['artifact_sha256'] = [release.digest(self.root / release.INSTALL_SCRIPT)]
+        self.gates['stable_readiness'] = False
+        with self.assertRaisesRegex(ValueError, 'blocked by: INSTALL-SCRIPT$'):
+            self.validate()
 
-    def test_existing_staging_directory_is_rejected(self):
-        stage = self.base / 'stage'; stage.mkdir(); (stage / 'foreign.whl').write_bytes(b'foreign')
-        with patch.object(publish, 'npm_state') as registry:
-            with self.assertRaisesRegex(ValueError, 'new directory'):
-                publish.publish_phase(self.root, self.gates, 'python-stage', python_stage=stage)
-            registry.assert_not_called()
+    def test_the_sdk_files_gate_covers_the_wheel_sdist_and_npm_tarball(self):
+        gate = self.gate('SDK-FILES')
+        gate['artifact_sha256'] = [release.digest(self.root / ('npm/cedegrid-' + V + '.tgz'))]
+        self.gates['stable_readiness'] = False
+        with self.assertRaisesRegex(ValueError, 'blocked by: SDK-FILES$'):
+            self.validate()
 
-    def test_main_requires_both_original_python_files(self):
-        context, uploaded = self.registry('identical', 'new')
-        with context:
-            with self.assertRaisesRegex(ValueError, 'Python artifact'):
-                publish.publish_phase(self.root, self.gates, 'main', apply=True)
-            uploaded.assert_not_called()
 
-    def test_local_mutation_during_preflight_stops_before_upload(self):
-        def state(path):
-            if path.suffix == '.whl':
-                (self.root / 'npm/cedegrid-0.2.0.tgz').write_bytes(b'changed during registry checks')
-            return 'new'
-        context, uploaded = self.registry()
-        with context, patch.object(publish, 'python_state', side_effect=state):
-            with self.assertRaisesRegex(ValueError, 'artifact hash or size'):
-                publish.publish_phase(self.root, self.gates, 'native', apply=True)
-            uploaded.assert_not_called()
+class HomebrewFormulaTests(CandidateFixture):
+    """003 T107: the formula installs this release's tarballs by their sha256."""
 
-    def test_apply_requires_oidc_before_network(self):
-        with patch.dict(os.environ, {}, clear=True), patch.object(publish, 'npm_state') as registry:
-            with self.assertRaisesRegex(ValueError, 'GitHub-hosted OIDC'):
-                publish.publish_phase(self.root, self.gates, 'native', apply=True)
-            registry.assert_not_called()
+    def formula(self):
+        return (self.root / release.HOMEBREW_FORMULA).read_text()
 
-    def test_fetched_npm_bytes_must_match_even_when_metadata_does(self):
-        path = self.root / 'npm/cedegrid-0.2.0.tgz'
-        integrity = 'sha512-' + base64.b64encode(hashlib.sha512(path.read_bytes()).digest()).decode()
-        metadata = {'name': 'cedegrid', 'version': '0.2.0', 'dist': {'integrity': integrity,
-                    'tarball': 'https://registry.npmjs.org/cedegrid/-/cedegrid-0.2.0.tgz'}}
-        with patch.object(publish, 'fetch', return_value=metadata), patch.object(publish, 'fetch_hashes', return_value=(path.stat().st_size, '0' * 64, integrity)):
-            with self.assertRaisesRegex(ValueError, 'fetched npm tarball'):
-                publish.npm_state(path)
+    def replace_formula(self, text):
+        path = self.root / release.HOMEBREW_FORMULA
+        path.write_text(text)
+        for item in self.manifest['artifacts']:
+            if item['path'] == release.HOMEBREW_FORMULA:
+                item['sha256'], item['size'] = release.digest(path), path.stat().st_size
+        self.write_manifest()
+        (self.root / 'SHA256SUMS').write_text(release.checksums(self.manifest['artifacts']))
+        self.gates['candidate']['artifacts'] = copy.deepcopy(self.manifest['artifacts'])
 
-    def test_same_pypi_filename_with_other_digest_is_rejected(self):
-        path = self.root / 'pypi/cedegrid-0.2.0-py3-none-any.whl'
-        metadata = {'info': {'name': 'cedegrid', 'version': '0.2.0'},
-                    'urls': [{'filename': path.name, 'digests': {'sha256': '0' * 64}}]}
-        with patch.object(publish, 'fetch', return_value=metadata):
-            with self.assertRaisesRegex(ValueError, 'different bytes'):
-                publish.python_state(path)
+    def test_the_formula_names_each_tarball_with_its_sha256(self):
+        text = self.formula()
+        for target in build_packages.HOMEBREW_TARGETS:
+            name = Path(release.standalone(target)).name
+            self.assertIn('url "' + release_version.release_url(V) + '/' + name + '"\n      sha256 "'
+                          + release.digest(self.root / release.standalone(target)) + '"', text)
+        self.assertIn('version "' + V + '"', text)
+        self.assertNotRegex(text, r'@[A-Z0-9_]+@')
+        self.assertIn('cedegrid.rb', (self.root / 'SHA256SUMS').read_text())
 
-    def test_publish_command_uses_original_path_without_registry_tokens(self):
-        path = self.root / 'npm/cedegrid-0.2.0.tgz'
-        with patch.dict(os.environ, {'NODE_AUTH_TOKEN': 'unused-fixture', 'NPM_TOKEN': 'unused-fixture', 'NPM_CONFIG_REGISTRY': 'https://example.invalid'}), patch.object(publish.subprocess, 'run') as call:
-            publish.npm_publish(path)
-            argv = call.call_args.args[0]; environment = call.call_args.kwargs['env']
-            self.assertEqual(argv[:3], ['npm', 'publish', str(path)])
-            self.assertIn('--ignore-scripts', argv); self.assertIn('--provenance', argv)
-            self.assertNotIn('NODE_AUTH_TOKEN', environment); self.assertNotIn('NPM_TOKEN', environment)
-            self.assertFalse(any(key.upper().startswith('NPM_CONFIG_') for key in environment))
+    def test_a_formula_with_another_sha256_is_refused(self):
+        linux = release.digest(self.root / release.standalone('linux-x64-gnu'))
+        self.replace_formula(self.formula().replace(linux, '0' * 64))
+        with self.assertRaisesRegex(ValueError, 'Homebrew formula does not install'):
+            self.validate()
+
+    def test_the_formula_needs_every_macos_and_linux_tarball(self):
+        digests = {target: '0' * 64 for target in build_packages.HOMEBREW_TARGETS}
+        del digests['darwin-x64']
+        with self.assertRaisesRegex(RuntimeError, 'needs the darwin-x64 tarball'):
+            build_packages.homebrew_formula(V, digests)
+
+    def test_a_template_value_nothing_writes_is_refused(self):
+        digests = {target: '0' * 64 for target in build_packages.HOMEBREW_TARGETS}
+        template = self.base / 'template.rb'
+        template.write_text((REPOSITORY / 'packaging/homebrew/cedegrid.rb').read_text() + '# @SHA256_WIN32_X64@\n')
+        with patch.object(build_packages, 'HOMEBREW_TEMPLATE', template):
+            with self.assertRaisesRegex(RuntimeError, 'values nothing writes'):
+                build_packages.homebrew_formula(V, digests)
+
+    def test_install_sh_downloads_from_the_same_release_address(self):
+        script = (REPOSITORY / 'tools/install.sh').read_text()
+        self.assertIn('base=${CEDEGRID_RELEASE_URL:-' + release_version.release_url('$version') + '}', script)
+
+
+class ReleaseVersionTests(unittest.TestCase):
+    def root(self, cargo, python, npm):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        (root / 'python').mkdir(); (root / 'npm').mkdir()
+        (root / 'Cargo.toml').write_text('[package]\nname = "cedegrid"\nversion = "' + cargo + '"\n\n'
+                                         '[dependencies]\nversion = "9.9.9"\n')
+        (root / 'python/pyproject.toml').write_text('[project]\nname = "cedegrid"\nversion = "' + python + '"\n')
+        (root / 'npm/package.json').write_text(json.dumps({'name': 'cedegrid', 'version': npm}))
+        return root
+
+    def test_the_version_is_cargo_tomls_package_version(self):
+        self.assertEqual(release_version.check(self.root('1.4.2', '1.4.2', '1.4.2')), '1.4.2')
+        self.assertEqual(release_version.gates_path('1.4.2', REPOSITORY).name, 'release-1.4-gates.json')
+        self.assertEqual(release.VERSION, release_version.version())
+
+    def test_an_sdk_manifest_on_another_version_stops_the_build(self):
+        with self.assertRaisesRegex(ValueError, 'npm/package.json has 1.4.1'):
+            release_version.check(self.root('1.4.2', '1.4.2', '1.4.1'))
+        with self.assertRaisesRegex(ValueError, 'python/pyproject.toml has 1.3.0'):
+            release_version.check(self.root('1.4.2', '1.3.0', '1.4.2'))
+
+    def test_the_0_3_gates_file_lists_exactly_the_required_gates(self):
+        gates = json.loads((REPOSITORY / 'docs/release-0.3-gates.json').read_text())
+        self.assertEqual(gates['target_release'], '0.3.0')
+        self.assertEqual({row['id'] for row in gates['required_gates']}, release.REQUIRED)
+        self.assertEqual(len(gates['required_gates']), len(release.REQUIRED))
+        self.assertIs(gates['stable_readiness'], False)
+
+    def test_a_malformed_version_is_refused(self):
+        with self.assertRaisesRegex(ValueError, 'MAJOR.MINOR.PATCH'):
+            release_version.version(self.root('1.4', '1.4', '1.4'))
 
 
 class WorkflowTests(unittest.TestCase):
@@ -352,7 +383,35 @@ class WorkflowTests(unittest.TestCase):
             self.assertNotRegex(source, r'\b' + re.escape(forbidden) + r'\b')
         self.assertIn('artifact-ids:', source)
         self.assertIn('id-token: write', source)
-        self.assertNotIn('secrets.NPM', source)
+
+    def test_no_workflow_publishes_to_npm_or_pypi(self):
+        # 003 FR-073: the release is GitHub Release files only.
+        for path in sorted((REPOSITORY / '.github/workflows').glob('*.yml')):
+            source = path.read_text()
+            for forbidden in ('npm publish', 'publish_packages', 'gh-action-pypi-publish', 'registry-url',
+                              'twine', 'NPM_TOKEN', 'NODE_AUTH_TOKEN'):
+                with self.subTest(workflow=path.name, forbidden=forbidden):
+                    self.assertFalse(forbidden in source, forbidden + ' in ' + path.name)
+
+    def test_crates_io_publishes_only_when_asked(self):
+        # 003 T107: the second channel runs only on the owner's release go, after the release.
+        source = (REPOSITORY / '.github/workflows/release.yml').read_text()
+        self.assertRegex(source, r'publish_crate:\n(?:\s+\w+: .*\n)*?\s+default: false\n')
+        steps = source.split('\n      - ')
+        crate = [step for step in steps if 'cargo +' in step and ' publish' in step]
+        self.assertEqual(len(crate), 1)
+        self.assertIn('if: inputs.publish && inputs.publish_crate', crate[0])
+        self.assertIn('publish --locked', crate[0])
+        release = [index for index, step in enumerate(steps) if "'gh','release','create'" in step]
+        self.assertEqual(len(release), 1)
+        self.assertGreater(steps.index(crate[0]), release[0])
+
+    def test_release_workflows_take_the_version_from_cargo_toml(self):
+        for name in ('release.yml', 'release-candidate.yml'):
+            source = (REPOSITORY / '.github/workflows' / name).read_text()
+            self.assertTrue('tools/release_version.py' in source, name)
+            literal = re.findall(r'\b\d+\.\d+\.\d+-(?:source|gnu)|\bv\d+\.\d+\.\d+\b|qualified-\d|--version \d', source)
+            self.assertEqual(literal, [], name)
 
 
 if __name__ == '__main__':

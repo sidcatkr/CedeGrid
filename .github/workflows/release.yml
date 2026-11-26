@@ -1,20 +1,27 @@
-name: Publish previously qualified CedeGrid artifacts
+name: Publish previously qualified CedeGrid release files
+# The release is files on GitHub Releases only (003 FR-073): nothing goes to npm or PyPI. The
+# version is Cargo.toml's, read by tools/release_version.py.
 on:
   workflow_dispatch:
     inputs:
       candidate_run_id:
-        description: Successful run containing the immutable cedegrid-qualified-0.2.0 artifact
+        description: Successful run containing the immutable cedegrid-qualified-VERSION artifact
         required: true
         type: string
       publish:
-        description: Upload the exact qualified files after verification
+        description: Upload the exact qualified files to a GitHub Release after verification
+        required: true
+        default: false
+        type: boolean
+      publish_crate:
+        description: After the GitHub Release, publish this commit's crate to crates.io (needs the CARGO_REGISTRY_TOKEN secret)
         required: true
         default: false
         type: boolean
 permissions:
   contents: read
 concurrency:
-  group: cedegrid-release-0.2.0
+  group: cedegrid-release
   cancel-in-progress: false
 jobs:
   release:
@@ -29,23 +36,18 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: '24.14.0'
-          registry-url: https://registry.npmjs.org
-      - run: npm install --global npm@11.16.0 --ignore-scripts
-      - name: Verify pinned OIDC tool versions
-        run: |
-          test "$(node --version)" = 'v24.14.0'
-          test "$(npm --version)" = '11.16.0'
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
+      - name: Read the release version from Cargo.toml
+        id: version
+        run: echo "version=$(python tools/release_version.py --check)" >> "$GITHUB_OUTPUT"
       - name: Verify candidate run belongs to this exact repository revision
         id: provenance
         env:
           GH_TOKEN: ${{ github.token }}
           CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
         run: |
           python - <<'PY'
           import json,os,subprocess
@@ -57,7 +59,7 @@ jobs:
           assert data['repository']['full_name']==data['head_repository']['full_name']==os.environ['GITHUB_REPOSITORY']
           listing=json.loads(subprocess.check_output(['gh','api','repos/'+os.environ['GITHUB_REPOSITORY']+'/actions/runs/'+run+'/artifacts?per_page=100']))
           assert listing['total_count']<=100
-          matches=[item for item in listing['artifacts'] if item['name']=='cedegrid-qualified-0.2.0']
+          matches=[item for item in listing['artifacts'] if item['name']=='cedegrid-qualified-'+os.environ['RELEASE_VERSION']]
           assert len(matches)==1 and not matches[0]['expired'], 'one immutable qualified artifact required'
           with open(os.environ['GITHUB_OUTPUT'],'a') as output:
               output.write('artifact_id='+str(matches[0]['id'])+'\n')
@@ -78,51 +80,49 @@ jobs:
           snapshot=json.loads(Path('candidate/source-snapshot.json').read_text())
           assert snapshot['source_commit']==os.environ['GITHUB_SHA']
           PY
-      - name: Attest the exact qualified artifacts before registry publication
+      - name: Attest the exact qualified files before publication
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         if: inputs.publish
         with:
           subject-path: |
+            candidate/install/install.sh
+            candidate/homebrew/cedegrid.rb
+            candidate/standalone/*
+            candidate/deb/*.deb
             candidate/npm/*.tgz
             candidate/pypi/*
-            candidate/standalone/*
             candidate/source/*.tar.gz
-      - name: Publish native npm packages first
-        if: inputs.publish
-        run: python tools/publish_packages.py --packages candidate --gates candidate/gates.json --phase native --apply
-      - name: Stage only original Python files that are not already published
-        if: inputs.publish
-        run: python tools/publish_packages.py --packages candidate --gates candidate/gates.json --phase python-stage --python-stage python-publish
-      - name: Detect pending Python uploads
-        if: inputs.publish
-        id: python
-        run: |
-          if [ -d python-publish ]; then
-            echo 'pending=true' >> "$GITHUB_OUTPUT"
-          fi
-      - name: Publish original wheel and sdist through PyPI trusted publishing
-        if: inputs.publish && steps.python.outputs.pending == 'true'
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
-        with:
-          packages-dir: python-publish
-          attestations: true
-      - name: Publish main npm package after verifying all prerequisite file hashes
-        if: inputs.publish
-        run: python tools/publish_packages.py --packages candidate --gates candidate/gates.json --phase main --apply
       - name: Publish GitHub Release with unchanged qualified files
         if: inputs.publish
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
         run: |
           python - <<'PY'
-          import json,os,subprocess
+          import json,os,subprocess,sys
           from pathlib import Path
+          sys.path.insert(0,'tools')
+          from release_manifest import checksums
           root=Path('candidate')
           manifest=json.loads((root/'manifest.json').read_text())
+          version=os.environ['RELEASE_VERSION']
+          assert manifest['version']==version, 'candidate version differs from Cargo.toml'
+          # Each file is published under its base name, which SHA256SUMS already uses.
+          assert (root/'SHA256SUMS').read_text()==checksums(manifest['artifacts'])
           artifacts=[str(root/a['path']) for a in manifest['artifacts']]
-          tag='v0.2.0'
+          tag='v'+version
           old=subprocess.run(['gh','release','view',tag,'--json','tagName'],capture_output=True)
           if old.returncode==0:
               raise SystemExit('Release already exists; compare its asset hashes before an explicit retry. No assets are overwritten.')
-          subprocess.run(['gh','release','create',tag,'--target',os.environ['GITHUB_SHA'],'--title','CedeGrid 0.2.0','--notes-file','docs/release.md',*artifacts,str(root/'SHA256SUMS')],check=True)
+          subprocess.run(['gh','release','create',tag,'--target',os.environ['GITHUB_SHA'],'--title','CedeGrid '+version,'--notes-file','docs/release.md',*artifacts,str(root/'SHA256SUMS')],check=True)
           PY
+      # The second channel for `cargo install --locked cedegrid` (003 T107). It packages this
+      # verified commit's source; the release files above are untouched.
+      - name: Publish the crate to crates.io
+        if: inputs.publish && inputs.publish_crate
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          test -n "$CARGO_REGISTRY_TOKEN" || { echo 'CARGO_REGISTRY_TOKEN is not set for the release environment' >&2; exit 1; }
+          rustup toolchain install 1.98.1 --profile minimal
+          cargo +1.98.1 publish --locked
