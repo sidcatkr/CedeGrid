@@ -1129,7 +1129,7 @@ impl<'a> Interval<'a> {
             .collect();
         let held_set: BTreeSet<u32> = held.iter().flatten().copied().collect();
         // A plain principal contends: an account with no CedeGrid work on the CPU, or usage
-        // that no readable account accounts for. System accounts, outside `uid_min` to `uid_max`,
+        // that no readable account accounts for. System accounts, below `uid_min` or in a system range,
         // are background.
         let contention = &self.config.contention;
         // CPU no account accounts for right after own tasks stop is their last interval's

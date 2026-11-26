@@ -6523,13 +6523,13 @@ mod gpu_demand {
         }
 
         /// A display manager's login screen holds a quiet context on the device from before own
-        /// work, under a dynamic account above `uid_max`: a system account, so it is nobody who
+        /// work, under a dynamic greeter account in systemd's range: a system account, so it is nobody who
         /// arrived first, and own work keeps half the device beside the later user (FR-090,
         /// FR-059; user, 2026-11-24).
         #[test]
-        fn a_login_screen_above_uid_max_does_not_withhold_the_floor() {
+        fn a_login_screen_greeter_account_does_not_withhold_the_floor() {
             let config = mode_config(ContentionMode::YieldFirst);
-            let greeter = (4242, Some(config.contention.uid_max + 4321));
+            let greeter = (4242, Some(60_650));
             let run = tasks_run_beside(
                 &config,
                 None,

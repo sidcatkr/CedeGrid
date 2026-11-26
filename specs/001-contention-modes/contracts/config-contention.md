@@ -18,6 +18,13 @@ principal_window_intervals = 4      # sustained intervals to join as a principal
 principal_leave_s = 60              # below the threshold this long, a principal leaves
 never_share_occupied_gpus = false   # true: no new own GPU work on devices with external contexts
 
+[contention.system_accounts]         # the same table as the broker policy's (FR-059)
+uid_ranges = [[60578, 60705], [61184, 65519], [65534, 65535]]
+                                    # system accounts at or above uid_min: systemd's greeter and
+                                    # service users and nobody; a range beyond these needs
+                                    # "relaxed_detection"
+subordinate_uid_file = "/etc/subuid" # a UID in an owner's range counts as the owner; "" turns it off
+
 [contention.cpu]                    # also [contention.ram], [contention.gpu_compute], [contention.gpu_memory];
                                     # keys marked cpu, ram or memory apply only there, others are rejected
 mode = "neutral"                    # optional override of default_mode, must be <= max_mode

@@ -22,11 +22,12 @@ Serialization contracts are in [contracts/](contracts/).
 | `max_mode` | ContentionMode | the most aggressive node mode | `default_mode ≤ max_mode` |
 | `floor_policy` | `a` | `a` | `b` and `c` fail to load, naming the Guaranteed hint deadline and the RAM breach window (FR-041) |
 | `neutral_memory_policy` | `a` | `a` | `b` fails to load, naming the floor sizes (FR-042) |
-| `acknowledge_caution` | set of `performance_mode`, `small_floor`, `reduced_margin`, `relaxed_detection` | `[]` | `performance_mode` still loads but is no longer needed (item 029); a margin below its default without `reduced_margin`, or a detection setting beyond its default without `relaxed_detection` (`saturation_percent`, `principal_min_percent`, `noise_tolerance_mib`, `uid_min` or `attribution_tolerance_percent` above it, `memory_peak_window_s` or `quiet_window_intervals` below it), fails to load; a floor near its minimum without `small_floor` is raised to twice the minimum with a warning (FR-051, FR-054). |
+| `acknowledge_caution` | set of `performance_mode`, `small_floor`, `reduced_margin`, `relaxed_detection` | `[]` | `performance_mode` still loads but is no longer needed (item 029); a margin below its default without `reduced_margin`, or a detection setting beyond its default without `relaxed_detection` (`saturation_percent`, `principal_min_percent`, `noise_tolerance_mib`, `uid_min` or `attribution_tolerance_percent` above it, a system range beyond the defaults, `memory_peak_window_s` or `quiet_window_intervals` below it), fails to load; a floor near its minimum without `small_floor` is raised to twice the minimum with a warning (FR-051, FR-054). |
 | `guaranteed_hint_deadline_s` | u64 | 5 | 1–30 (FR-024) |
 | `critical_floor_percent` | u8 | 50 | 10–90; the critical level never goes below the minimum floor (FR-063) |
 | `critical_hint_deadline_s` | u64 | 1 | 1 to every memory resource's `hint_deadline_s` and to `guaranteed_hint_deadline_s` (FR-063) |
 | `uid_min` | u32 | 1000 | FR-059; above 1000 needs `relaxed_detection` |
+| `system_accounts` | `SystemAccounts` (`src/config.rs`) | see below | FR-059; the same type is the broker policy's (005) |
 | `principal_window_intervals` | u32 | 4 | ≥ 1 (FR-059) |
 | `principal_leave_s` | u64 | 60 | 1–3600; a principal leaves after this long below the threshold (FR-059) |
 | `never_share_occupied_gpus` | bool | false | FR-064 |
@@ -55,6 +56,16 @@ Serialization contracts are in [contracts/](contracts/).
   episode, whoever caused it; since item 054). Execution evidence: the launch `oom_score_adj` baseline and every
   change (task, from, to, cause, own memory and fair share). Task outcome cause
   `oom_not_own_fault`: a requeue that counts no failure or attempt (FR-076).
+
+## SystemAccounts (`src/config.rs`, `[contention.system_accounts]` and the broker's policy)
+
+One type, one place for its defaults, embedded by the node's contention section and the root
+broker's policy so both classify accounts alike (FR-059; user, 2026-11-26).
+
+| Field | Type | Default | Validation / notes |
+|---|---|---|---|
+| `uid_ranges` | list of `[first, last]` | `[[60578, 60705], [61184, 65519], [65534, 65535]]` (`SYSTEMD_NON_HUMAN_UIDS`) | each `first ≤ last`; a range not inside a default one needs `relaxed_detection`; fewer or narrower ranges need nothing |
+| `subordinate_uid_file` | path | `/etc/subuid` (`SUBORDINATE_UID_FILE`) | absolute or empty; empty turns the owner mapping off. Read only, again when its modification time changes; an owner given by name is resolved through the system's user database |
 
 ## ResourceThresholds (`src/config.rs`)
 
@@ -98,8 +109,10 @@ Floors reuse existing keys: `ram.reserve_mib`/`ram.reserve_percent` and
 - Demand per resource is aggregated from observed processes (R12).
 - Classification per resource, kept by the policy engine (FR-059):
   - the owner is always a principal;
-  - a user ID below `uid_min` is background;
-  - a user ID at or above it is admitted after `principal_window_intervals` at or above
+  - a user ID below `uid_min` or in one of `system_accounts.uid_ranges` is background;
+  - a user ID in a range of `system_accounts.subordinate_uid_file` is read as that range's owner
+    first, and stays itself while the file or the owner's user ID cannot be read;
+  - any other user ID is admitted after `principal_window_intervals` at or above
     `principal_min_percent`, and leaves after `principal_leave_s` below it;
   - usage of user IDs not admitted yet, and of unreadable owners, forms the unattributed
     principal.
@@ -402,7 +415,7 @@ when absent; older state judges against the current target alone.
 
 ## GpuSnapshot.background_process_ids (`src/model.rs`)
 
-Listed external contexts of a user ID below `uid_min` that are background this interval: per-
+Listed external contexts of a system account (below `uid_min` or in a system range) that are background this interval: per-
 process utilization is readable and theirs stays below `principal_min_percent` (FR-021). Their
 memory stays in `external_process_ids` and counts as external usage. Default empty, skipped when
 empty.

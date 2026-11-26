@@ -634,10 +634,9 @@ pub struct ContentionConfig {
     pub critical_hint_deadline_s: u64,
     /// User IDs below this are system accounts: background demand (FR-059).
     pub uid_min: u32,
-    /// User IDs above this are system accounts too, as `UID_MAX` in `login.defs` has it: a
-    /// display manager's dynamic greeter accounts, systemd's dynamic users and `nobody`
-    /// (FR-059; user, 2026-11-24).
-    pub uid_max: u32,
+    /// Which user IDs at or above `uid_min` are system accounts too, and how subordinate user
+    /// IDs count (FR-059).
+    pub system_accounts: SystemAccounts,
     /// Consecutive observations a user needs to join the principals.
     pub principal_window_intervals: u32,
     /// How long a principal's usage must stay below the threshold before it leaves.
@@ -667,7 +666,7 @@ impl Default for ContentionConfig {
             critical_floor_percent: 50,
             critical_hint_deadline_s: 1,
             uid_min: 1000,
-            uid_max: 60000,
+            system_accounts: SystemAccounts::default(),
             principal_window_intervals: 4,
             principal_leave_s: 60,
             never_share_occupied_gpus: false,
@@ -705,6 +704,71 @@ pub const ACKNOWLEDGEMENTS: [&str; 5] = [
 
 /// Why memory has no Neutral or Performance margin.
 pub const MEMORY_FLOOR_ONLY: &str = "memory keeps only the floor under Neutral and Performance; only yield_first_margin_percent applies";
+
+/// systemd's user ID ranges that hold no people, from its `UIDS-GIDS.md`: dynamic greeter users,
+/// dynamic service users, and `nobody` with the 16-bit -1. Its container and foreign ranges are
+/// left out: directory services map people's IDs into the same numbers (SSSD's default ID
+/// mapping starts at 200000), so they stay people unless an operator adds them. The default of
+/// `SystemAccounts::uid_ranges`, which operators can change (FR-059; user, 2026-11-26).
+pub const SYSTEMD_NON_HUMAN_UIDS: [[u32; 2]; 3] =
+    [[60_578, 60_705], [61_184, 65_519], [65_534, 65_535]];
+
+/// The default subordinate user ID file, as shadow-utils keeps it.
+pub const SUBORDINATE_UID_FILE: &str = "/etc/subuid";
+
+/// Which user IDs at or above the first ordinary one are system accounts, and how subordinate
+/// user IDs count. One type for the node's `[contention.system_accounts]` and the broker's
+/// policy, so both classify accounts alike (FR-059).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct SystemAccounts {
+    /// Inclusive `[first, last]` user ID ranges that hold no people.
+    pub uid_ranges: Vec<[u32; 2]>,
+    /// The subordinate user ID file: a user ID in one of its ranges counts as the range's
+    /// owner. An empty path turns this off, so each such user ID counts as itself.
+    pub subordinate_uid_file: PathBuf,
+}
+
+impl Default for SystemAccounts {
+    fn default() -> Self {
+        Self {
+            uid_ranges: SYSTEMD_NON_HUMAN_UIDS.to_vec(),
+            subordinate_uid_file: PathBuf::from(SUBORDINATE_UID_FILE),
+        }
+    }
+}
+
+impl SystemAccounts {
+    /// Checks the ranges and the file path; `section` names the table in messages.
+    pub fn validate(&self, section: &str) -> Result<()> {
+        ensure!(
+            self.uid_ranges.iter().all(|[first, last]| first <= last),
+            "each of {section}.uid_ranges must be [first, last] with first at most last"
+        );
+        ensure!(
+            self.subordinate_uid_file.as_os_str().is_empty()
+                || self.subordinate_uid_file.is_absolute(),
+            "{section}.subordinate_uid_file must be an absolute path or empty"
+        );
+        Ok(())
+    }
+
+    /// Whether a user ID lies in one of the system ranges.
+    pub fn contains(&self, uid: u32) -> bool {
+        self.uid_ranges
+            .iter()
+            .any(|[first, last]| (*first..=*last).contains(&uid))
+    }
+
+    /// The first range beyond systemd's non-human ones, which makes more accounts background.
+    pub fn beyond_defaults(&self) -> Option<[u32; 2]> {
+        self.uid_ranges.iter().copied().find(|[first, last]| {
+            !SYSTEMD_NON_HUMAN_UIDS
+                .iter()
+                .any(|[from, to]| from <= first && last <= to)
+        })
+    }
+}
 
 /// Floors are never smaller than these (FR-023).
 pub const MIN_RAM_FLOOR_MIB: u64 = 512;
@@ -1006,10 +1070,8 @@ impl ContentionConfig {
             self.principal_window_intervals >= 1,
             "contention.principal_window_intervals must be at least 1"
         );
-        ensure!(
-            self.uid_max >= self.uid_min,
-            "contention.uid_max must be at least contention.uid_min"
-        );
+        self.system_accounts
+            .validate("contention.system_accounts")?;
         ensure!(
             (1..=3600).contains(&self.principal_leave_s),
             "contention.principal_leave_s must be between 1 and 3600"
@@ -1297,10 +1359,11 @@ impl ContentionConfig {
         })
     }
 
-    /// A user account, which can be a principal: from `uid_min` to `uid_max`. Every other user ID
-    /// is a system account, whose usage is background (FR-059).
+    /// A user account, which can be a principal: at or above `uid_min` and in none of the
+    /// system ranges. Every other user ID is a system account, whose usage is background
+    /// (FR-059).
     pub fn is_user_uid(&self, uid: u32) -> bool {
-        (self.uid_min..=self.uid_max).contains(&uid)
+        uid >= self.uid_min && !self.system_accounts.contains(uid)
     }
 
     /// Detection settings beyond their defaults, which let more external demand
@@ -1310,8 +1373,11 @@ impl ContentionConfig {
         if self.uid_min > Self::default().uid_min {
             result.push(("contention.uid_min".to_string(), self.uid_min.to_string()));
         }
-        if self.uid_max < Self::default().uid_max {
-            result.push(("contention.uid_max".to_string(), self.uid_max.to_string()));
+        if let Some([first, last]) = self.system_accounts.beyond_defaults() {
+            result.push((
+                "contention.system_accounts.uid_ranges".to_string(),
+                format!("[{first}, {last}]"),
+            ));
         }
         result.extend(self.beyond_defaults(|t| {
             [
@@ -1444,7 +1510,12 @@ pub const KEY_CLASSES: &[(&str, KeyClass)] = {
         // Users not joined yet count toward the unattributed principal, which contends.
         ("contention.principal_window_intervals", Safe),
         ("contention.uid_min", Caution("relaxed_detection")),
-        ("contention.uid_max", Caution("relaxed_detection")),
+        (
+            "contention.system_accounts.uid_ranges",
+            Caution("relaxed_detection"),
+        ),
+        // Off, each subordinate user ID counts as a person of its own.
+        ("contention.system_accounts.subordinate_uid_file", Safe),
         ("contention.*.mode", Bounded),
         (
             "contention.*.yield_first_margin_percent",

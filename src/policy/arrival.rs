@@ -92,7 +92,7 @@ impl Interval<'_> {
 
     /// Each other account's standing on a resource, by UID, from its CedeGrid work there as
     /// `work` picks it; None while the principal list cannot be read, so no account is known to
-    /// be plain. System accounts, outside `uid_min` to `uid_max`, and usage without a UID are
+    /// be plain. System accounts, below `uid_min` or in a system range, and usage without a UID are
     /// plain (006 FR-004).
     pub(super) fn standings(
         &self,

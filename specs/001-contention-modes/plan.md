@@ -2763,3 +2763,42 @@ In `src/contention.rs`, a pause ended because contention ended leaves no state. 
 same interval. Tests that asserted CPU caps are rewritten to whole tasks (eight equal tasks in
 the scenario world, 100 m tasks in the PSI host, 32 in the reclaim and observability runs) or
 removed where they asserted cap mechanics only (cap rises, the return level).
+
+## System accounts, paused GPU tasks in the count, and GPU pauses for unknown activity (2026-11-24 to 2026-11-26)
+
+**Input**: spec Sessions 2026-11-24 and 2026-11-26, FR-021, FR-059, FR-089, FR-090; the floor and
+E9 runs on the test host at `ccc3cd3`, `d8053d6` and `eb3762c`.
+
+**Technical Context**: Rust 1.88; no dependency or wire change. New config table
+`[contention.system_accounts]` (`uid_ranges`, `subordinate_uid_file`) as the public type
+`SystemAccounts` in `src/config.rs`, which the root broker's policy embeds too (005). The
+telemetry reads `/etc/subuid` read only. Scripted decisions are unchanged (snapshot comparison).
+
+**Constitution Check**: Principles I to VI.
+- *Principle I.* No new actuator; the subordinate ID file and the user database are only read.
+- *Principle II.* People keep their protection: only systemd's non-human ranges become
+  background, and a paused GPU task waits for the activity it answered as one for measured growth
+  does, so Yield First still gives back first.
+- *Principle III.* Unknown is never free: an unreadable subordinate ID file or owner keeps a user
+  ID itself, so it stays a person; a pause for activity of unknown amount ends only when the
+  activity falls or contention ends.
+- *Principle IV.* Classification stays in configuration and the pure policy; telemetry only maps
+  user IDs to owners.
+- *Principle V.* Nothing runs as root; the broker's classification is 005's to align.
+- *Principle VI.* Each change is test first, seen failing (T632 to T635).
+
+**System accounts (R91, T632, T635)**. `ContentionConfig::is_user_uid` is the one test: at or
+above `uid_min` and in none of `system_accounts.uid_ranges`. The policy uses it wherever it
+classified by `uid_min` (background, principals, arrivals, the floor's E_max and E, the time-slice
+counts), and the telemetry for background GPU contexts. Defaults live in `SYSTEMD_NON_HUMAN_UIDS`
+and `SUBORDINATE_UID_FILE` only. `src/telemetry/subuid.rs` reads the subordinate ID file when its
+modification time changes and maps a user ID in an owner's range to the owner before principals
+and GPU contexts are formed.
+
+**Paused tasks stay counted (R92, T633)**. In `time_slice`, while an own task is paused on the
+device, every listed own context counts in m, so a stopped context does not age out of the
+counting window and the hold keeps its count.
+
+**GPU pauses for unknown activity (R93, T634)**. In `plan_step`, a whole-task GPU compute pause
+whose cause is unknown measurement waits for that activity to fall as a pause for external growth
+does, and ends in the interval contention ends; CPU is unchanged.

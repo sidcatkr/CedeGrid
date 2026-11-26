@@ -1919,6 +1919,11 @@ for runs E1 and E2 and has no code task yet.
 
   *Cause: Yield First's 30 s scale-up interval ended a pause that answered GPU activity of unknown amount while the
   activity lasted. At `59bffa4` the floor ×3 and E9 ×3 show one probe paused throughout each episode.*
+- [X] T635 Failing tests, then the change: only systemd's non-human ranges are system accounts above `uid_min`
+  (`[contention.system_accounts]`, `uid_ranges` default 60578–60705, 61184–65519, 65534–65535, one `SystemAccounts`
+  type for the node and the broker); a user ID in an `/etc/subuid` range counts as its owner (`subordinate_uid_file`,
+  empty turns it off); `uid_max` goes; a range beyond the defaults is `relaxed_detection`, per FR-059, R91 (user,
+  2026-11-26: systemd-homed and directory users are people; nothing fixed in code)
 - [ ] T623 Just before release, a read-only Tracked-mode sanity check on the shared GPU server: no stress, no global setting changed, nothing that touches other users; record the result in `docs/validation.md` (user, 2026-11-17)
 
 Order: T614, T615, T616, T617, T618, T619, T620, then T621 at the last commit; T622 before the security review; T623 last, just before release.
