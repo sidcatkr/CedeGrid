@@ -604,28 +604,6 @@ fn standalone_supervise_drains_its_run_on_sigint() {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
-fn npm_launcher_identity_does_not_reach_internal_gate_or_supervisor() {
-    // The npm launcher's spawn fallback sets CEDEGRID_LAUNCHER_PID for the native
-    // process it starts. The gate it spawns in turn must not inherit that check.
-    let dir = StateDir(tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap());
-    let (config, job) = execution_setup(dir.path());
-    let output = Command::new(env!("CARGO_BIN_EXE_cedegrid"))
-        .arg("--config")
-        .arg(&config)
-        .args(["supervise", job.to_str().unwrap()])
-        .env("CEDEGRID_LAUNCHER_PID", std::process::id().to_string())
-        .output()
-        .unwrap();
-    let outcome = success_json(output);
-    assert_eq!(outcome["exit_code"], 0);
-    assert_eq!(
-        fs::read_to_string(dir.path().join("marker")).unwrap(),
-        "completed"
-    );
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-#[test]
 fn missing_required_control_never_executes_and_safe_resubmission_uses_new_attempt() {
     use cedegrid::state::{StateStore, TaskStatus};
     let dir = StateDir(tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap());

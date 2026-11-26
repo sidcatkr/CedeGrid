@@ -340,9 +340,6 @@ fn main() -> Result<()> {
     {
         return cedegrid::system_mode::hold_unit(cedegrid::broker::units::UnitKind::Idle);
     }
-    // Only the process the npm launcher started takes over its terminal. Internal
-    // gates and supervisors inherit the launcher variable but have another parent.
-    let _foreground = cedegrid::launcher_terminal::Foreground::enter()?;
     let cli = Cli::parse();
     #[cfg(windows)]
     ensure!(

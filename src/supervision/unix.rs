@@ -2698,7 +2698,6 @@ pub(super) fn worker_gate() -> Result<()> {
         .env_remove("CEDEGRID_PUBLICATION_SPEC")
         .env_remove("CEDEGRID_SUPERVISOR_STATE_ROOT")
         .env_remove("CEDEGRID_SUPERVISOR_NAMESPACE")
-        .env_remove("CEDEGRID_LAUNCHER_PID")
         .env("CEDEGRID_ASSIGNMENT_ID", &gate.request.assignment_id)
         .env("CEDEGRID_TASK_ID", &gate.request.task_id)
         .env("CEDEGRID_ATTEMPT_GENERATION", gate.generation.to_string())

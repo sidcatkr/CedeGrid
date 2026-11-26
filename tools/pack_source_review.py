@@ -140,7 +140,6 @@ ALLOWLIST = (
     'src/execution_state.rs',
     'src/explain.rs',
     'src/kernel.rs',
-    'src/launcher_terminal.rs',
     'src/lib.rs',
     'src/main.rs',
     'src/managed_children.rs',
