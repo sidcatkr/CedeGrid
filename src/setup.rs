@@ -1780,7 +1780,7 @@ pub fn consequence(field: Field, pick: Pick, config: &Config, host: Option<&Host
     };
     let resource_line_of = |kind: ResourceKind, mode: ContentionMode| -> String {
         match kind {
-            ResourceKind::Cpu => format!("{} · {}", cpu_free(margin(kind, mode)), behavior(mode)),
+            ResourceKind::Cpu => format!("{}; {}", cpu_free(margin(kind, mode)), behavior(mode)),
             ResourceKind::Ram if mode == ContentionMode::YieldFirst => format!(
                 "keeps {}% beyond the floor free; {}",
                 margin(kind, mode),
@@ -1794,7 +1794,7 @@ pub fn consequence(field: Field, pick: Pick, config: &Config, host: Option<&Host
                 None => "keeps the floor only".into(),
             },
             ResourceKind::GpuCompute => format!(
-                "keeps {}% of each GPU's compute free · {}",
+                "keeps {}% of each GPU's compute free; {}",
                 margin(kind, mode),
                 behavior(mode)
             ),
@@ -2353,7 +2353,7 @@ mod tests {
                 &config,
                 Some(&host)
             ),
-            "keeps 1600 m of 32 000 m CPU free · holds the fair share under contention"
+            "keeps 1600 m of 32 000 m CPU free; holds the fair share under contention"
         );
         assert_eq!(
             consequence(Field::RamFloor, Pick::Number(8192), &config, Some(&host)),

@@ -234,14 +234,10 @@ mod prompts {
     }
 
     pub fn connection(target: &Target, role: Role, flags: Choices) -> Result<Option<Choices>> {
-        println!(
-            "{}",
-            Style::detect().bold(&format!(
-                "CedeGrid setup · {} · {}",
-                role.name(),
-                target.path.display()
-            ))
-        );
+        println!("{}", Style::detect().bold("CedeGrid setup"));
+        println!("Role:   {}", role.name());
+        println!("Config: {}", target.path.display());
+        println!();
         let current: Option<DocumentMut> =
             target.original.as_ref().and_then(|text| text.parse().ok());
         let mut choices = flags;
@@ -503,17 +499,18 @@ mod screen {
                 String::new()
             }
         };
-        let title = |text: &str| style.bold(&format!("CedeGrid setup · {text}"));
+        let title = |text: &str| style.bold(text);
         let hint = |action: &str| {
             style.dim(&format!(
-                "{} move · Enter {action} · Esc cancel",
+                "{} to move, Enter to {action}, Esc to cancel",
                 glyphs.arrows
             ))
         };
         let mut lines = Vec::new();
         match view {
             View::Main => {
-                lines.push(title(&format!("node · {}", state.target.path.display())));
+                lines.push(title("CedeGrid setup"));
+                lines.push(format!("Config: {}", state.target.path.display()));
                 lines.push(String::new());
                 let label_width = rows
                     .iter()
@@ -523,7 +520,7 @@ mod screen {
                     + 3;
                 // A short terminal shows the rows around the highlight, with what is hidden
                 // counted above and below.
-                let fixed = 7 + if notice.is_some() { 2 } else { 0 };
+                let fixed = 8 + if notice.is_some() { 2 } else { 0 };
                 let visible = height.saturating_sub(fixed).max(3);
                 let (start, end) = if rows.len() <= visible {
                     (0, rows.len())
@@ -540,23 +537,23 @@ mod screen {
                     // Floors also show what applies on this host.
                     let host = match (field, state.host.as_ref()) {
                         (Field::RamFloor, Some(host)) => format!(
-                            " · {} MiB on this host",
+                            " ({} MiB on this host)",
                             group(config.ram_floor_mib(host.ram_mib))
                         ),
                         (Field::GpuFloor, Some(host)) => host
                             .gpus
                             .first()
                             .map(|(uuid, total)| {
-                                format!(" · {} MiB on {uuid}", group(config.vram_floor_mib(*total)))
+                                format!(" ({} MiB on {uuid})", group(config.vram_floor_mib(*total)))
                             })
-                            .unwrap_or_else(|| " · no GPU on this host".into()),
+                            .unwrap_or_else(|| " (no GPU on this host)".into()),
                         // Priority says when this host cannot apply it (006 FR-025).
                         (Field::PlainPriority, Some(host)) if pick == Pick::Flag(true) => {
                             match host.plain_priority {
                                 PlainPriorityHost::Permitted(weight) => {
-                                    format!(" · weight {weight} on this host")
+                                    format!(" (weight {weight} on this host)")
                                 }
-                                _ => " · no effect on this host".into(),
+                                _ => " (no effect on this host)".into(),
                             }
                         }
                         _ => String::new(),
@@ -673,12 +670,12 @@ mod screen {
                             lines.push(line.replace(CAUTION, &style.caution(CAUTION)));
                         }
                         lines.push(String::new());
-                        lines.push(style.dim("Enter write · Esc cancel"));
+                        lines.push(style.dim("Enter to write, Esc to cancel"));
                     }
                     Err(error) => {
                         lines.push(format!("{} {error}", style.refusal("Cannot write:")));
                         lines.push(String::new());
-                        lines.push(style.dim("Enter back · Esc cancel"));
+                        lines.push(style.dim("Enter to go back, Esc to cancel"));
                     }
                 }
             }
