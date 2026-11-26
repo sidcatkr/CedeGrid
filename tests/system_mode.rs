@@ -556,7 +556,6 @@ fn policy_refusals() {
         "[limits]\nnice = 5",
         "[principals]\nuid_min = 0",
         "[principals.system_accounts]\nuid_ranges = [[2, 1]]",
-        "[principals.system_accounts]\nsubordinate_uid_file = \"etc/subuid\"",
         "[principals.system_accounts]\nunknown = 1",
         "[principals]\nprincipal_min_percent = 0",
         "[principals]\nprincipal_min_percent = 51",
@@ -684,6 +683,30 @@ mod policy_files {
         write(&dir, "[limits]\ntasks_per_user = 3\n", 0o644);
         let policy = admin_policy::load_from(&dir.0, me(), 1000).unwrap();
         assert_eq!(policy.tasks_per_user.value, 3);
+    }
+
+    /// A relative subordinate user ID file resolves against the policy's directory, as the
+    /// node's resolves against its configuration file; an unresolved relative path is refused.
+    #[test]
+    fn a_relative_subordinate_file_resolves_against_the_policy_directory() {
+        let dir = Dir::new("relative");
+        write(
+            &dir,
+            "[principals.system_accounts]\nsubordinate_uid_file = \"subuid\"\n",
+            0o644,
+        );
+        let policy = admin_policy::load_from(&dir.0, me(), 1000).unwrap();
+        assert_eq!(
+            policy.system_accounts.value.subordinate_uid_file,
+            dir.0.join("subuid")
+        );
+        let relative = SystemAccounts {
+            subordinate_uid_file: PathBuf::from("subuid"),
+            ..SystemAccounts::default()
+        };
+        let mut file = admin_policy::SubordinateFile::default();
+        assert!(file.refresh(&relative, me()).is_err());
+        assert_eq!(file.owner(100_998), 100_998);
     }
 
     #[test]
@@ -2526,7 +2549,11 @@ mod broker_service {
         std::thread::spawn(move || serve(listener, state));
         let ask = |body: &str| -> Reply {
             let mut stream = UnixStream::connect(&path).unwrap();
-            stream.write_all(body.as_bytes()).unwrap();
+            // A rate-limited connection gets its reply and is closed before the request is
+            // read, so the write can meet a closed socket; the reply is still there to read.
+            if let Err(error) = stream.write_all(body.as_bytes()) {
+                assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe, "{error}");
+            }
             let mut reply = String::new();
             BufReader::new(&stream).read_line(&mut reply).unwrap();
             serde_json::from_str(&reply).unwrap()

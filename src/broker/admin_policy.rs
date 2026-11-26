@@ -266,10 +266,9 @@ impl AdminPolicy {
         self.allowed_modes.value.contains(&mode)
     }
 
-    /// A user, who can be a principal: at or above `principals.uid_min` and in none of the
-    /// system ranges (001 FR-059).
+    /// A user, who can be a principal: 001's one test, with `principals.uid_min` (001 FR-059).
     pub fn is_user_uid(&self, uid: u32) -> bool {
-        uid >= self.uid_min.value && !self.system_accounts.value.contains(uid)
+        self.system_accounts.value.is_user(self.uid_min.value, uid)
     }
 
     /// Each effective value as `doctor` shows it: key, value and where it came from.
@@ -479,8 +478,14 @@ pub fn load_from(dir: &std::path::Path, owner: u32, host_uid_min: u32) -> Result
         "the policy file {} is larger than {MAX_POLICY_BYTES} bytes",
         path.display()
     );
-    AdminPolicy::parse(&text, host_uid_min)
-        .with_context(|| format!("the policy file {} was refused", path.display()))
+    let mut policy = AdminPolicy::parse(&text, host_uid_min)
+        .with_context(|| format!("the policy file {} was refused", path.display()))?;
+    // A relative path resolves against the policy's directory, as the node's against its file.
+    let subuid = &mut policy.system_accounts.value.subordinate_uid_file;
+    if subuid.is_relative() && !subuid.as_os_str().is_empty() {
+        *subuid = dir.join(&*subuid);
+    }
+    Ok(policy)
 }
 
 #[cfg(unix)]
@@ -525,6 +530,13 @@ impl SubordinateFile {
     #[cfg(unix)]
     pub fn refresh(&mut self, accounts: &SystemAccounts, owner: u32) -> Result<()> {
         let path = &accounts.subordinate_uid_file;
+        if path.is_relative() && !path.as_os_str().is_empty() {
+            *self = Self::default();
+            anyhow::bail!(
+                "{} is relative; the policy loader resolves it against /etc/cedegrid",
+                path.display()
+            );
+        }
         let seen = self
             .seen
             .as_ref()
