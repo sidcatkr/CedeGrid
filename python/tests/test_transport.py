@@ -17,10 +17,13 @@ class TransportTests(unittest.TestCase):
         cls.temporary=tempfile.TemporaryDirectory()
         cls.root=Path(cls.temporary.name)
         def run(*args):subprocess.run(['openssl',*args],cwd=cls.root,check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        # A config of its own, so no default extension section joins these: OpenSSL 1.1.1's req
+        # adds its v3_ca section beside -addext, and OpenSSL 3 then refuses the duplicated CA.
+        (cls.root/'ca.cnf').write_text('[req]\ndistinguished_name=dn\nx509_extensions=ca\n[dn]\n[ca]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\n')
         for ca in ('ca','wrong'):
-            run('req','-x509','-newkey','rsa:2048','-nodes','-keyout',ca+'.key','-out',ca+'.pem','-subj','/CN='+ca,'-days','1','-addext','basicConstraints=critical,CA:TRUE','-addext','keyUsage=critical,keyCertSign,cRLSign','-addext','subjectKeyIdentifier=hash')
+            run('req','-x509','-newkey','rsa:2048','-nodes','-keyout',ca+'.key','-out',ca+'.pem','-subj','/CN='+ca,'-days','1','-config','ca.cnf')
         for name in ('server','operator','unauthorized'):
-            run('req','-newkey','rsa:2048','-nodes','-keyout',name+'.key','-out',name+'.csr','-subj','/CN='+name)
+            run('req','-newkey','rsa:2048','-nodes','-keyout',name+'.key','-out',name+'.csr','-subj','/CN='+name,'-config','ca.cnf')
             # Python 3.13 and later verify strictly by default, which asks every certificate below the
             # root for its authority key identifier.
             identifiers='subjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n'
