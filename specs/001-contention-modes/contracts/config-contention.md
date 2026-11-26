@@ -25,6 +25,10 @@ uid_ranges = [[60578, 60705], [61184, 65519], [65534, 65535]]
                                     # "relaxed_detection"
 subordinate_uid_file = "/etc/subuid" # a UID in an owner's range counts as the owner; "" turns it off
 
+[evidence]
+max_threads_per_interval = 4096     # 64-1048576; the run-queue scan reads this many threads per
+                                    # interval and rotates through the rest (FR-091)
+
 [contention.cpu]                    # also [contention.ram], [contention.gpu_compute], [contention.gpu_memory];
                                     # keys marked cpu, ram or memory apply only there, others are rejected
 mode = "neutral"                    # optional override of default_mode, must be <= max_mode

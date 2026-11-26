@@ -2802,3 +2802,27 @@ counting window and the hold keeps its count.
 **GPU pauses for unknown activity (R93, T634)**. In `plan_step`, a whole-task GPU compute pause
 whose cause is unknown measurement waits for that activity to fall as a pause for external growth
 does, and ends in the interval contention ends; CPU is unchanged.
+
+## 003 item 9 on 001's side: run-queue wait and core grants (2026-11-26)
+
+**Input**: the user's decision to ship all of 003 in this release; 003 FR-043, FR-048 to FR-050,
+FR-056, research R4, R7, R15 and R17; interfaces agreed with the other thread.
+
+**Technical Context**: Rust 1.88; no dependency. New `[evidence]` config section; new model
+fields `PrincipalUsage.cpu_wait_millicores`, `allowed_cpus`, `AllocationFacts.cpu_cores`
+(`CoreLever`) and `Decision.granted_cores`, all optional and omitted when empty. Scripted
+decisions change only by the new `below_fair_share` reason.
+
+**Constitution Check**: Principle I: the telemetry reads `/proc` only; the policy plans cores,
+and the other thread's supervisor applies them to verified threads under the thread-ID rule.
+Principle II: Yield First and Neutral still give back first, a run by cores instead of pauses;
+Performance and Aggressive keep every core, as plain Linux would. Principle III: unknown CPUs
+make a waiting user pinned, never satisfied. Principle IV: the policy stays pure. Principle VI:
+test first.
+
+**Design (R94)**. `src/telemetry/runqueue.rs` reads `schedstat` per thread with a bounded,
+rotating scan and the waiting processes' `Cpus_allowed_list`. `measure.rs` admits a waiting user
+by its wait and builds `ModeInput.waiting`; `contention.rs` makes waiting users contend without
+saturation and keeps pinned ones out of the probe and the satisfied records. `ladder.rs` plans
+core grants before the CPU pass, leaves runs with a lever out of the CPU victims and takes what
+the grants free off the excess; it also notes `below_fair_share`.

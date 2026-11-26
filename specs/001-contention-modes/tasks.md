@@ -1929,6 +1929,13 @@ for runs E1 and E2 and has no code task yet.
   the broker share; a relative `subordinate_uid_file` resolves against the configuration file; the doctor host
   line lists its parts with commas (user: no "·" in output); a changelog entry for system accounts. 006's
   policy part (T020 to T023) has no gap; its open tasks are the other thread's
+- [X] T637 003 item 9, 001's side (FR-091): run-queue wait and allowed CPUs per user in `src/telemetry/runqueue.rs`
+  with `[evidence]`; wait feeds the probe and a user waiting for own CPUs is never satisfied; runs with a core lever
+  get whole cores (`granted_cores`); `below_fair_share`. Tests first in `src/telemetry/runqueue.rs` and
+  `tests/contention.rs` (`core_lever`, the scenario world's waiting and pinned users). Covers 003 T041, T042, T043,
+  T046/T047 (policy half), T080/T081 (policy half), T103 (re-scoped: core grants replace placement before a duty
+  cycle, which 001 no longer has) and T113 (the wait level is the CPU principal floor); the agent's lever, the
+  affinity actuator and the worker event are the other thread's (user, 2026-11-26)
 - [ ] T623 Just before release, a read-only Tracked-mode sanity check on the shared GPU server: no stress, no global setting changed, nothing that touches other users; record the result in `docs/validation.md` (user, 2026-11-17)
 
 Order: T614, T615, T616, T617, T618, T619, T620, then T621 at the last commit; T622 before the security review; T623 last, just before release.

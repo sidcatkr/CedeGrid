@@ -40,6 +40,8 @@ The decision gains additive fields; `Decision` has no `deny_unknown_fields`.
   allocations that make up the excess in victim order; FR-023) and `save_progress` (in-share
   allocations at a floor breach others' growth caused, once per episode; FR-075). Both are
   omitted when empty.
+- `granted_cores` maps each run with a core lever to the logical CPUs it may use (003 FR-043),
+  omitted when empty; the CPU status then carries `cpu_cores_granted`.
 - `would_drain` and the prose `reasons` remain for 0.2 readers and recorded replays.
   `would_drain` is derived from `actions` with step ≥ `drain`.
 - `held_back` lists, per resource and in resource units, what is kept from own work or from

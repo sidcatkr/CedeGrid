@@ -67,6 +67,22 @@ broker's policy so both classify accounts alike (FR-059; user, 2026-11-26).
 | `uid_ranges` | list of `[first, last]` | `[[60578, 60705], [61184, 65519], [65534, 65535]]` (`SYSTEMD_NON_HUMAN_UIDS`) | each `first ≤ last`; a range not inside a default one needs `relaxed_detection`; fewer or narrower ranges need nothing |
 | `subordinate_uid_file` | path | `/etc/subuid` (`SUBORDINATE_UID_FILE`) | a relative path resolves against the configuration file; empty turns the owner mapping off. Read only, again when its modification time changes; an owner given by name is resolved through the system's user database |
 
+## Run-queue evidence and core grants (003 item 9)
+
+- `PrincipalUsage.cpu_wait_millicores` (`Option<u64>`): the user's threads' run-queue wait, in
+  thousandths of a CPU-second per second, from `schedstat` deltas; `None` where unreadable.
+- `PrincipalUsage.allowed_cpus` (`Option<Vec<u32>>`): the CPUs its waiting processes may use,
+  from `Cpus_allowed_list`; `None` where unreadable.
+- `AllocationFacts.cpu_cores` (`Option<CoreLever>`), `CoreLever { cores: Vec<Vec<u32>> }`: the
+  physical cores a run's affinity lever can grant, each as its logical CPUs, in preference order;
+  filled by the agent.
+- `Decision.granted_cores` (`BTreeMap<String, Vec<u32>>`): the logical CPUs each such run may
+  use; the engine keeps the last grant and when its count changed.
+- `ModeInput.waiting` (`BTreeMap<Option<u32>, bool>`): users whose wait reaches the CPU principal
+  floor, each with whether it waits for own work's CPUs (fewer than the scope's and meeting own
+  work's grant, or unknown).
+- `[evidence] max_threads_per_interval` (u32, 4096, 64 to 1048576): the run-queue scan's bound.
+
 ## ResourceThresholds (`src/config.rs`)
 
 These are provisional defaults (spec table). All are configuration values (FR-025).
