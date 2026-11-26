@@ -57,6 +57,7 @@ fn reconciliation_preserves_a_live_identity_and_never_signals_it() {
 /// A dead rootless run is released only once its recorded descendants are gone too: one that
 /// still runs keeps the reservation, and nothing is recovered without proof that the
 /// supervisor is gone (FR-088).
+#[cfg(unix)]
 #[test]
 fn a_run_with_a_living_recorded_descendant_is_not_released() {
     let dir = StateDir(tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap());
