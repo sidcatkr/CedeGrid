@@ -515,11 +515,15 @@ fn finish_for_run(canonical: &Path, loaded: LoadedConfig) -> Result<(Config, Vec
     if config.kernel.delegated_root.is_none() {
         config.kernel.delegated_root = config.cgroup.delegated_root.clone();
     }
+    let directory = canonical
+        .parent()
+        .context("configuration has no parent directory")?;
     if config.state_dir.is_relative() {
-        config.state_dir = canonical
-            .parent()
-            .context("configuration has no parent directory")?
-            .join(&config.state_dir);
+        config.state_dir = directory.join(&config.state_dir);
+    }
+    let subuid = &mut config.contention.system_accounts.subordinate_uid_file;
+    if subuid.is_relative() && !subuid.as_os_str().is_empty() {
+        *subuid = directory.join(&*subuid);
     }
     config.validate()?;
     Ok((config, warnings))
@@ -725,7 +729,8 @@ pub struct SystemAccounts {
     /// Inclusive `[first, last]` user ID ranges that hold no people.
     pub uid_ranges: Vec<[u32; 2]>,
     /// The subordinate user ID file: a user ID in one of its ranges counts as the range's
-    /// owner. An empty path turns this off, so each such user ID counts as itself.
+    /// owner. An empty path turns this off, so each such user ID counts as itself; a relative
+    /// path resolves against the configuration file.
     pub subordinate_uid_file: PathBuf,
 }
 
@@ -739,18 +744,19 @@ impl Default for SystemAccounts {
 }
 
 impl SystemAccounts {
-    /// Checks the ranges and the file path; `section` names the table in messages.
+    /// Checks the ranges; `section` names the table in messages.
     pub fn validate(&self, section: &str) -> Result<()> {
         ensure!(
             self.uid_ranges.iter().all(|[first, last]| first <= last),
             "each of {section}.uid_ranges must be [first, last] with first at most last"
         );
-        ensure!(
-            self.subordinate_uid_file.as_os_str().is_empty()
-                || self.subordinate_uid_file.is_absolute(),
-            "{section}.subordinate_uid_file must be an absolute path or empty"
-        );
         Ok(())
+    }
+
+    /// Whether a user ID is a person's account: at or above `uid_min`, the first ordinary user
+    /// ID, and in none of the system ranges. The one test the node and the broker share.
+    pub fn is_user(&self, uid_min: u32, uid: u32) -> bool {
+        uid >= uid_min && !self.contains(uid)
     }
 
     /// Whether a user ID lies in one of the system ranges.
@@ -1363,7 +1369,7 @@ impl ContentionConfig {
     /// system ranges. Every other user ID is a system account, whose usage is background
     /// (FR-059).
     pub fn is_user_uid(&self, uid: u32) -> bool {
-        uid >= self.uid_min && !self.system_accounts.contains(uid)
+        self.system_accounts.is_user(self.uid_min, uid)
     }
 
     /// Detection settings beyond their defaults, which let more external demand

@@ -1103,7 +1103,7 @@ impl Collector {
                 activity_baseline,
                 &samples,
                 |pid| context_uid(pid).map(|uid| self.subuid.owner(uid)),
-                |uid| uid >= self.uid_min && !self.system_accounts.contains(uid),
+                |uid| self.system_accounts.is_user(self.uid_min, uid),
                 self.gpu_principal_min_percent,
             );
             let active_external: Option<Vec<u32>> =
