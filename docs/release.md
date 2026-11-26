@@ -109,11 +109,17 @@ registry credentials, and stops without overwriting anything when the release al
 The default dispatch verifies only. Attestations follow the
 [official provenance guidance](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations).
 
-Two second channels install the same version. Homebrew takes `cedegrid.rb` from the release;
-Homebrew installs formulae only from a tap, so the README shows a local tap until there is a
-published one. crates.io gets this commit's crate for `cargo install --locked cedegrid` when the
-`publish_crate` input is also set, after the GitHub Release exists; it needs the
-`CARGO_REGISTRY_TOKEN` secret in the release environment and the crate name on crates.io.
+Two second channels install the same version. After the release job, the `homebrew-tap` job
+downloads the published `cedegrid.rb` and `SHA256SUMS`, checks the formula with
+`tools/update_homebrew_tap.py`, and pushes it to the tap
+[sidcatkr/homebrew-cedegrid](https://github.com/sidcatkr/homebrew-cedegrid) as
+`Formula/cedegrid.rb`, with the tap's README from `packaging/homebrew/tap-README.md`; that is what
+`brew install sidcatkr/cedegrid/cedegrid` installs. It needs the `HOMEBREW_TAP_TOKEN` secret in
+the release environment: a fine-grained token for that repository alone, with read and write
+access to its contents. It is a job of its own, so it can be re-run alone. crates.io gets this
+commit's crate for `cargo install --locked cedegrid` when the `publish_crate` input is also set,
+after the GitHub Release exists; it needs the `CARGO_REGISTRY_TOKEN` secret in the release
+environment and the crate name on crates.io.
 
 ## Migration and retained limits
 

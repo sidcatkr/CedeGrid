@@ -28,7 +28,7 @@ account, and the SDKs keep their APIs (003 FR-073, FR-080).
    ```
 
    The script installs into `~/.local/bin/cedegrid` and checks the download against
-   `SHA256SUMS` first. Homebrew (`cedegrid.rb` on each release) and `cargo install --locked
+   `SHA256SUMS` first. `brew install sidcatkr/cedegrid/cedegrid` and `cargo install --locked
    cedegrid` install the same version.
 
 3. Check that the new binary is the one found: `command -v cedegrid` should print
