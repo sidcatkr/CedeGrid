@@ -100,7 +100,9 @@ os.execv(lld,[lld,'-flavor','gnu','--fix-cortex-a53-843419']+links[0][1:])
   rust_host=subprocess.check_output(['rustc','-vV'],env=env,text=True).split('host: ')[1].splitlines()[0]
   objcopy=sysroot/'lib/rustlib'/rust_host/'bin/rust-objcopy'
   if objcopy.is_file():
-   subprocess.run([str(objcopy),'--strip-debug',str(destination)],env=env,check=True)
+   # rustc ships this objcopy linked to the toolchain's libLLVM, which its own runpath misses.
+   objcopy_env={**env,'LD_LIBRARY_PATH':os.pathsep.join(filter(None,[str(sysroot/'lib'),env.get('LD_LIBRARY_PATH','')]))}
+   subprocess.run([str(objcopy),'--strip-debug',str(destination)],env=objcopy_env,check=True)
   elif args.zig:
    subprocess.run([str(args.zig.resolve()),'objcopy','--strip-debug',str(destination)],env=env,check=True)
   elif sys.platform.startswith('linux'):
