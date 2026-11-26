@@ -384,6 +384,8 @@ pub struct PolicyEngine {
     last_observed: BTreeMap<String, Resources>,
     /// The yield ladder: the step applied per allocation and resource.
     ladder: BTreeMap<(String, ResourceKey), StepState>,
+    /// The logical CPUs each run with a core lever was last granted (003 FR-043).
+    granted_cores: BTreeMap<String, Vec<u32>>,
     /// When a resource's measurement became unknown or held (FR-008 window).
     unknown_since: BTreeMap<ResourceKey, u64>,
     /// When an allocation's usage became unknown (R10 window).
@@ -783,6 +785,7 @@ impl<'a> Interval<'a> {
     fn finish(mut self) -> (Decision, PolicyEngine) {
         let (config, snapshot) = (self.config, self.snapshot);
         self.next.last_now = Some(self.now);
+        self.next.granted_cores = self.granted_cores.clone();
         self.next.node_id = Some(snapshot.node_id.clone());
         for key in [ResourceKey::Cpu, ResourceKey::Ram] {
             self.statuses.entry(key).or_default();

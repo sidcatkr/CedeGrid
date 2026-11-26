@@ -738,6 +738,7 @@ mod modes {
             fair_share_limit: None,
             unprotected: false,
             unattributed_hold: 0,
+            waiting: Default::default(),
         }
     }
 
@@ -1850,6 +1851,13 @@ mod scenarios {
         /// How many tasks are paused.
         paused: usize,
         drained: bool,
+        /// The most the external user can use, as where it waits for CPUs own work does not
+        /// leave it, and the CPUs its waiting processes may use (003 FR-050, FR-056); with a cap
+        /// its unmet demand is reported as run-queue wait.
+        external_cap: Option<u64>,
+        external_cpus: Option<Vec<u32>>,
+        /// The last decision.
+        last: Option<Decision>,
     }
 
     impl World {
@@ -1869,6 +1877,9 @@ mod scenarios {
                 steps: [YieldStep::None; TASKS],
                 paused: 0,
                 drained: false,
+                external_cap: None,
+                external_cpus: None,
+                last: None,
             }
         }
 
@@ -1887,7 +1898,10 @@ mod scenarios {
                     ((self.own.0 / tasks).max(1), demand)
                 })
                 .collect();
-            claims.push(self.external);
+            let reach = self
+                .external_cap
+                .map_or(self.external.1, |cap| cap.min(self.external.1));
+            claims.push((self.external.0, reach));
             let usage = schedule(&claims);
             let (own, external) = (usage[..TASKS].iter().sum::<u64>(), usage[TASKS]);
             let mut snapshot = snapshot(own + external);
@@ -1900,6 +1914,10 @@ mod scenarios {
                 PrincipalUsage {
                     uid: Some(2000),
                     cpu_millicores: external,
+                    cpu_wait_millicores: self
+                        .external_cap
+                        .map(|_| self.external.1.saturating_sub(external)),
+                    allowed_cpus: self.external_cpus.clone(),
                     ..PrincipalUsage::default()
                 },
             ]);
@@ -1950,6 +1968,7 @@ mod scenarios {
                 .count();
             self.drained |= self.steps.iter().any(|s| *s >= YieldStep::Drain)
                 || !decision.would_drain.is_empty();
+            self.last = Some(decision);
             (own, external)
         }
     }
@@ -2194,6 +2213,7 @@ mod scenarios {
                         fair_share_limit: None,
                         unprotected: false,
                         unattributed_hold: 0,
+                        waiting: Default::default(),
                     },
                     &config.contention.thresholds(ResourceKind::GpuMemory),
                 );
@@ -2380,6 +2400,65 @@ mod scenarios {
             *now += INTERVAL;
         }
         own
+    }
+
+    /// Whether the decision records the external user's demand as satisfied.
+    fn satisfied_user(decision: &Decision) -> bool {
+        decision.resources[&ResourceKey::Cpu]
+            .reasons
+            .iter()
+            .any(|r| r.code == "satisfied_demand" && r.text.contains("uid 2000"))
+    }
+
+    /// A user waiting in the run queue contends without saturation, as the CPUs it waits for can
+    /// be busy while others idle; a step that does not make it grow records it satisfied, so wait
+    /// alone does not keep own work held (003 FR-050).
+    #[test]
+    fn a_waiting_user_is_probed_without_saturation_and_learned_satisfied() {
+        let mut world = World::new(ContentionMode::Neutral, (8, 4000));
+        world.external = (1, 2000);
+        world.external_cap = Some(500);
+        world.external_cpus = Some((0..8).collect());
+        let mut now = 0;
+        let mut learned = None;
+        while now < 60_000 {
+            world.tick(now);
+            let decision = world.last.clone().unwrap();
+            if learned.is_none() && satisfied_user(&decision) {
+                learned = Some(now);
+            }
+            now += INTERVAL;
+        }
+        let learned = learned.expect("the waiting user was never probed");
+        assert!(learned <= 30_000, "learned at {learned} ms");
+        assert!(satisfied_user(world.last.as_ref().unwrap()));
+        assert_eq!(world.paused, 0);
+    }
+
+    /// A user that waits for CPUs own work may use gains nothing from a step elsewhere: it is
+    /// never recorded satisfied while it waits, and own work holds the fair share (003 FR-056).
+    #[test]
+    fn a_user_pinned_to_own_cpus_is_never_learned_satisfied() {
+        let mut world = World::new(ContentionMode::Neutral, (8, 8000));
+        world.external = (1, 2000);
+        world.external_cap = Some(500);
+        world.external_cpus = Some(vec![0, 1]);
+        let mut now = 0;
+        let mut own_at_end = 0;
+        while now < 120_000 {
+            own_at_end = world.tick(now).0;
+            assert!(
+                !satisfied_user(world.last.as_ref().unwrap()),
+                "recorded satisfied at {now} ms"
+            );
+            now += INTERVAL;
+        }
+        // Held to the fair share of two principals, to within one task.
+        assert!(
+            own_at_end <= CAPACITY / 2 + CAPACITY / TASKS as u64,
+            "own {own_at_end}"
+        );
+        assert!(!world.drained);
     }
 
     /// One steady external user at 12.5% gets the fair share at once and is then

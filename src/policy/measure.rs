@@ -742,16 +742,23 @@ impl<'a> Interval<'a> {
                         .get(&(key.clone(), uid))
                         .copied()
                         .unwrap_or_default();
+                    // A user waiting in the run queue joins as one using what it waits for
+                    // (003 FR-050).
+                    let demand = if key == ResourceKey::Cpu {
+                        usage.max(p.cpu_wait_millicores.unwrap_or(0))
+                    } else {
+                        usage
+                    };
                     // A user whose demand is on record as satisfied is known:
                     // it rejoins at once, so the record applies on its return.
-                    if usage >= floor
+                    if demand >= floor
                         && prev.satisfied.get(&key).is_some_and(|records| {
                             records.iter().any(|(principal, _)| *principal == Some(uid))
                         })
                     {
                         count.admitted = true;
                     }
-                    count.observe(usage, floor, window, now, leave_ms);
+                    count.observe(demand, floor, window, now, leave_ms);
                     if count.admitted {
                         members.push((principal, usage));
                     }
@@ -774,6 +781,58 @@ impl<'a> Interval<'a> {
             }
         }
         (Some(members), background)
+    }
+
+    /// Principals whose run-queue wait is at the contending level, the principal floor of the
+    /// CPU's capacity, each with whether its waiting processes may run on own work's CPUs
+    /// (003 FR-050, FR-056): an unknown set does, and a set smaller than the scope does where it
+    /// meets own work's granted cores or own work holds no grant. A set as large as the scope
+    /// gains from any step, as an unpinned user does.
+    fn cpu_waiting(&self, capacity: u64) -> BTreeMap<Option<u32>, bool> {
+        let config = self.config;
+        let floor = (capacity.saturating_mul(u64::from(
+            config
+                .contention
+                .thresholds(ResourceKind::Cpu)
+                .principal_min_percent,
+        )) / 100)
+            .max(1);
+        // Own work's CPUs: the cores granted to every running allocation, else anywhere.
+        let running: Vec<&Allocation> = self
+            .input
+            .allocations
+            .iter()
+            .filter(|a| a.phase == AllocationPhase::Running)
+            .collect();
+        let own: Option<BTreeSet<u32>> = running
+            .iter()
+            .all(|a| self.prev.granted_cores.contains_key(&a.id))
+            .then(|| {
+                running
+                    .iter()
+                    .flat_map(|a| self.prev.granted_cores[&a.id].iter().copied())
+                    .collect()
+            });
+        let mut waiting = BTreeMap::new();
+        for principal in self.snapshot.principals.iter().flatten() {
+            let (Some(uid), Some(wait)) = (principal.uid, principal.cpu_wait_millicores) else {
+                continue;
+            };
+            if principal.is_owner || !config.contention.is_user_uid(uid) || wait < floor {
+                continue;
+            }
+            let pinned = match &principal.allowed_cpus {
+                None => true,
+                Some(cpus) => {
+                    (cpus.len() as u64).saturating_mul(1000) < capacity
+                        && own
+                            .as_ref()
+                            .is_none_or(|own| cpus.iter().any(|cpu| own.contains(cpu)))
+                }
+            };
+            waiting.insert(Some(uid), pinned);
+        }
+        waiting
     }
 
     /// Satisfied records keep at most the most recently seen principals.
@@ -959,6 +1018,7 @@ impl<'a> Interval<'a> {
             fair_share_limit: self.fair_share_limit(&ResourceKey::Cpu),
             unprotected: false,
             unattributed_hold: 0,
+            waiting: self.cpu_waiting(capacity),
         };
         // In Performance and Aggressive own work above its Neutral share can saturate the CPU
         // itself, which is no evidence of hidden external demand: utilization is judged with
@@ -1381,6 +1441,7 @@ impl<'a> Interval<'a> {
             fair_share_limit: self.fair_share_limit(&ResourceKey::Ram),
             unprotected: false,
             unattributed_hold: 0,
+            waiting: BTreeMap::new(),
         };
         let thresholds = config.contention.thresholds(ResourceKind::Ram);
         self.note_fair_share(&ResourceKey::Ram, &view, &thresholds);
@@ -2565,6 +2626,7 @@ impl<'a> Interval<'a> {
                     fair_share_limit,
                     unprotected: false,
                     unattributed_hold: 0,
+                    waiting: BTreeMap::new(),
                 };
                 let mut averaged_view = view(averaged_total, averaged_members, averaged_background);
                 self.note_fair_share(&compute_key, &averaged_view, &compute_thresholds);
@@ -2625,6 +2687,7 @@ impl<'a> Interval<'a> {
                     fair_share_limit: None,
                     unprotected: false,
                     unattributed_hold: 0,
+                    waiting: BTreeMap::new(),
                 };
                 GpuComputeBudget {
                     share: own_allowance(&view, &compute_thresholds),
@@ -2713,6 +2776,7 @@ impl<'a> Interval<'a> {
                 fair_share_limit: self.fair_share_limit(&key),
                 unprotected: false,
                 unattributed_hold: 0,
+                waiting: BTreeMap::new(),
             };
             let thresholds = config.contention.thresholds(ResourceKind::GpuMemory);
             self.note_fair_share(&key, &view, &thresholds);
