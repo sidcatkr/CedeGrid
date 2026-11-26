@@ -19,6 +19,7 @@ sys.path.insert(0, str(REPOSITORY / 'tools'))
 import build_packages
 import release_manifest as release
 import release_version
+import update_homebrew_tap as tap
 
 V = release.VERSION
 
@@ -326,6 +327,59 @@ class HomebrewFormulaTests(CandidateFixture):
         self.assertIn('base=${CEDEGRID_RELEASE_URL:-' + release_version.release_url('$version') + '}', script)
 
 
+class HomebrewTapTests(unittest.TestCase):
+    """The release job writes the published formula into the tap after checking it."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.base = Path(directory.name)
+        self.release, self.tap = self.base / 'release', self.base / 'tap'
+        self.release.mkdir(); self.tap.mkdir()
+        self.digests = {target: hashlib.sha256(target.encode()).hexdigest()
+                        for target in build_packages.HOMEBREW_TARGETS}
+        self.publish(build_packages.homebrew_formula('1.4.2', self.digests))
+
+    def publish(self, formula, listed=None):
+        (self.release / 'cedegrid.rb').write_text(formula)
+        sums = {'cedegrid-1.4.2-' + target + '.tar.gz': digest for target, digest in self.digests.items()}
+        sums['cedegrid.rb'] = listed or hashlib.sha256(formula.encode()).hexdigest()
+        (self.release / 'SHA256SUMS').write_text(''.join(d + '  ' + n + '\n' for n, d in sorted(sums.items())))
+
+    def test_the_checked_formula_and_readme_are_written_once(self):
+        formula = tap.checked_formula(self.release, '1.4.2')
+        self.assertEqual(sorted(tap.write_tap(self.tap, formula)), ['Formula/cedegrid.rb', 'README.md'])
+        self.assertEqual((self.tap / 'Formula/cedegrid.rb').read_text(), (self.release / 'cedegrid.rb').read_text())
+        self.assertIn('brew install sidcatkr/cedegrid/cedegrid', (self.tap / 'README.md').read_text())
+        self.assertEqual(tap.write_tap(self.tap, formula), [])
+
+    def test_a_formula_not_matching_its_sha256sums_line_is_refused(self):
+        self.publish(build_packages.homebrew_formula('1.4.2', self.digests), listed='0' * 64)
+        with self.assertRaisesRegex(ValueError, 'SHA256SUMS line'):
+            tap.checked_formula(self.release, '1.4.2')
+
+    def test_a_formula_for_another_version_is_refused(self):
+        with self.assertRaisesRegex(ValueError, 'not for version 1.4.3'):
+            tap.checked_formula(self.release, '1.4.3')
+
+    def test_a_download_from_outside_the_release_is_refused(self):
+        formula = build_packages.homebrew_formula('1.4.2', self.digests)
+        self.publish(formula.replace(release_version.release_url('1.4.2'), 'https://example.com/v1.4.2', 1))
+        with self.assertRaisesRegex(ValueError, 'outside the 1.4.2 release'):
+            tap.checked_formula(self.release, '1.4.2')
+
+    def test_a_download_sha256sums_does_not_list_is_refused(self):
+        formula = build_packages.homebrew_formula('1.4.2', self.digests)
+        self.publish(formula.replace('linux-x64-gnu.tar.gz', 'linux-x64-musl.tar.gz'))
+        with self.assertRaisesRegex(ValueError, 'linux-x64-musl'):
+            tap.checked_formula(self.release, '1.4.2')
+
+    def test_the_tap_readme_names_nothing_private(self):
+        text = tap.TAP_README.read_text()
+        self.assertEqual(re.findall(r'https://[^\s)]+', text),
+                         ['https://github.com/sidcatkr/CedeGrid/releases', 'https://github.com/sidcatkr/CedeGrid'])
+
+
 class ReleaseVersionTests(unittest.TestCase):
     def root(self, cargo, python, npm):
         directory = tempfile.TemporaryDirectory()
@@ -405,6 +459,16 @@ class WorkflowTests(unittest.TestCase):
         release = [index for index, step in enumerate(steps) if "'gh','release','create'" in step]
         self.assertEqual(len(release), 1)
         self.assertGreater(steps.index(crate[0]), release[0])
+
+    def test_the_tap_is_updated_after_the_release_and_only_when_publishing(self):
+        source = (REPOSITORY / '.github/workflows/release.yml').read_text()
+        job = source[source.index('\n  homebrew-tap:\n'):]
+        self.assertIn('    needs: release\n', job)
+        self.assertIn('    if: inputs.publish\n', job)
+        self.assertIn('secrets.HOMEBREW_TAP_TOKEN', job)
+        self.assertIn('tools/update_homebrew_tap.py', job)
+        self.assertIn('::add-mask::', job)
+        self.assertNotIn('HOMEBREW_TAP_TOKEN', source[:source.index('\n  homebrew-tap:\n')])
 
     def test_release_workflows_take_the_version_from_cargo_toml(self):
         for name in ('release.yml', 'release-candidate.yml'):

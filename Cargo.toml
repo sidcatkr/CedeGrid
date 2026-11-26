@@ -41,7 +41,7 @@ include = [
     "/npm/README.md",
     "/npm/THIRD_PARTY_NOTICES.md",
     "/packaging/deb/*",
-    "/packaging/homebrew/cedegrid.rb",
+    "/packaging/homebrew/*",
     "/examples/cpu-job.json",
     "/examples/gpu-pressure.json",
     "/python/pyproject.toml",
