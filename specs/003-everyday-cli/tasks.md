@@ -43,10 +43,14 @@ only when the user says so.
 
 ## Phase 2: Foundational (blocks every story)
 
-- [ ] T004 [P] Test first in tests/task_schema.rs: exporting `src/task_schema.rs` reproduces tests/contracts/task-schema.json byte for byte, and every field has a JSON name, CLI flag, Python name and TypeScript name (SC-002). It fails before T005.
+- [x] T004 [P] Test first in tests/task_schema.rs: exporting `src/task_schema.rs` reproduces tests/contracts/task-schema.json byte for byte, and every field has a JSON name, CLI flag, Python name and TypeScript name (SC-002). It fails before T005.
+  - *Done (2026-11-26, `1eef4c9`):* `tests/task_schema.rs` holds the fixture to `task_schema::export()` byte for byte and checks every field's names, flags and one-sentence help.
 - [ ] T005 Implement src/task_schema.rs with every field in contracts/task-schema.md, including `threads` ("`auto` or absent") and `gpu` ("a device index or `auto`"), and write tests/contracts/task-schema.json.
-- [ ] T006 [P] Python: test python/tests/test_task_schema.py, comparing `command_task` parameters with the fixture. Add `threads` and `gpu` to python/cedegrid/client.py.
-- [ ] T007 [P] TypeScript: test npm/tests/task-schema.test.ts, comparing `CommandOptions` and `commandTask` output with the fixture. Add `threads` and `gpu` to npm/src/client.ts.
+  - *In part (2026-11-26, `1eef4c9`):* `src/task_schema.rs` and the fixture list every current field, 006's opt-ins included; `threads` and `gpu` join the schema, the wire and both SDKs with their behaviour (T024/T025, item 10), so no field ships without its effect.
+- [x] T006 [P] Python: test python/tests/test_task_schema.py, comparing `command_task` parameters with the fixture. Add `threads` and `gpu` to python/cedegrid/client.py.
+  - *Done for today's fields (2026-11-26):* `python/tests/test_task_schema.py` compares `command_task`'s parameters with the fixture; `threads` and `gpu` follow with T005.
+- [x] T007 [P] TypeScript: test npm/tests/task-schema.test.ts, comparing `CommandOptions` and `commandTask` output with the fixture. Add `threads` and `gpu` to npm/src/client.ts.
+  - *Done for today's fields (2026-11-26):* `COMMAND_TASK_FIELDS` in `npm/src/client.ts`, checked against `CommandOptions` at compile time and against the fixture in `npm/tests/task-schema.test.ts`.
 - [ ] T008 Test first in tests/run_cli.rs:
   - the socket directory is mode 0700 and owned by the user, or the agent refuses to listen;
   - a peer with another UID is refused (peer-credential check);
