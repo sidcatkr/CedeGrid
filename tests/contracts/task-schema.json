@@ -1,0 +1,165 @@
+{
+  "fields": [
+    {
+      "default": "generated",
+      "flag": "--task-id",
+      "help": "The task's name within its job.",
+      "kind": "text, not empty",
+      "name": "task_id",
+      "typescript": "taskId"
+    },
+    {
+      "default": "required",
+      "flag": null,
+      "help": "The command and its arguments.",
+      "kind": "list of text, not empty",
+      "name": "argv",
+      "typescript": "argv"
+    },
+    {
+      "default": "the current directory",
+      "flag": null,
+      "help": "The directory the command starts in.",
+      "kind": "absolute path",
+      "name": "cwd",
+      "typescript": "cwd"
+    },
+    {
+      "default": "1000",
+      "flag": "--cpu-millicores",
+      "help": "CPU to reserve, in thousandths of a core.",
+      "kind": "integer, at least 1",
+      "name": "cpu_millicores",
+      "typescript": "cpuMillicores"
+    },
+    {
+      "default": "512",
+      "flag": "--ram-mib",
+      "help": "RAM to reserve, in MiB.",
+      "kind": "integer, at least 1",
+      "name": "ram_mib",
+      "typescript": "ramMib"
+    },
+    {
+      "default": "none",
+      "flag": "--gpu-vram-mib",
+      "help": "GPU memory to reserve on each named GPU, in MiB.",
+      "kind": "map of GPU to integer MiB",
+      "name": "gpu_vram_mib",
+      "typescript": "gpuVramMib"
+    },
+    {
+      "default": "none",
+      "flag": "--env",
+      "help": "Environment values passed at launch and never stored.",
+      "kind": "map of text to text",
+      "name": "env",
+      "typescript": "env"
+    },
+    {
+      "default": "false",
+      "flag": "--replay-safe",
+      "help": "Whether the task may run again from the start after a loss.",
+      "kind": "true or false",
+      "name": "replay_safe",
+      "typescript": "replaySafe"
+    },
+    {
+      "default": "guaranteed",
+      "flag": "--allocation-class",
+      "help": "Whether the task keeps its reservation or may be ended to give it back.",
+      "kind": "guaranteed or opportunistic",
+      "name": "allocation_class",
+      "typescript": "allocationClass"
+    },
+    {
+      "default": "none",
+      "flag": "--required-control",
+      "help": "Controls the task needs; it never starts without them.",
+      "kind": "list of control names",
+      "name": "required_controls",
+      "typescript": "requiredControls"
+    },
+    {
+      "default": "false",
+      "flag": "--single-process",
+      "help": "Whether the task is one process with no children.",
+      "kind": "true or false",
+      "name": "single_process",
+      "typescript": "singleProcess"
+    },
+    {
+      "default": "false",
+      "flag": "--no-escape",
+      "help": "Whether the task promises that no process leaves its tree.",
+      "kind": "true or false",
+      "name": "no_escape",
+      "typescript": "noEscape"
+    },
+    {
+      "default": "0",
+      "flag": "--managed-child-limit",
+      "help": "How many children the supervisor may start for the task.",
+      "kind": "integer from 0 to 8",
+      "name": "managed_child_limit",
+      "typescript": "managedChildLimit"
+    },
+    {
+      "default": "none",
+      "flag": "--input-artifact",
+      "help": "Published files fetched and checked before the task starts.",
+      "kind": "list of published artifacts",
+      "name": "input_artifacts",
+      "typescript": "inputArtifacts"
+    },
+    {
+      "default": "unbounded",
+      "flag": "--max-attempts",
+      "help": "The most attempts the task may take, yields included.",
+      "kind": "integer, at least 1",
+      "name": "max_attempts",
+      "typescript": "maxAttempts"
+    },
+    {
+      "default": "the node's modes",
+      "flag": "--mode",
+      "help": "The mode per resource; the node cap still applies.",
+      "kind": "map of resource to mode",
+      "name": "contention_modes",
+      "typescript": "contentionModes"
+    },
+    {
+      "default": "false",
+      "flag": "--admit-immediately",
+      "help": "Start at once beside a CedeGrid user that arrived first (006); needs the confirmation.",
+      "kind": "true or false",
+      "name": "admit_immediately",
+      "typescript": "admitImmediately"
+    },
+    {
+      "default": "false",
+      "flag": "--confirm-admit-immediately",
+      "help": "The second confirmation for --admit-immediately.",
+      "kind": "true or false",
+      "name": "confirm_admit_immediately",
+      "typescript": "confirmAdmitImmediately"
+    },
+    {
+      "default": "false",
+      "flag": "--unprotected",
+      "help": "Run unprotected (006); needs the confirmation and the host's allowance.",
+      "kind": "true or false",
+      "name": "unprotected",
+      "typescript": "unprotected"
+    },
+    {
+      "default": "false",
+      "flag": "--confirm-unprotected",
+      "help": "The second confirmation for --unprotected.",
+      "kind": "true or false",
+      "name": "confirm_unprotected",
+      "typescript": "confirmUnprotected"
+    }
+  ],
+  "schema": "cedegrid-task/1"
+}

@@ -74,6 +74,15 @@ export interface CommandOptions {
     /** The second explicit confirmation for unprotected. */
     confirmUnprotected?: boolean;
 }
+/** The task schema's fields as `commandTask` takes them (003 FR-060): its three arguments, then
+ * every `CommandOptions` key. The type check below fails to compile when the two drift apart. */
+export const COMMAND_TASK_FIELDS = ['taskId', 'argv', 'cwd', 'cpuMillicores', 'ramMib', 'gpuVramMib', 'env', 'replaySafe',
+    'allocationClass', 'requiredControls', 'singleProcess', 'noEscape', 'managedChildLimit', 'inputArtifacts', 'maxAttempts',
+    'contentionModes', 'admitImmediately', 'confirmAdmitImmediately', 'unprotected', 'confirmUnprotected'] as const;
+type ListedOption = Exclude<typeof COMMAND_TASK_FIELDS[number], 'taskId' | 'argv' | 'cwd'>;
+const optionsListed: Exclude<keyof CommandOptions, ListedOption> extends never ? true : false = true;
+const listedOptionsExist: Exclude<ListedOption, keyof CommandOptions> extends never ? true : false = true;
+void optionsListed; void listedOptionsExist;
 export const CONTENTION_RESOURCES = ['cpu', 'ram', 'gpu_compute', 'gpu_memory'] as const;
 export const CONTENTION_MODES = ['yield_first', 'neutral', 'performance', 'aggressive'] as const;
 export type ContentionResource = typeof CONTENTION_RESOURCES[number];
