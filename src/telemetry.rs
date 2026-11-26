@@ -19,7 +19,8 @@ use gpu::*;
 mod managed;
 #[cfg(target_os = "linux")]
 mod processes;
-mod subuid;
+// The System mode broker maps subordinate user IDs with the same parser.
+pub(crate) mod subuid;
 pub use managed::{CedegridCpu, ManagedCollector};
 #[cfg(target_os = "linux")]
 pub use managed::{own_process_cpu_ns, supervisor_cpu_ns};

@@ -5,6 +5,7 @@
 
 use super::ModeName;
 use super::units::{PamSession, SliceChoice};
+use crate::config::SystemAccounts;
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 
@@ -22,30 +23,6 @@ const MAX_POLICY_BYTES: u64 = 64 * 1024;
 
 /// The first ordinary user ID when `/etc/login.defs` gives none.
 pub const DEFAULT_UID_MIN: u32 = 1000;
-
-/// The last ordinary user ID when `/etc/login.defs` gives none, as 001's `contention.uid_max`.
-pub const DEFAULT_UID_MAX: u32 = 60000;
-
-/// The host's ordinary user IDs, `UID_MIN` to `UID_MAX` in `/etc/login.defs`. Every other user ID
-/// is a system account (001 FR-059).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct HostUsers {
-    pub uid_min: u32,
-    pub uid_max: u32,
-}
-
-impl HostUsers {
-    /// The range when `/etc/login.defs` sets neither bound.
-    pub const DEFAULTS: HostUsers = HostUsers {
-        uid_min: DEFAULT_UID_MIN,
-        uid_max: DEFAULT_UID_MAX,
-    };
-
-    /// Whether `uid` is an ordinary user; nothing is when the range is empty.
-    pub fn contains(&self, uid: u32) -> bool {
-        (self.uid_min..=self.uid_max).contains(&uid)
-    }
-}
 
 const DEFAULT_TASKS_PER_USER: u32 = 64;
 const DEFAULT_TASKS_MAX: u32 = 4096;
@@ -92,8 +69,8 @@ struct UnitsSection {
 #[serde(default, deny_unknown_fields)]
 struct PrincipalsSection {
     uid_min: Option<u32>,
-    uid_max: Option<u32>,
     principal_min_percent: Option<u8>,
+    system_accounts: Option<SystemAccounts>,
 }
 
 /// Where a policy value came from, for `doctor` (FR-010).
@@ -164,9 +141,10 @@ pub struct AdminPolicy {
     pub processes: Setting<Option<u64>>,
     /// `LimitMEMLOCK=` in MiB; `None` keeps systemd's default.
     pub locked_memory_mib: Setting<Option<u64>>,
-    /// The memory shares' users run from `uid_min` to `uid_max` (001 FR-059).
     pub uid_min: Setting<u32>,
-    pub uid_max: Setting<u32>,
+    /// Which user IDs at or above `uid_min` are system accounts, and how subordinate user IDs
+    /// count: 001's `[contention.system_accounts]` type and defaults (001 FR-059).
+    pub system_accounts: Setting<SystemAccounts>,
     pub principal_min_percent: Setting<u8>,
     /// Whether the units open a PAM session (N3); `none` by default.
     pub pam_session: Setting<PamSession>,
@@ -175,20 +153,19 @@ pub struct AdminPolicy {
 }
 
 impl AdminPolicy {
-    /// The policy without a file. `host` gives the defaults for `principals.uid_min` and `uid_max`.
-    pub fn defaults(host: HostUsers) -> Result<Self> {
-        Self::from_file(PolicyFile::default(), host)
+    /// The policy without a file. `uid_min` is the host's first ordinary user ID.
+    pub fn defaults(uid_min: u32) -> Result<Self> {
+        Self::from_file(PolicyFile::default(), uid_min)
     }
 
-    /// Parses a policy file's text. `host` gives the defaults for `principals.uid_min` and
-    /// `uid_max`.
-    pub fn parse(text: &str, host: HostUsers) -> Result<Self> {
+    /// Parses a policy file's text. `host_uid_min` is the default for `principals.uid_min`.
+    pub fn parse(text: &str, host_uid_min: u32) -> Result<Self> {
         let file: PolicyFile =
             toml::from_str(text).context("the administrator policy could not be read")?;
-        Self::from_file(file, host)
+        Self::from_file(file, host_uid_min)
     }
 
-    fn from_file(file: PolicyFile, host: HostUsers) -> Result<Self> {
+    fn from_file(file: PolicyFile, host_uid_min: u32) -> Result<Self> {
         let policy_version = file.policy_version.unwrap_or(POLICY_VERSION);
         ensure!(
             policy_version == POLICY_VERSION,
@@ -231,13 +208,13 @@ impl AdminPolicy {
             value: file.limits.locked_memory_mib.filter(|&value| value != 0),
             source: source_of(file.limits.locked_memory_mib.is_some()),
         };
-        let uid_min = Setting::pick(file.principals.uid_min, host.uid_min);
+        let uid_min = Setting::pick(file.principals.uid_min, host_uid_min);
+        let system_accounts =
+            Setting::pick(file.principals.system_accounts, SystemAccounts::default());
+        system_accounts
+            .value
+            .validate("principals.system_accounts")?;
         ensure!(uid_min.value >= 1, "principals.uid_min must be at least 1");
-        let uid_max = Setting::pick(file.principals.uid_max, host.uid_max);
-        ensure!(
-            uid_max.value >= uid_min.value,
-            "principals.uid_max must be at least principals.uid_min"
-        );
         let principal_min_percent = Setting::pick(
             file.principals.principal_min_percent,
             DEFAULT_PRINCIPAL_MIN_PERCENT,
@@ -278,7 +255,7 @@ impl AdminPolicy {
             processes,
             locked_memory_mib,
             uid_min,
-            uid_max,
+            system_accounts,
             principal_min_percent,
             pam_session,
             ordinary_slice: Setting::pick(file.units.ordinary_slice, SliceChoice::Auto),
@@ -287,6 +264,12 @@ impl AdminPolicy {
 
     pub fn allows(&self, mode: ModeName) -> bool {
         self.allowed_modes.value.contains(&mode)
+    }
+
+    /// A user, who can be a principal: at or above `principals.uid_min` and in none of the
+    /// system ranges (001 FR-059).
+    pub fn is_user_uid(&self, uid: u32) -> bool {
+        uid >= self.uid_min.value && !self.system_accounts.value.contains(uid)
     }
 
     /// Each effective value as `doctor` shows it: key, value and where it came from.
@@ -357,9 +340,14 @@ impl AdminPolicy {
                 self.uid_min.source,
             ),
             (
-                "principals.uid_max",
-                self.uid_max.value.to_string(),
-                self.uid_max.source,
+                "principals.system_accounts.uid_ranges",
+                ranges(&self.system_accounts.value.uid_ranges),
+                self.system_accounts.source,
+            ),
+            (
+                "principals.system_accounts.subordinate_uid_file",
+                subordinate_file(&self.system_accounts.value),
+                self.system_accounts.source,
             ),
             (
                 "principals.principal_min_percent",
@@ -380,6 +368,26 @@ impl AdminPolicy {
     }
 }
 
+/// Ranges as `doctor` shows them, such as `60578-60705, 65534-65535`.
+fn ranges(ranges: &[[u32; 2]]) -> String {
+    if ranges.is_empty() {
+        return "none".to_owned();
+    }
+    ranges
+        .iter()
+        .map(|[first, last]| format!("{first}-{last}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn subordinate_file(accounts: &SystemAccounts) -> String {
+    if accounts.subordinate_uid_file.as_os_str().is_empty() {
+        "off".to_owned()
+    } else {
+        accounts.subordinate_uid_file.display().to_string()
+    }
+}
+
 fn source_of(in_file: bool) -> Source {
     if in_file {
         Source::File
@@ -390,15 +398,6 @@ fn source_of(in_file: bool) -> Source {
 
 /// `UID_MIN` from the text of `/etc/login.defs`, if it sets one.
 pub fn uid_min_from_login_defs(text: &str) -> Option<u32> {
-    login_defs_number(text, "UID_MIN")
-}
-
-/// `UID_MAX` from the text of `/etc/login.defs`, if it sets one.
-pub fn uid_max_from_login_defs(text: &str) -> Option<u32> {
-    login_defs_number(text, "UID_MAX")
-}
-
-fn login_defs_number(text: &str, key: &str) -> Option<u32> {
     // The last setting wins, as in login.defs readers.
     text.lines()
         .rev()
@@ -406,32 +405,32 @@ fn login_defs_number(text: &str, key: &str) -> Option<u32> {
         .filter(|line| !line.starts_with('#'))
         .filter_map(|line| {
             let mut words = line.split_whitespace();
-            (words.next() == Some(key)).then(|| words.next()).flatten()
+            (words.next() == Some("UID_MIN"))
+                .then(|| words.next())
+                .flatten()
         })
         .find_map(|value| value.parse::<u32>().ok())
 }
 
-/// The host's ordinary user IDs: `UID_MIN` and `UID_MAX` from `/etc/login.defs`, else 1000 and
-/// 60000.
-pub fn host_users() -> HostUsers {
-    let text = std::fs::read_to_string("/etc/login.defs").unwrap_or_default();
-    HostUsers {
-        uid_min: uid_min_from_login_defs(&text).unwrap_or(HostUsers::DEFAULTS.uid_min),
-        uid_max: uid_max_from_login_defs(&text).unwrap_or(HostUsers::DEFAULTS.uid_max),
-    }
+/// The host's first ordinary user ID: `UID_MIN` from `/etc/login.defs`, else 1000.
+pub fn host_uid_min() -> u32 {
+    std::fs::read_to_string("/etc/login.defs")
+        .ok()
+        .and_then(|text| uid_min_from_login_defs(&text))
+        .unwrap_or(DEFAULT_UID_MIN)
 }
 
 /// Loads the policy from `POLICY_DIR`, which root must own.
 #[cfg(unix)]
 pub fn load() -> Result<AdminPolicy> {
-    load_from(std::path::Path::new(POLICY_DIR), 0, host_users())
+    load_from(std::path::Path::new(POLICY_DIR), 0, host_uid_min())
 }
 
 /// Loads the policy from `dir`, which `owner` must own and only `owner` may write.
 ///
 /// The broker passes root's user ID; tests pass their own to reach the same checks.
 #[cfg(unix)]
-pub fn load_from(dir: &std::path::Path, owner: u32, host: HostUsers) -> Result<AdminPolicy> {
+pub fn load_from(dir: &std::path::Path, owner: u32, host_uid_min: u32) -> Result<AdminPolicy> {
     use std::io::Read;
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
@@ -452,7 +451,7 @@ pub fn load_from(dir: &std::path::Path, owner: u32, host: HostUsers) -> Result<A
     {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return AdminPolicy::defaults(host);
+            return AdminPolicy::defaults(host_uid_min);
         }
         Err(error) => {
             return Err(error).with_context(|| {
@@ -480,7 +479,7 @@ pub fn load_from(dir: &std::path::Path, owner: u32, host: HostUsers) -> Result<A
         "the policy file {} is larger than {MAX_POLICY_BYTES} bytes",
         path.display()
     );
-    AdminPolicy::parse(&text, host)
+    AdminPolicy::parse(&text, host_uid_min)
         .with_context(|| format!("the policy file {} was refused", path.display()))
 }
 
@@ -500,4 +499,134 @@ fn check_owner_and_mode(path: &std::path::Path, uid: u32, mode: u32, owner: u32)
         );
     }
     Ok(())
+}
+
+/// Read at most this much of the subordinate user ID file.
+const MAX_SUBORDINATE_BYTES: u64 = 1024 * 1024;
+
+/// The file's device, inode, size, and modification and status change times, to see when its
+/// text may have changed.
+type FileStamp = (u64, u64, u64, i64, i64, i64, i64);
+
+/// The subordinate user ID file for the memory shares, checked each pass and read again when it
+/// changes. The broker trusts it as it trusts the policy: a regular file that root owns and only
+/// root may write.
+/// While it is missing, refused or turned off, it maps nothing and each such user ID counts as
+/// itself (001 FR-059).
+#[derive(Debug, Default)]
+pub struct SubordinateFile {
+    seen: Option<(std::path::PathBuf, FileStamp)>,
+    ids: Option<crate::telemetry::subuid::SubordinateIds>,
+}
+
+impl SubordinateFile {
+    /// Checks `accounts.subordinate_uid_file` on every call and reads it again when it changed.
+    /// `owner` is the user ID that must own it: root's for the broker, the test's own in tests.
+    #[cfg(unix)]
+    pub fn refresh(&mut self, accounts: &SystemAccounts, owner: u32) -> Result<()> {
+        let path = &accounts.subordinate_uid_file;
+        let seen = self
+            .seen
+            .as_ref()
+            .filter(|(seen_path, _)| seen_path == path)
+            .map(|(_, stamp)| *stamp);
+        let read = if path.as_os_str().is_empty() {
+            Ok(Subordinate::Missing)
+        } else {
+            read_subordinate_file(path, owner, seen)
+        };
+        match read {
+            Ok(Subordinate::Unchanged) => Ok(()),
+            Ok(Subordinate::Read(text, stamp)) => {
+                self.ids = Some(crate::telemetry::subuid::SubordinateIds::from_text(&text));
+                self.seen = Some((path.clone(), stamp));
+                Ok(())
+            }
+            Ok(Subordinate::Missing) => {
+                *self = Self::default();
+                Ok(())
+            }
+            Err(error) => {
+                *self = Self::default();
+                Err(error)
+            }
+        }
+    }
+
+    /// The user ID a process counts as for the shares: its range's owner, else itself.
+    pub fn owner(&self, uid: u32) -> u32 {
+        self.ids.as_ref().map_or(uid, |ids| ids.owner(uid))
+    }
+}
+
+#[cfg(unix)]
+fn file_stamp(meta: &std::fs::Metadata) -> FileStamp {
+    use std::os::unix::fs::MetadataExt;
+    (
+        meta.dev(),
+        meta.ino(),
+        meta.size(),
+        meta.mtime(),
+        meta.mtime_nsec(),
+        meta.ctime(),
+        meta.ctime_nsec(),
+    )
+}
+
+/// What a check of the subordinate user ID file found.
+#[cfg(unix)]
+enum Subordinate {
+    Missing,
+    Unchanged,
+    Read(String, FileStamp),
+}
+
+/// Opens and checks the file on every call, so a change of owner or mode is seen at once even
+/// when the file's times do not move; reads it only when its stamp differs from `seen`.
+#[cfg(unix)]
+fn read_subordinate_file(
+    path: &std::path::Path,
+    owner: u32,
+    seen: Option<FileStamp>,
+) -> Result<Subordinate> {
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    let mut file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Subordinate::Missing);
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("{} could not be opened", path.display()));
+        }
+    };
+    let meta = file
+        .metadata()
+        .with_context(|| format!("{} could not be read", path.display()))?;
+    ensure!(
+        meta.file_type().is_file(),
+        "{} is not a regular file",
+        path.display()
+    );
+    check_owner_and_mode(path, meta.uid(), meta.mode(), owner)?;
+    let stamp = file_stamp(&meta);
+    if seen == Some(stamp) {
+        return Ok(Subordinate::Unchanged);
+    }
+    let mut text = String::new();
+    (&mut file)
+        .take(MAX_SUBORDINATE_BYTES + 1)
+        .read_to_string(&mut text)
+        .with_context(|| format!("{} is not UTF-8 text", path.display()))?;
+    ensure!(
+        text.len() as u64 <= MAX_SUBORDINATE_BYTES,
+        "{} is larger than {MAX_SUBORDINATE_BYTES} bytes",
+        path.display()
+    );
+    Ok(Subordinate::Read(text, stamp))
 }

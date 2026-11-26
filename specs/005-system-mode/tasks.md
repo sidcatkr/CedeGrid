@@ -374,7 +374,7 @@ estimated in advance. Results go to `docs/validation.md` with the commit.
 - [x] T073 Prepare the pre-release security review package listing the files of research R14 at the release candidate's commit, in `specs/005-system-mode/security-review.md`. The review runs separately, before release.
   - *Done:* `specs/005-system-mode/security-review.md` lists what the review checks and, per file, the tests that pin it; it is updated again at the release candidate's commit.
   - *Drafted* at the branch's current state; it is refreshed at the release candidate's commit.
-- [x] T074 Follow 001 FR-059's upper bound (001 T632) in the broker: `principals.uid_max` in `src/broker/admin_policy.rs` (default the host's `UID_MAX`, else 60000; at least `uid_min`), principals in `src/broker/oom.rs` from `uid_min` to `uid_max`, and FR-004's caller check in `src/broker/peer.rs` refusing user IDs above the host's `UID_MAX`, with tests in `tests/system_mode.rs` and the policy contract, protocol contract and `docs/system-mode.md` updated (Session 2026-11-26)
+- [x] T074 Follow 001 FR-059's system accounts (001 T632, T635) in the broker: `[principals.system_accounts]` in `src/broker/admin_policy.rs` as 001's `SystemAccounts` type with its defaults, no ranges of the broker's own; principals in `src/broker/oom.rs` are people only, with a subordinate user ID's memory counted toward its owner from a root-owned `/etc/subuid` (`SubordinateFile`); FR-004's caller check refuses the ranges after the policy loads in `src/broker/server.rs`; tests in `tests/system_mode.rs`; the policy and protocol contracts, data model, security review and `docs/system-mode.md` updated (Session 2026-11-26)
 
 ---
 

@@ -7,7 +7,7 @@ except the in-memory rate limits and the last score written.
 
 | Field | Source | Rule |
 |---|---|---|
-| `uid` | `SO_PEERCRED` | never from a request (FR-003); 0 and IDs below `UID_MIN` or above `UID_MAX` refused (FR-004) |
+| `uid` | `SO_PEERCRED` | never from a request (FR-003); 0, IDs below `UID_MIN` and IDs in `principals.system_accounts.uid_ranges` refused (FR-004) |
 | `gid` | the account's primary group in the passwd database | used for the units' `Group=` |
 | `member` | the group database at request time | must be true (FR-004) |
 | `peer_pidfd` | `SO_PEERPIDFD` where present (Linux 6.5) | logging only |

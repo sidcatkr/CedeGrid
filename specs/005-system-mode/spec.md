@@ -67,9 +67,9 @@ is pending the user's choice.
   cluster mode, as 003 FR-002 already requires (`run` reuses an agent in cluster mode), and one
   agent per user in phase 1 (brief, open point 6).
 - Q: Which users count when the broker computes each user's memory fair share? → A: 001 FR-059's
-  principals: user IDs from `uid_min` to `uid_max` (the upper bound since 2026-11-26) whose usage
-  has stayed at or above `principal_min_percent`; other user IDs are background demand subtracted
-  from capacity. The broker takes these thresholds from the administrator policy, never from a
+  principals: people, user IDs at or above `uid_min` outside the system ranges (since
+  2026-11-26), whose usage has stayed at or above `principal_min_percent`; other user IDs are
+  background demand subtracted from capacity. The broker takes these thresholds from the administrator policy, never from a
   user's configuration, since it trusts no figure from a user (brief).
 
 **Decisions needed (pending the user's choice)**
@@ -135,14 +135,15 @@ is pending the user's choice.
 
 ### Session 2026-11-26
 
-- Q: 001 FR-059 now counts user IDs above `contention.uid_max` (60000, as `UID_MAX` in
-  `login.defs`) as system accounts (001 T632, user, 2026-11-24). Does the broker follow it? → A:
-  Yes, in both places it tells users from system accounts. The memory shares count users from
-  `principals.uid_min` to the new `principals.uid_max`, whose default is the host's `UID_MAX`
-  (else 60000); higher user IDs are background demand subtracted from capacity. The caller check
-  refuses user IDs above the host's `UID_MAX` as it refuses those below `UID_MIN` (FR-004), since
-  they are system accounts: a display manager's greeter account, systemd's dynamic users and
-  `nobody`.
+- Q: 001 FR-059 now counts systemd's ranges that hold no people (dynamic greeter users, dynamic
+  service users, `nobody`) as system accounts, configurable in `[contention.system_accounts]`,
+  and a user ID in a `/etc/subuid` range as that range's owner (001 T635; user, 2026-11-26: no
+  hard-coded ranges, they must be configurable). Does the broker follow it? → A: Yes, with the
+  same type and defaults as `[principals.system_accounts]` in the administrator policy, and no
+  ranges of its own. The memory shares count only people; a subordinate user ID's memory counts
+  toward its owner. The caller check refuses user IDs in the ranges as it refuses those below
+  `UID_MIN` (FR-004). The broker reads the subordinate file only when root owns it and only root
+  may write it, as it reads the policy; otherwise it maps nothing.
 
 ## Terms
 
@@ -329,8 +330,8 @@ it, but the feature can be tested before packaging exists.
 - A user is removed from the group while their units run: the next request is refused. What
   happens to the running units is pending decision N2 (recommended: they run until their work
   ends, then stop).
-- A caller with user ID 0, or a system account below the host's first user ID or above its last
-  (`UID_MAX`): refused.
+- A caller with user ID 0, or a system account below the host's first user ID or in the
+  policy's system ranges: refused.
 - A caller inside a user namespace or container: the peer credentials as the broker's namespace
   sees them decide; a user ID that maps to no account is refused.
 - A user's unit reaches `TasksMax=`: new processes in it fail as the kernel decides; `doctor` and
@@ -373,7 +374,8 @@ it, but the feature can be tested before packaging exists.
   capability MUST be refused as a whole and logged.
 - **FR-004**: The broker MUST serve only callers that are members of the `cedegrid` group in the
   host's group database at the time of the request. It MUST refuse user ID 0 and system
-  accounts: those below the host's first ordinary user ID or above its last (`UID_MAX`).
+  accounts: those below the host's first ordinary user ID or in the policy's
+  `principals.system_accounts.uid_ranges`.
 - **FR-005**: The broker MUST accept only this closed set of requests, each about the caller's own
   units: start, stop, status, and move a job of the caller's between the caller's two units. Any
   other request MUST be refused.

@@ -4,7 +4,6 @@
 //! from the host's group database at each request, so a removal takes effect at once.
 
 use super::GROUP;
-use super::admin_policy::HostUsers;
 use super::request::{Refusal, RefusalCode};
 use anyhow::{Context, Result, bail};
 use std::ffi::{CStr, CString};
@@ -190,17 +189,17 @@ impl Accounts for HostAccounts {
 /// The caller, once checked.
 pub type Caller = super::units::Caller;
 
-/// Checks the caller: never user ID 0 or a system account outside the host's ordinary user IDs,
-/// and a member of the group now (FR-004). An unreadable database refuses.
+/// Checks the caller: never user ID 0 or below the host's first ordinary user ID, and a member
+/// of the group now (FR-004). An unreadable database refuses.
 pub fn authorize(
     peer: PeerCredentials,
     accounts: &dyn Accounts,
-    host: HostUsers,
+    host_uid_min: u32,
 ) -> Result<Caller, Refusal> {
-    if peer.uid == 0 || !host.contains(peer.uid) {
+    if peer.uid == 0 || peer.uid < host_uid_min {
         return Err(Refusal::new(
             RefusalCode::RefusedAccount,
-            "root and system accounts (outside UID_MIN to UID_MAX) cannot use System mode; connect as a regular user",
+            "root and system accounts (below UID_MIN) cannot use System mode; connect as a regular user",
         ));
     }
     match accounts.is_member(peer.uid) {

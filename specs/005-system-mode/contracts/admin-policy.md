@@ -24,8 +24,11 @@ locked_memory_mib = 0        # LimitMEMLOCK=; 0 means systemd's default
 
 [principals]
 uid_min = 1000               # 001 FR-059, used by the OOM loop; default from login.defs UID_MIN
-uid_max = 60000              # 001 FR-059 (T632), used by the OOM loop; default from login.defs UID_MAX, at least uid_min
 principal_min_percent = 1    # 001 FR-059's default
+
+[principals.system_accounts]  # 001 FR-059 (T635): the same type and defaults as [contention.system_accounts]
+uid_ranges = [[60578, 60705], [61184, 65519], [65534, 65535]]  # default: systemd's ranges that hold no people
+subordinate_uid_file = "/etc/subuid"  # default; empty turns the owner mapping off
 
 [units]
 pam_session = "none"         # N3: "none" (default), "cedegrid" or "login"
@@ -33,6 +36,12 @@ ordinary_slice = "auto"      # N4: "auto" (default), "user" or "cedegrid"
 ```
 
 - Every section uses `deny_unknown_fields`. An unknown key refuses the file.
+- `principals.system_accounts` is 001's `SystemAccounts` type, so its defaults and checks are the
+  agent's: each range is `[first, last]` with first at most last, and the file path is absolute
+  or empty. A user ID at or above `uid_min` and in a range is a system account: background demand
+  for the memory shares, and refused as a caller (FR-004). The broker reads the subordinate user
+  ID file only when it is a regular file that root owns and only root may write, at most 1 MiB,
+  again whenever it changes; otherwise it maps nothing and each such user ID counts as itself.
 - `units.pam_session` (user decision N3 of 2026-11-17): `none` opens no PAM session and the
   `limits` section sets the units' process limits; `cedegrid` sets `PAMName=cedegrid`, a PAM
   service the administrator provides with only `pam_limits`; `login` uses the host's `login`

@@ -12,7 +12,6 @@ use super::score::{
 use super::units::UnitKind;
 use crate::contention::max_min_shares;
 use std::collections::{BTreeMap, BTreeSet};
-use std::ops::RangeInclusive;
 use std::time::{Duration, Instant};
 
 /// How long a user's memory must stay at or above the threshold to become a principal
@@ -59,8 +58,8 @@ pub fn memory_by_user(samples: &[ProcessSample]) -> UserMemoryMap {
     map
 }
 
-/// Principal membership over time (001 FR-059): user IDs in `users`, `uid_min` to `uid_max`,
-/// whose memory has stayed at or above `principal_min_percent` of capacity join after
+/// Principal membership over time (001 FR-059): users, as `is_user` tells them from system
+/// accounts, whose memory has stayed at or above `principal_min_percent` of capacity join after
 /// `PRINCIPAL_JOIN`, and leave after `PRINCIPAL_LEAVE` below it. Unknown memory counts as at the
 /// threshold (Principle III).
 #[derive(Clone, Debug, Default)]
@@ -80,13 +79,13 @@ impl Principals {
         now: Instant,
         memory: &UserMemoryMap,
         capacity_pages: u64,
-        users: RangeInclusive<u32>,
+        is_user: &dyn Fn(u32) -> bool,
         principal_min_percent: u8,
     ) -> &BTreeSet<u32> {
         let threshold = capacity_pages.saturating_mul(u64::from(principal_min_percent)) / 100;
         let mut seen = BTreeSet::new();
         for (&uid, &pages) in &memory.by_user {
-            if !users.contains(&uid) {
+            if !is_user(uid) {
                 continue;
             }
             seen.insert(uid);
@@ -625,7 +624,9 @@ impl OomLoop {
     /// One pass: computes each unit user's writes and makes them through `access`.
     ///
     /// Only processes inside a scored unit, with the unit's user and group IDs, matching the scan
-    /// by start time, are read or written (Principle I, N6).
+    /// by start time, are read or written (Principle I, N6). `account_of` gives the account a
+    /// process's memory counts toward, its subordinate range's owner or its own user ID; it
+    /// never changes which processes are written.
     #[allow(clippy::too_many_arguments)]
     pub fn pass(
         &mut self,
@@ -634,7 +635,8 @@ impl OomLoop {
         units: &[ScoredUnit],
         pids_of: &dyn Fn(&ScoredUnit) -> Vec<u32>,
         access: &dyn ProcessAccess,
-        users: RangeInclusive<u32>,
+        is_user: &dyn Fn(u32) -> bool,
+        account_of: &dyn Fn(u32) -> u32,
         principal_min_percent: u8,
         lowering: Lowering,
         marking: OverShareMarking,
@@ -642,7 +644,10 @@ impl OomLoop {
         let samples: Vec<ProcessSample> = host
             .processes
             .values()
-            .map(|process| process.sample)
+            .map(|process| ProcessSample {
+                uid: process.sample.uid.map(account_of),
+                ..process.sample
+            })
             .collect();
         let memory = memory_by_user(&samples);
         let principals = self
@@ -651,7 +656,7 @@ impl OomLoop {
                 now,
                 &memory,
                 host.capacity_pages,
-                users,
+                is_user,
                 principal_min_percent,
             )
             .clone();

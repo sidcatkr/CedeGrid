@@ -71,8 +71,11 @@ tasks_max = 4096
 
 [principals]
 uid_min = 1000
-uid_max = 60000
 principal_min_percent = 1
+
+[principals.system_accounts]
+uid_ranges = [[60578, 60705], [61184, 65519], [65534, 65535]]
+subordinate_uid_file = "/etc/subuid"
 
 [units]
 pam_session = "none"
@@ -90,7 +93,8 @@ ordinary_slice = "auto"
 | `limits.tasks_max` | 4096 | `TasksMax=` on each unit |
 | `limits.open_files`, `processes`, `locked_memory_mib` | systemd defaults | `LimitNOFILE=`, `LimitNPROC=`, `LimitMEMLOCK=` when `pam_session = "none"` |
 | `principals.uid_min` | `UID_MIN` from `/etc/login.defs`, else 1000 | lowest user ID counted as a user for memory shares |
-| `principals.uid_max` | `UID_MAX` from `/etc/login.defs`, else 60000 | highest user ID counted as a user for memory shares; higher ones, such as a display manager's greeter account or `nobody`, are system accounts |
+| `principals.system_accounts.uid_ranges` | systemd's ranges that hold no people: dynamic greeter users, dynamic service users, and `nobody` with the 16-bit -1 | user IDs at or above `uid_min` that are system accounts too: background demand for memory shares, and refused as callers. The same table and defaults as the agent's `[contention.system_accounts]`; add container ranges here if no people are mapped into them |
+| `principals.system_accounts.subordinate_uid_file` | `/etc/subuid` | a user ID in one of its ranges counts as the range's owner for memory shares; the broker reads it only when root owns it and only root may write it, else, or when empty, it maps nothing |
 | `principals.principal_min_percent` | 1 | memory share of the host above which a user counts |
 | `units.pam_session` | `none` | `none`: no PAM session; `cedegrid`: `PAMName=cedegrid`, a service you provide with only `pam_limits`; `login`: the host's `login` stack |
 | `units.ordinary_slice` | `auto` | `auto`: `user-<uid>.slice` when `user.slice` passes the cpu controller to account slices, else `cedegrid.slice`; `user` or `cedegrid` forces one |

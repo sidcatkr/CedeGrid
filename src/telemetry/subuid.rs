@@ -8,7 +8,7 @@ use std::time::SystemTime;
 
 /// The subordinate ranges, read again whenever the file changes.
 #[derive(Debug)]
-pub(super) struct SubordinateIds {
+pub(crate) struct SubordinateIds {
     path: PathBuf,
     modified: Option<SystemTime>,
     /// Each range as its first user ID, last user ID and owner's user ID.
@@ -21,6 +21,15 @@ impl SubordinateIds {
             path: path.into(),
             modified: None,
             ranges: Vec::new(),
+        }
+    }
+
+    /// The ranges in a file's text that its caller has read and checked; nothing is read again.
+    pub(crate) fn from_text(text: &str) -> Self {
+        Self {
+            path: PathBuf::new(),
+            modified: None,
+            ranges: parse(text, user_id),
         }
     }
 
@@ -44,7 +53,7 @@ impl SubordinateIds {
     }
 
     /// The user ID a process counts as: its range's owner, else itself.
-    pub(super) fn owner(&self, uid: u32) -> u32 {
+    pub(crate) fn owner(&self, uid: u32) -> u32 {
         self.ranges
             .iter()
             .find(|(first, last, _)| (*first..=*last).contains(&uid))

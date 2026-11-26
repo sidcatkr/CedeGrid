@@ -114,11 +114,13 @@
   directory to match.
 - **Neutral is the default.** A configuration without mode settings runs every resource in
   Neutral, and `config_version = 1` files load unchanged.
-- **User IDs above `UID_MAX` are system accounts in System mode too.** The broker's memory
-  shares count users from `principals.uid_min` to the new `principals.uid_max` (default the
-  host's `UID_MAX` from `/etc/login.defs`, else 60000), and the broker refuses callers above the
-  host's `UID_MAX` as it refuses those below `UID_MIN`, such as a display manager's greeter
-  account or `nobody`.
+- **System mode tells people from system accounts as the agent does.** The broker's policy
+  takes the agent's `[contention.system_accounts]` table as `[principals.system_accounts]`, with
+  the same defaults: systemd's ranges that hold no people (dynamic greeter and service users and
+  `nobody`) are system accounts, and a user ID in a `/etc/subuid` range counts as the range's
+  owner. Memory shares count only people, and the broker refuses callers in those ranges as it
+  refuses those below `UID_MIN`. The broker reads the subordinate file only when root owns it and
+  only root may write it.
 - **Legacy GPU keys are interpreted.** `gpu.execution_mode` applies to GPU resources without an
   explicit mode: absent, `auto`, `contention_aware` and `best_effort_occupied` mean Neutral;
   `conservative_non_sharing` sets `contention.never_share_occupied_gpus = true`. Every value
