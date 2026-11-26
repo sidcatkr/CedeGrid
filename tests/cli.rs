@@ -2095,3 +2095,68 @@ mod setup_screen {
         ));
     }
 }
+
+/// `doctor` opens with a checklist (003 FR-071, SC-010): each check passed (✓) or failed (✗)
+/// with a one-line fix hint, including that it runs as a user other than root (FR-082) and
+/// which contention evidence is available; `[ok]` and `[fail]` under `NO_COLOR`; the same checks
+/// in JSON.
+#[test]
+fn doctor_shows_a_checklist_with_fix_hints() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = setup(dir.path());
+    let doctor = |env: &[(&str, &str)]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cedegrid"));
+        command
+            .arg("--config")
+            .arg(&path)
+            .args(["doctor", "--text"])
+            .env_remove("NO_COLOR")
+            .env("LANG", "C.UTF-8");
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let output = command.output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let text = doctor(&[]);
+    assert!(text.contains("\nChecks\n"), "{text}");
+    assert!(
+        text.contains("  \u{2713} runs as a user other than root"),
+        "{text}"
+    );
+    assert!(text.contains("contention evidence"), "{text}");
+    // Every failed check carries its fix.
+    let lines: Vec<&str> = text.lines().collect();
+    for (index, line) in lines.iter().enumerate() {
+        if line.starts_with("  \u{2717} ") {
+            assert!(
+                lines
+                    .get(index + 1)
+                    .is_some_and(|next| next.starts_with("      fix: ")),
+                "{line} has no fix: {text}"
+            );
+        }
+    }
+    let plain = doctor(&[("NO_COLOR", "1")]);
+    assert!(
+        plain.contains("  [ok] runs as a user other than root"),
+        "{plain}"
+    );
+    assert!(
+        !plain.contains('\u{2713}') && !plain.contains('\u{2717}'),
+        "{plain}"
+    );
+    let json = success_json(run(&path, &["doctor"]));
+    let checks = json["checks"].as_array().expect("checks in JSON");
+    let root = checks
+        .iter()
+        .find(|check| check["name"] == "runs as a user other than root")
+        .expect("the root check");
+    assert_eq!(root["passed"], true);
+    assert!(
+        checks
+            .iter()
+            .all(|check| check["passed"] == true || check["fix"].is_string())
+    );
+}

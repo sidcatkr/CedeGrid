@@ -234,8 +234,9 @@ Native gates and docs:
 
 **Independent test**: a clean account and `doctor` with and without delegation.
 
-- [ ] T067 [P] [US5] Test first in tests/cli.rs: `doctor` prints ✓/✗ per check with a fix hint, the control level with its reason, and evidence coverage; it falls back to `[ok]`/`[fail]` under `NO_COLOR`, and supports `--json` (SC-010).
-- [ ] T068 [US5] Implement the checks in src/explain.rs.
+- [X] T067 [P] [US5] Test first in tests/cli.rs: `doctor` prints ✓/✗ per check with a fix hint, the control level with its reason, and evidence coverage; it falls back to `[ok]`/`[fail]` under `NO_COLOR`, and supports `--json` (SC-010).
+- [X] T068 [US5] Implement the checks in src/explain.rs.
+  - *The control level line joins when T011's `control_level::detect_now()` lands: `CheckInputs.level`.*
 - [ ] T069 [US5] Write the install and first-run guide in README.md and docs/, with generic text only, including when to submit many independent pieces of work as separate tasks (FR-062).
 
 ## Phase 10: Polish and cross-cutting
@@ -281,7 +282,7 @@ Root refusal (FR-082, SC-011):
 - [ ] T088 [P] [US5] Test first in tests/control_level.rs (`control_level_ignores_sudo`): detection gives the same level with and without `SUDO_UID`, `SUDO_USER` and `SUDO_COMMAND` set and for any install path, and its recorded inputs hold none of them. Per FR-082 (missing)
 - [ ] T089 [US5] Make src/control_level.rs (T011) take only the user manager, delegation and the authorized controls, until T088 passes. Per FR-082 (missing)
 - [ ] T090 [US5] Add a step to .github/workflows/ci.yml on the Ubuntu runner: `sudo -n target/debug/cedegrid <command>` for every subcommand, expecting the one line and exit 3. Per SC-011 (missing)
-- [ ] T091 [US5] Extend T067's test in tests/cli.rs with `✓ runs as a user other than root`, then add the check in src/explain.rs. Per FR-071, FR-082 (missing)
+- [X] T091 [US5] Extend T067's test in tests/cli.rs with `✓ runs as a user other than root`, then add the check in src/explain.rs. Per FR-071, FR-082 (missing)
 
 Install channel (FR-073, SC-012):
 - [ ] T092 [P] [US5] Test first in tests/test_install_script.py (standard library only): tools/install.sh against local release assets served on loopback, with `HOME` set to an empty temporary directory. It installs `~/.local/bin/cedegrid` at the pinned version. A changed tarball byte, a tarball with no `SHA256SUMS` line, or no `sha256sum` or `shasum` on `PATH` stops it with nothing installed. With an `id -u` stub that prints 0 it refuses. It says when `~/.local/bin` is not on `PATH`. Per FR-073, SC-012 (missing)

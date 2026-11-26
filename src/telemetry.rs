@@ -486,6 +486,26 @@ fn process_uid(process: &sysinfo::Process) -> Option<u32> {
     }
 }
 
+/// Whether `/proc` hides other users' processes (`hidepid`), from this process's mount table;
+/// None where it cannot be read or there is no `/proc` (003 FR-050).
+pub fn proc_hides_other_users() -> Option<bool> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    let mounts = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+    let proc = mounts.lines().find(|line| {
+        let mut fields = line.split_whitespace();
+        fields.nth(4) == Some("/proc")
+    })?;
+    let options = proc.split(" - ").nth(1)?.split_whitespace().nth(2)?;
+    Some(options.split(',').any(|option| {
+        matches!(
+            option,
+            "hidepid=1" | "hidepid=2" | "hidepid=noaccess" | "hidepid=invisible"
+        )
+    }))
+}
+
 /// The UID this process runs as, which is the owner principal.
 fn owner_uid() -> Option<u32> {
     #[cfg(unix)]
